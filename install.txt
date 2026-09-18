@@ -1,0 +1,20 @@
+Product Recognition
+===================
+
+Identifies which product an image shows, from the pixels, using DINOv2 nearest-neighbour
+retrieval against a reference set derived from an existing category-tree field.
+
+This plugin does not create that field. Point it at one you already have.
+
+1. Install and activate the plugin (Admin → System → Plugins).
+2. Run the companion service (plugins/product_recognition/scripts/). See scripts/README.md.
+3. Open the plugin setup page and set:
+   - Product field — a category tree whose leaf nodes are the products to recognise
+   - Service URL — default http://product-recognition:8001 on a Docker network
+   - Optional variant field, resource types, lifestyle segment classes
+4. Nightly cron (or the CLI) builds references from tagged resources, embeds previews,
+   calibrates per-product thresholds, and opens suggestions for review.
+5. Grant "Accept product suggestions" to the groups that may write tags from the queue.
+
+Auto-apply is off until you turn it on. Suggestions never overwrite a product tag that
+is already on the resource.

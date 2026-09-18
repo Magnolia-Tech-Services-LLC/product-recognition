@@ -1,0 +1,11 @@
+ref,int(11),NO,PRI,,auto_increment
+resource,int(11),NO,MUL,,
+model_node,int(11),NO,,,
+confidence,double,YES,,,
+top_similarity,double,YES,,,
+top_reference,int(11),YES,,,
+rank_order,int(11),NO,,1,
+state,varchar(10),NO,,'open',
+decided_by,int(11),YES,,,
+decided_at,datetime,YES,,,
+created,datetime,YES,,CURRENT_TIMESTAMP,

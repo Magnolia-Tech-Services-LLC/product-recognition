@@ -1,0 +1,1 @@
+product_suggestion,1,resource,1,resource,A,0,,,,BTREE,
