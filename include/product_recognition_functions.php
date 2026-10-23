@@ -333,11 +333,12 @@ function pr_reference_action(?array $current, int $model_node): string
 /**
  * A derived row already on Name must survive --references while leftover
  * Family or Model-tree refs are still pending. Relabel would write the
- * Family node back over it.
+ * Family node back over it. Once nothing is pending, wanted is on Name too,
+ * so a retag (Ryder to Ryder S-Class) must relabel.
  */
-function pr_sync_keeps_name_binding(string $action, bool $existing_on_name_field): bool
+function pr_sync_keeps_name_binding(string $action, bool $existing_on_name_field, bool $pending): bool
 {
-    return $action === 'relabel' && $existing_on_name_field;
+    return $pending && $action === 'relabel' && $existing_on_name_field;
 }
 
 /**
@@ -749,9 +750,10 @@ function pr_sync_references(bool $dry_run = false): array
         }
     }
 
+    $pending = pr_pending_tree_field() > 0;
     $name_bound = [];
     $name_field = pr_field_ref_by_name('modelkeyword');
-    if ($name_field > 0) {
+    if ($pending && $name_field > 0) {
         foreach (ps_query(
             "SELECT pr.resource FROM product_reference pr
                JOIN node n ON n.ref = pr.model_node
@@ -813,7 +815,7 @@ function pr_sync_references(bool $dry_run = false): array
                 break;
 
             case 'relabel':
-                if (pr_sync_keeps_name_binding('relabel', isset($name_bound[$resource]))) {
+                if (pr_sync_keeps_name_binding('relabel', isset($name_bound[$resource]), $pending)) {
                     break;
                 }
                 $stats['updated']++;
@@ -2361,9 +2363,8 @@ function pr_cron_due(): bool
  * The nightly pass: sheet import, studio seed, references, then a bounded embedding
  * slice, then calibration, then classification. One lock across the whole pass.
  *
- * The hook that calls this also waits ~20 hours between successes so a short cron
- * interval does not re-run a 30-minute pass the moment the lock drops. CLI --all still
- * runs on demand and records the timestamp so the next unattended tick backs off.
+ * product-recognition.timer runs this through CLI --all; the cron.php hook no longer
+ * does. A successful pass still records product_recognition_last_run.
  *
  * The backfill can outrun its window by design - the full library is ~12 hours - so a slow
  * night must not overlap the next. A second run exits immediately rather than embedding the
@@ -2379,8 +2380,18 @@ function pr_run_all(): array
     }
 
     $out = pr_with_lock(function () use ($product_recognition_batch, $product_recognition_classify_batch) {
-        $sheet = pr_import_master_sheet(false);
-        $studio = pr_studio_seed(false);
+        # Sheet and studio are head-start stages. A throw there (DB error, a rethrown
+        # pr_sheet_replace) must not cost the night its references, backfill, and classify.
+        try {
+            $sheet = pr_import_master_sheet(false);
+        } catch (Throwable $e) {
+            $sheet = ['error' => 'sheet import threw: ' . $e->getMessage()];
+        }
+        try {
+            $studio = pr_studio_seed(false);
+        } catch (Throwable $e) {
+            $studio = ['error' => 'studio seed threw: ' . $e->getMessage()];
+        }
         if (function_exists('logScript')) {
             $sheet_note = (string)($sheet['error'] ?? '');
             $studio_note = (string)($studio['error'] ?? '');
@@ -3339,18 +3350,17 @@ function pr_apply_catalog_pick(
 }
 
 /**
- * !list token (colon-separated). Empty input is empty — do not emit a bare `!list`.
- *
- * @param list<int> $refs
- */
-/**
  * @@ search AND-ing every non-empty product field. A missing node fails closed
  * so a family-only pick cannot drop Category or Colorway and search the family alone.
+ * No Family fails closed too: colorway alone would match every image of that colour.
  *
  * @param array<string,string> $plan
  */
 function pr_product_field_search(array $plan): string
 {
+    if (trim((string)($plan['family'] ?? '')) === '') {
+        return '';
+    }
     $parts = [];
     foreach (['family', 'productcategory', 'modelkeyword', 'edition', 'collaboration', 'clubtype', 'retailchannel', 'colorway'] as $key) {
         $value = trim((string)($plan[$key] ?? ''));
@@ -3373,6 +3383,11 @@ function pr_product_field_search(array $plan): string
     return implode(' ', $parts);
 }
 
+/**
+ * !list token (colon-separated). Empty input is empty — do not emit a bare `!list`.
+ *
+ * @param list<int> $refs
+ */
 function pr_other_match_search_token(array $refs): string
 {
     $refs = array_values(array_filter(array_map('intval', $refs), fn($n) => $n > 0));

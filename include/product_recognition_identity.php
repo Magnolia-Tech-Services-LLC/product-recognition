@@ -755,6 +755,12 @@ function pr_aggregate_neighbors(array $neighbors): array
     if ($family_share < 0.5) {
         return $empty;
     }
+    # 0.5 / 0.5 between two families clears the floor for both. arsort would then
+    # hand the suggestion to whichever neighbor came first. A tie is no Family.
+    $runner_up = array_values($family_weight)[1] ?? 0.0;
+    if (abs($family_weight[$family] - $runner_up) < 1e-9) {
+        return $empty;
+    }
     $name_weight = [];
     $nearest_similarity = [];
     $nearest_resource = [];
@@ -1062,22 +1068,32 @@ function pr_write_accept_identity(int $resource, int $family_node, string $label
         'clubtype' => pr_field_ref_by_name('clubtype') ?: pr_field_ref_by_name('club_type'),
         'retailchannel' => pr_field_ref_by_name('retailchannel') ?: pr_field_ref_by_name('retail_channel'),
     ];
+    # Fields the grammar derives from the Name. On replace, a resolved Name with no
+    # value here clears the old one: Ryder S-Class to Ryder must drop Edition S-Class.
+    # Collaboration is not in this set; the panel collaboration pick owns it.
+    $name_derived = ['edition', 'clubtype', 'retailchannel'];
     foreach ($fields as $key => $field) {
         $value = $plan[$key];
-        if ($field <= 0 || $value === '') {
+        if ($field <= 0) {
             continue;
         }
-        if (!$replace && pr_resource_field_nodes($resource, $field) !== []) {
-            $out[$key] = 'kept';
-            continue;
-        }
-        $node = pr_ensure_named_node($field, $value);
-        if ($node <= 0) {
+        if ($value === '') {
+            if ($replace && $plan['modelkeyword'] !== '' && in_array($key, $name_derived, true)) {
+                $stale = pr_resource_field_nodes($resource, $field);
+                if ($stale !== []) {
+                    delete_resource_nodes($resource, $stale, false);
+                    $out[$key] = 'wrote';
+                }
+            }
             continue;
         }
         $existing = pr_resource_field_nodes($resource, $field);
         if (!$replace && $existing !== []) {
             $out[$key] = 'kept';
+            continue;
+        }
+        $node = pr_ensure_named_node($field, $value);
+        if ($node <= 0) {
             continue;
         }
         if ($replace) {
