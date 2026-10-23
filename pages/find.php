@@ -26,6 +26,10 @@ $model_node = $model_text === ""
 $refs = pr_other_match_refs($model_node, $resource);
 $token = pr_other_match_search_token($refs);
 if ($token === "") {
-    redirect(generateURL($baseurl . "/pages/view.php", array("ref" => $resource, "pr_find" => "empty")));
+    $empty_params = ["ref" => $resource, "pr_find" => "empty"];
+    if (getval("modal", "") === "true") {
+        $empty_params["modal"] = "true";
+    }
+    redirect(generateURL($baseurl . "/pages/view.php", $empty_params));
 }
 redirect(generateURL($baseurl . "/pages/search.php", array("search" => $token)));

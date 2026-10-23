@@ -79,8 +79,8 @@ not been**, and `/segment` now also loads YOLO-World + SAM2-tiny on CPU.
 |---|---|
 | DINOv2 resident overhead, measured on top of the CLIP baseline | 0.28 GiB |
 | torch runtime baseline this process now carries alone (was shared with CLIP) | ~0.9 GiB |
-| reference matrix at library scale, 100,000 × 768 × 4 | 293 MiB |
-| rebuild transiently holds old and new matrices | +293 MiB |
+| reference matrix at the full library, 115,584 × 768 × 4 | 339 MiB |
+| rebuild transiently holds old and new matrices | +339 MiB |
 | YOLO-World v2s + SAM2-tiny weights and ultralytics runtime (CPU, unmeasured) | ~2–3 GiB |
 | **estimated total with /segment loaded** | **~5 GiB** |
 

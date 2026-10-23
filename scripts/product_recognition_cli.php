@@ -11,6 +11,8 @@
  *   php product_recognition_cli.php --calibrate [--dry-run]
  *   php product_recognition_cli.php --classify [--limit=N] [--dry-run]
  *   php product_recognition_cli.php --disagreement [--limit=N]  # default classify_batch; N=0 unlimited
+ *   php product_recognition_cli.php --regions --resource=N [--resource=M ...]
+ *   php product_recognition_cli.php --migrate-family [--dry-run]
  *   php product_recognition_cli.php --all
  */
 include_once "/var/www/html/include/boot.php";
@@ -21,7 +23,7 @@ $modes = array_slice($argv, 1);
 $dry_run = in_array('--dry-run', $modes, true);
 $mode = $modes[0] ?? '--help';
 
-if (!in_array($mode, ['--help', '-h', '--catalog'], true) && !pr_is_configured()) {
+if (!in_array($mode, ['--help', '-h', '--catalog', '--migrate-family'], true) && !pr_is_configured()) {
     fwrite(STDERR, "product_recognition: configure the product field on the plugin setup page first\n");
     exit(1);
 }
@@ -48,6 +50,29 @@ $pr_cli_run = function (callable $fn) use ($dry_run) {
 };
 
 switch ($mode) {
+    case '--migrate-family':
+        $stats = $pr_cli_run(fn() => pr_migrate_to_family($dry_run));
+        if ($stats === null) {
+            exit(0);
+        }
+        if (!empty($stats['error'])) {
+            fwrite(STDERR, "product_recognition: {$stats['error']}\n");
+            exit(1);
+        }
+        printf("Family field %d\n", $stats['field']);
+        printf("  remapped references %d\n", $stats['references']);
+        printf("  family stamped      %d\n", $stats['stamped']);
+        printf("  orphaned            %d\n", $stats['orphaned']);
+        printf("  suggestions cleared %d\n", $stats['suggestions_cleared']);
+        if ($stats['field'] <= 0) {
+            fwrite(STDERR, "product_recognition: no field named family\n");
+            exit(1);
+        }
+        if ($dry_run) {
+            echo "\nDRY RUN - nothing written.\n";
+        }
+        break;
+
     case '--paths':
         $rows = ps_query("SELECT ref FROM resource WHERE ref > 0 ORDER BY ref");
         foreach ($rows as $r) {
@@ -86,6 +111,12 @@ switch ($mode) {
             printf("  CONFLICT resource %d pinned as node %d but now tagged node %d\n",
                    $c['resource'], $c['pinned_as'], $c['tagged_as']);
         }
+        if (pr_pending_tree_field() > 0) {
+            fwrite(STDERR, "product_recognition: leftover Model-tree references. "
+                . "Run --migrate-family --dry-run, then --migrate-family. "
+                . "Do not set the setup Product field to Family first. "
+                . "Derived deletes are fenced until then.\n");
+        }
         if ($dry_run) {
             echo "\nDRY RUN - nothing written.\n";
         }
@@ -114,6 +145,18 @@ switch ($mode) {
                $stats['added'], $stats['updated'], $stats['unchanged']);
         foreach ($stats['sections'] as $section => $n) {
             printf("  %-40s %3d\n", $section, $n);
+        }
+        if (isset($stats['nodes_model_created'])) {
+            printf(
+                "Nodes  model +%d/=%d  colorway +%d/=%d skip %d  collab +%d/=%d\n",
+                (int)$stats['nodes_model_created'],
+                (int)$stats['nodes_model_exists'],
+                (int)$stats['nodes_colorway_created'],
+                (int)$stats['nodes_colorway_exists'],
+                (int)$stats['nodes_colorway_skipped'],
+                (int)$stats['nodes_collab_created'],
+                (int)$stats['nodes_collab_exists']
+            );
         }
         if ($dry_run) {
             echo "\nDRY RUN - nothing written.\n";
@@ -281,6 +324,25 @@ switch ($mode) {
         }
         break;
 
+    case '--regions':
+        $refs = [];
+        foreach ($modes as $arg) {
+            if (preg_match('/^--resource=(\d+)$/', $arg, $m)) {
+                $refs[] = (int)$m[1];
+            }
+        }
+        if ($refs === []) {
+            fwrite(STDERR, "Usage: --regions --resource=N [--resource=M ...]\n");
+            exit(1);
+        }
+        foreach ($refs as $ref) {
+            ps_query('DELETE FROM product_region WHERE resource = ?', ['i', $ref]);
+            pr_purge_masks($ref);
+            $boxes = pr_ensure_regions($ref);
+            printf("%d\tregions=%d\t%s\n", $ref, count($boxes), $boxes === [] ? '(none)' : json_encode($boxes));
+        }
+        break;
+
     case '--all':
         $result = pr_run_all();
         if (!empty($result['locked'])) {
@@ -295,9 +357,20 @@ switch ($mode) {
         printf("calibration  %d model(s)\n", count($result['calibration']));
         printf("classify     suggested %d, auto-applied %d\n",
                $result['classification']['suggested'], $result['classification']['auto_applied']);
+        if (pr_pending_tree_field() > 0) {
+            fwrite(STDERR, "product_recognition: leftover Model-tree references. "
+                . "--all does not migrate. Run --migrate-family --dry-run, then --migrate-family. "
+                . "Do not set the setup Product field to Family first.\n");
+        }
+        break;
+
+    case '--help':
+    case '-h':
+        fwrite(STDOUT, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--regions|--migrate-family|--all [--dry-run]\n");
         break;
 
     default:
         fwrite(STDERR, "Unknown mode: $mode\n");
+        fwrite(STDERR, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--regions|--migrate-family|--all [--dry-run]\n");
         exit(1);
 }

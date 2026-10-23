@@ -7,15 +7,21 @@ $product_recognition_service_url = "http://product-recognition:8001";
 $product_recognition_api_key = "";
 $product_recognition_space = "dinov2";
 
-# Category-tree field whose leaf nodes are the products to recognise. 0 = not configured;
-# the plugin is inert until an admin picks a field on the setup page. Recognition writes
-# only through accept (or auto-apply); it never overwrites a value the field already has.
+# Product field. Runtime bind prefers the field named family once leftover
+# Model-tree product_reference rows are gone. Setup pointing at Family does
+# not remap those rows — --migrate-family does. 0 = not configured.
+# Recognition writes only through accept (or auto-apply); it never overwrites a value
+# the field already has.
 $product_recognition_field = 0;
 
 # Optional second field shown on the resource view next to the product (color, variant).
 # Any fixed-list type (category tree, dynamic keywords, checkbox, dropdown, radio).
 # 0 = unused.
 $product_recognition_colorway_field = 0;
+
+# Optional Collaboration / Partner field (fixed list). 0 = discover by field name
+# "collaboration" when present.
+$product_recognition_collab_field = 0;
 
 # Resource types to embed and classify. 1 = Photo in a default RS install.
 $product_recognition_resource_types = array(1, 3);
@@ -42,7 +48,8 @@ $product_recognition_classify_batch = 2000;
 $product_recognition_auto_apply = false;
 
 # Size/trim variants the pixels cannot see. Missing names are a no-op.
-$product_recognition_never_auto_apply = "";
+# Grow this list; never shorten it. Runtime also unions pr_never_auto_apply_default().
+$product_recognition_never_auto_apply = "Loma XL, Big Rig S-Class, Ryder 14, Loma Lite, El Camino Superlite, Ryder Lefty, Storm Ryder, Loma S-Class, Loma XL S-Class, El Camino S-Class, Ryder S-Class";
 
 # Comma-separated YOLO-World class names for POST /segment (lifestyle localisation).
 # Sent with each /segment request; the service also reads SEGMENT_CLASSES as a default.

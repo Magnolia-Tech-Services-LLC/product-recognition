@@ -26,9 +26,9 @@ if ($k !== '') {
 }
 
 $i = (int)getval('i', 0);
-$boxes = pr_ensure_regions($ref);
 $resource = get_resource_data($ref);
 $mask = pr_mask_file($ref, (string)$resource['file_checksum'], $i);
+$boxes = pr_cached_regions($ref);
 if (!isset($boxes[$i]) || !file_exists($mask)) {
     http_response_code(404);
     exit;

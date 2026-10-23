@@ -13,6 +13,9 @@ function HookProduct_recognitionAllCron()
         logScript("product_recognition: product field not configured; skip");
         return;
     }
+    if (!pr_cron_due()) {
+        return;
+    }
 
     try {
         $result = pr_run_all();
@@ -121,6 +124,12 @@ function HookProduct_recognitionAllExtra_checks(): array
                 : $lang["product_recognition_setup_required"],
         ],
     ];
+    if (pr_pending_tree_field() > 0) {
+        $out["product_recognition_family_migrate"] = [
+            "status" => "FAIL",
+            "info" => $lang["product_recognition_check_migrate"],
+        ];
+    }
     if ($field_ok) {
         $out["product_recognition_service"] = [
             "status" => pr_service_health() ? "OK" : "FAIL",

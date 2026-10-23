@@ -2,19 +2,25 @@ Product Recognition
 ===================
 
 Identifies which product an image shows, from the pixels, using DINOv2 nearest-neighbour
-retrieval against a reference set derived from an existing category-tree field.
+retrieval against a reference set derived from the Family field (dynamic keywords).
 
-This plugin does not create that field. Point it at one you already have.
+This plugin does not create that field. Runtime bind prefers resource_type_field.name = family
+once leftover Model-tree product_reference rows are gone. Saving Family on the setup page
+does not remap those rows — --migrate-family does. Do not pick Family before migrate.
 
 1. Install and activate the plugin (Admin → System → Plugins).
 2. Run the companion service (plugins/product_recognition/scripts/). See scripts/README.md.
-3. Open the plugin setup page and set:
-   - Product field — a category tree whose leaf nodes are the products to recognise
-   - Service URL — default http://product-recognition:8001 on a Docker network
-   - Optional variant field, resource types, lifestyle segment classes
-4. Nightly cron (or the CLI) builds references from tagged resources, embeds previews,
+3. Dry-run migrate, then live. System status stays FAIL until leftover tree-node ids are gone.
+
+     php plugins/product_recognition/scripts/product_recognition_cli.php --migrate-family --dry-run
+     php plugins/product_recognition/scripts/product_recognition_cli.php --migrate-family
+
+4. Open the plugin setup page only after migrate. Set Service URL if it is not the Docker
+   default http://product-recognition:8001. Optional: colorway, resource types, segment classes.
+   Leave Product field alone unless migrate could not store it.
+5. Nightly cron (or the CLI) builds references from tagged resources, embeds previews,
    calibrates per-product thresholds, and opens suggestions for review.
-5. Grant "Accept product suggestions" to the groups that may write tags from the queue.
+6. Grant "Accept product suggestions" to the groups that may write tags from the queue.
 
 Auto-apply is off until you turn it on. Suggestions never overwrite a product tag that
 is already on the resource.
