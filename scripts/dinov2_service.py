@@ -227,6 +227,21 @@ def load_references(db_name, space):
           f"({len(set(labels))} models) for DB {db_name}")
     return reference_cache[key]
 
+def neighbor_order(sims, resources, k, exclude_resource=None):
+    """
+    The k nearest indices, with the query resource masked out BEFORE the cut, so a
+    resource that is itself indexed still gets k neighbours. Returns the masked copy
+    of sims alongside, so callers read similarities from the same array they ranked.
+    """
+    sims = sims.copy()
+    if exclude_resource is not None:
+        for i, r in enumerate(resources):
+            if r == exclude_resource:
+                sims[i] = -np.inf
+    order = [i for i in np.argsort(-sims)[:k] if np.isfinite(sims[i])]
+    return sims, order
+
+
 def vote(sims, resources, labels, k, exclude_resource=None):
     """
     Similarity-weighted k-NN vote.
@@ -235,13 +250,7 @@ def vote(sims, resources, labels, k, exclude_resource=None):
     neighbours. Negative similarities are clamped to zero so an opposite-facing vector cannot
     subtract from a rival's score.
     """
-    sims = sims.copy()
-    if exclude_resource is not None:
-        for i, r in enumerate(resources):
-            if r == exclude_resource:
-                sims[i] = -np.inf
-
-    order = [i for i in np.argsort(-sims)[:k] if np.isfinite(sims[i])]
+    sims, order = neighbor_order(sims, resources, k, exclude_resource)
     if not order:
         return [], 0.0, None
 
@@ -332,10 +341,9 @@ def identify(
     sims = matrix @ (query / norm).astype(np.float32)
     candidates, top_sim, top_ref = vote(sims, resources, labels, k, exclude_resource=resource)
     # The top-3 candidate list is already summed by model. Family and sub-class
-    # are a second sum over these neighbors, so the cut has to travel with them.
-    order = [i for i in np.argsort(-sims)[:k] if np.isfinite(sims[i])]
-    if resource is not None:
-        order = [i for i in order if int(resources[i]) != int(resource)]
+    # are a second sum over these neighbors, so the cut has to travel with them:
+    # the same mask-then-cut as vote(), not a cut that drops self afterwards.
+    _, order = neighbor_order(sims, resources, k, exclude_resource=resource)
     neighbors = [{
         "resource": int(resources[i]),
         "model_node": int(labels[i]),

@@ -181,6 +181,11 @@ $no_family = pr_aggregate_neighbors([
 ]);
 pr_check("a family share under 0.5 yields no suggestion",
          $no_family['suggest'] === false);
+pr_check("a 0.5 / 0.5 split between two families yields no suggestion",
+         pr_aggregate_neighbors([
+             ['name' => 'Loma', 'similarity' => 0.5],
+             ['name' => 'Ryder', 'similarity' => 0.5],
+         ])['suggest'] === false);
 $loma_facets = pr_facets_from_identity(pr_identity_for_name('Loma S-Class'));
 $xl_facets = pr_facets_from_identity(pr_identity_for_name('Loma XL S-Class'));
 $r14_facets = pr_facets_from_identity([
@@ -229,11 +234,13 @@ pr_check("migrate keeps a Family Ryder pin on the Name tag, and does not collaps
          && $leaf_r14s === ['action' => 'retarget', 'label' => 'Ryder 14 S-Class']
          && $leaf_disagree['action'] === 'orphan'
          && $family_junk['action'] === 'orphan');
-pr_check("a Name-bound derived row is not relabeled back to Family",
-         pr_sync_keeps_name_binding('relabel', true)
-         && !pr_sync_keeps_name_binding('relabel', false)
-         && !pr_sync_keeps_name_binding('add', true)
-         && !pr_sync_keeps_name_binding('revive', true));
+pr_check("a Name-bound derived row is not relabeled back to Family while refs are pending",
+         pr_sync_keeps_name_binding('relabel', true, true)
+         && !pr_sync_keeps_name_binding('relabel', false, true)
+         && !pr_sync_keeps_name_binding('add', true, true)
+         && !pr_sync_keeps_name_binding('revive', true, true));
+pr_check("after migrate a Name retag relabels its derived reference",
+         !pr_sync_keeps_name_binding('relabel', true, false));
 $r14_plan = pr_accept_identity_plan('Ryder 14 S-Class');
 pr_check("accepting Ryder 14 S-Class writes Family Ryder and that Name, not Family Ryder alone",
          $r14_plan['family'] === 'Ryder'

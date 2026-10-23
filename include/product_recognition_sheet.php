@@ -410,6 +410,7 @@ function pr_fetch_master_sheet(): array
         return ['error' => 'sheet fetch failed', 'rows' => [], 'sellable' => 0, 'smu' => 0, 'hash' => ''];
     }
     $rows = [];
+    $seen = [];
     $sellable = 0;
     $smu = 0;
     foreach ([0 => 'sellable', 1 => 'smu'] as $i => $source) {
@@ -433,6 +434,14 @@ function pr_fetch_master_sheet(): array
             if ($row['category'] === '' && $row['product_name'] === '' && $row['family'] === '') {
                 continue;
             }
+            # A repeated row upserts onto one product_sheet_row. Counting it twice would
+            # leave the stored count short of sellable + smu forever, and that mismatch
+            # disables the sheet overlay and rewrites the table every night.
+            $key = pr_sheet_row_key($row);
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
             $rows[] = $row;
             if ($source === 'sellable') {
                 $sellable++;
@@ -442,6 +451,12 @@ function pr_fetch_master_sheet(): array
         }
     }
     return ['error' => null, 'rows' => $rows, 'sellable' => $sellable, 'smu' => $smu, 'hash' => pr_sheet_hash($rows)];
+}
+
+/** Primary key of one product_sheet_row. Two sheet rows with the same key are one row. */
+function pr_sheet_row_key(array $row): string
+{
+    return sha1($row['source'] . "\0" . $row['sku'] . "\0" . $row['product_name'] . "\0" . $row['color']);
 }
 
 function pr_sheet_hash(array $rows): string
@@ -602,7 +617,7 @@ function pr_sheet_replace_rows(array $fetch, array $interpreted): void
     $keep = [];
     $baked = product_identity_by_model();
     foreach ($fetch['rows'] as $row) {
-        $key = sha1($row['source'] . "\0" . $row['sku'] . "\0" . $row['product_name'] . "\0" . $row['color']);
+        $key = pr_sheet_row_key($row);
         $keep[$key] = true;
         $got = product_identity_from_sheet($row['category'], $row['family'], $row['product_name'], $row['color']);
         $reason = pr_sheet_reject_reason($got, $row['status'], $row['product_name'], $baked);
@@ -1023,13 +1038,13 @@ function pr_dropbox_location_ready(): bool
 }
 
 /**
- * @return array{exact:int,family_only:int,tagged:int,referenced:int,references_held:int,skipped:int,error:?string}
+ * @return array{exact:int,family_only:int,tagged:int,referenced:int,references_held:int,references_conflict:int,skipped:int,error:?string}
  */
 function pr_studio_seed(bool $dry_run): array
 {
     $stats = [
         'exact' => 0, 'family_only' => 0, 'tagged' => 0, 'referenced' => 0,
-        'references_held' => 0, 'skipped' => 0, 'error' => null,
+        'references_held' => 0, 'references_conflict' => 0, 'skipped' => 0, 'error' => null,
     ];
     if (!function_exists('ps_query') || !pr_load_identity_grammar()) {
         $stats['error'] = 'identity grammar not loaded';
@@ -1082,6 +1097,7 @@ function pr_studio_seed(bool $dry_run): array
         } else {
             $stats['family_only']++;
         }
+        $name_was_empty = !isset($occupied['modelkeyword'][$resource]);
         $wrote = pr_sheet_write_empty($resource, $chosen, $occupied, $dry_run);
         if ($wrote) {
             $stats['tagged']++;
@@ -1096,6 +1112,12 @@ function pr_studio_seed(bool $dry_run): array
             continue;
         }
         if ($decision !== 'insert') {
+            continue;
+        }
+        # A Name that was already on the resource wins. A reference for a different
+        # path Name would teach the pixel index a product the tag contradicts.
+        if (!$name_was_empty && !pr_studio_name_tag_matches($resource, $chosen['name'])) {
+            $stats['references_conflict']++;
             continue;
         }
         if ($dry_run) {
@@ -1114,6 +1136,22 @@ function pr_studio_seed(bool $dry_run): array
         $stats['referenced']++;
     }
     return $stats;
+}
+
+/** True when the resource carries exactly one Name and it folds to $name. */
+function pr_studio_name_tag_matches(int $resource, string $name): bool
+{
+    $field = pr_sheet_field('modelkeyword');
+    if ($field <= 0) {
+        return false;
+    }
+    $names = ps_array(
+        "SELECT n.name AS value FROM resource_node rn
+           JOIN node n ON n.ref = rn.node AND n.resource_type_field = ?
+          WHERE rn.resource = ?",
+        ["i", $field, "i", $resource]
+    );
+    return count($names) === 1 && pr_fold_label((string)$names[0]) === pr_fold_label($name);
 }
 
 function pr_sheet_field(string $key): int

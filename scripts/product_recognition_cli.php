@@ -410,9 +410,10 @@ switch ($mode) {
             fwrite(STDERR, "product_recognition: {$stats['error']}\n");
             exit(1);
         }
-        printf("exact %d\nfamily-only %d\ntagged %d\nreferenced %d\nheld %d\nskipped %d\n",
+        printf("exact %d\nfamily-only %d\ntagged %d\nreferenced %d\nheld %d\nName disagrees %d\nskipped %d\n",
                $stats['exact'], $stats['family_only'], $stats['tagged'],
-               $stats['referenced'], $stats['references_held'], $stats['skipped']);
+               $stats['referenced'], $stats['references_held'], $stats['references_conflict'],
+               $stats['skipped']);
         echo "tagged fills empty fields before any reference insert. This command does not classify.\n";
         if ($dry_run) {
             echo "\nDRY RUN - nothing written.\n";

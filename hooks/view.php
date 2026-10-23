@@ -40,6 +40,9 @@ function HookProduct_recognitionViewCustompanels()
     $model_names = $can_decide ? array_values(pr_leaf_models()) : [];
     natcasesort($model_names);
     $model_names = array_values($model_names);
+    $family_options = ($can_decide && pr_load_identity_grammar() && function_exists('product_family_values'))
+        ? product_family_values()
+        : $model_names;
     $colorway_field = (int)($product_recognition_colorway_field ?? 0);
     $colorway_leaves = ($can_decide && $colorway_field > 0)
         ? array_values(pr_field_leaves($colorway_field))
@@ -190,9 +193,6 @@ function HookProduct_recognitionViewCustompanels()
                             $facets['subclass'] = (string)($row['subclass'] ?? '');
                             $facets['subclass2'] = (string)($row['subclass2'] ?? '');
                         }
-                        $family_options = function_exists('product_family_values') && pr_load_identity_grammar()
-                            ? product_family_values()
-                            : $model_names;
                     ?>
                     <tr>
                         <td rowspan="2">
@@ -504,15 +504,17 @@ function HookProduct_recognitionViewCustompanels()
                 hidden.value = '';
             }
         }
-        function fillFacets(form, resetSub) {
+        // onLoad fills the lists around the detected values and leaves model_text alone,
+        // so Apply on an untouched row still posts the detected product.
+        function fillFacets(form, resetSub, onLoad) {
             var family = form.querySelector('[name=family]');
             var sub = facetSelect(form, 'subclass');
             var sub2 = facetSelect(form, 'subclass2');
             if (!family || !sub) {
                 return;
             }
-            var subs = [];
-            var sub2s = [];
+            var subs = onLoad && sub.value ? [sub.value] : [];
+            var sub2s = onLoad && sub2 && sub2.value ? [sub2.value] : [];
             facetCatalog.forEach(function (row) {
                 if (row.family !== family.value) {
                     return;
@@ -529,7 +531,9 @@ function HookProduct_recognitionViewCustompanels()
             });
             fillSelect(sub, <?php echo json_encode($lang['product_recognition_pick_subclass']); ?>, subs, resetSub ? '' : sub.value);
             fillSelect(sub2, <?php echo json_encode($lang['product_recognition_pick_subclass2']); ?>, sub2s, resetSub ? '' : (sub2 ? sub2.value : ''));
-            syncModel(form);
+            if (!onLoad) {
+                syncModel(form);
+            }
         }
         function addColorway(sel, seen, name) {
             if (!name || seen[name]) {
@@ -544,9 +548,6 @@ function HookProduct_recognitionViewCustompanels()
         function colorSelectFor(form) {
             return document.querySelector('select[name=colorway_text][form="' + form.id + '"]')
                 || form.querySelector('[name=colorway_text]');
-        }
-        function modelSelectFor(form) {
-            return form.querySelector('[name=model_text]');
         }
         function fillColorway(form) {
             var colorSel = colorSelectFor(form);
@@ -594,6 +595,7 @@ function HookProduct_recognitionViewCustompanels()
                     syncModel(form);
                 });
             }
+            fillFacets(form, false, true);
             fillColorway(form);
         });
         document.querySelectorAll('form.pr-find').forEach(function (form) {
