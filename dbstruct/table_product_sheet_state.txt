@@ -1,0 +1,6 @@
+id,tinyint(3),NO,PRI,,
+content_hash,char(64),NO,,'',
+sellable_rows,int(11),NO,,0,
+smu_rows,int(11),NO,,0,
+imported_names,int(11),NO,,0,
+fetched,datetime,YES,,,

@@ -5,67 +5,21 @@
 include_once dirname(__FILE__, 2) . '/include/product_recognition_functions.php';
 
 /**
- * Nightly: references, embedding slice, calibration, classification - under one lock.
+ * Nightly: sheet import, studio seed, references, embedding slice, calibration,
+ * classification - under one lock.
  */
 function HookProduct_recognitionAllCron()
 {
-    if (!pr_is_configured()) {
-        logScript("product_recognition: product field not configured; skip");
-        return;
-    }
-    if (!pr_cron_due()) {
-        return;
-    }
-
-    try {
-        $result = pr_run_all();
-    } catch (Throwable $e) {
-        # Caught deliberately, and NOT rethrown. batch/cron.php has no try/catch of its own, and
-        # hook() dispatches every plugin's cron hook in one bare loop - so an exception escaping
-        # here kills the run before it clears ResourceSpace's own "cron" process lock, before
-        # last_cron advances, and before any plugin ordered after this one gets its nightly run.
-        # Our stages throw on ordinary operational conditions (the vector service being down is
-        # one), and costing the whole install its cron night for that is the wrong trade.
-        # Failing loudly in the log is visible; taking RS's cron down with us is not.
-        logScript("product_recognition: nightly run FAILED: " . $e->getMessage());
-        return;
-    }
-
-    if (!empty($result['locked'])) {
-        return;
-    }
-    logScript(sprintf(
-        "product_recognition: %d references, %d embedded (%d outstanding), %d suggested, %d auto-applied",
-        $result['references']['derived'], $result['backfill']['embedded'],
-        $result['backfill']['remaining'], $result['classification']['suggested'],
-        $result['classification']['auto_applied']
-    ));
-
-    # Vocabulary damage gets its own line, and only when there is some. The cron is the ONLY
-    # unattended path, so anything not logged here is invisible until a person runs the CLI -
-    # which is how 26 orphaned suggestions sat unnoticed on 2026-08-07.
-    #
-    # This guard is deliberately narrower than the CLI's, which also reports the standing backlog
-    # of orphaned rows for an operator asking directly. The cron speaks only when something
-    # changed this run. Do not "fix" the asymmetry.
-    $refs = $result['references'];
-    $rec = $refs['reconciled'];
-    if (pr_reconcile_total($rec) > 0 || $refs['revived'] !== []) {
-        logScript(sprintf(
-            "product_recognition: deleted product nodes orphaned %d threshold, %d pinned reference, "
-            . "%d suggestion; revived %d reference(s) now re-tagged",
-            $rec['thresholds'], $rec['references'], $rec['suggestions'], count($refs['revived'])
-        ));
-        foreach ($refs['revived'] as $r) {
-            logScript("product_recognition: " . pr_format_revived($r));
-        }
-    }
+    # The night shift is product-recognition.timer (CLI --all), not this hook.
+    # cron.php shares one process and one 30-minute cap with disk measurement.
+    # A warning there exits before this hook, and the shell then waits 24 hours.
+    logScript("product_recognition: nightly pass runs from product-recognition.timer, not cron.php");
 }
 
 /**
  * On upload: embed immediately, so a new shoot is recognisable before the next nightly run.
  *
- * Embedding only - classification stays on the cron, because a suggestion is only as good as
+ * Embedding only - classification stays on product-recognition.timer, because a suggestion is only as good as
  * the calibration behind it and calibration is a batch job. Mirrors the clip plugin's
  * HookClipAllAfterpreviewcreation.
  */

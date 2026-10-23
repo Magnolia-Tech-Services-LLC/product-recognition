@@ -1,7 +1,7 @@
 <?php
 /**
- * Find other images of the picked catalog product. Lands in RS search as !list refs
- * from that model's reference set (not a live /identify of the crop).
+ * Find other images of the picked product. Family-only does not bind the family
+ * string as a Name. The search ANDs every product field the pick sets.
  */
 include "../../../include/boot.php";
 include "../../../include/authenticate.php";
@@ -12,19 +12,19 @@ if (!checkperm('product_recognition_accept')) {
 }
 
 $resource = (int)getval("resource", 0);
-# Visible Model select (GET from the picker form). Do not read a hidden SKU or identify node.
+# Picker fields. Family-only leaves sub-class empty so the family string is not a Name.
+$family = trim(getval("family", ""));
+$subclass = trim(getval("subclass", ""));
+$subclass2 = trim(getval("subclass2", ""));
+$colorway = trim(getval("colorway_text", ""));
 $model_text = trim(getval("model_text", ""));
 
 if ($resource <= 0 || get_resource_access($resource) > 1) {
     exit($lang["error-permissiondenied"]);
 }
 
-$model_node = $model_text === ""
-    ? 0
-    : (pr_bind_catalog_model($model_text, pr_leaf_models()) ?? 0);
-
-$refs = pr_other_match_refs($model_node, $resource);
-$token = pr_other_match_search_token($refs);
+$plan = pr_find_field_plan($family, $subclass, $subclass2, $colorway, $model_text);
+$token = pr_product_field_search($plan);
 if ($token === "") {
     $empty_params = ["ref" => $resource, "pr_find" => "empty"];
     if (getval("modal", "") === "true") {

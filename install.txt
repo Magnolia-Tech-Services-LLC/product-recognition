@@ -2,11 +2,11 @@ Product Recognition
 ===================
 
 Identifies which product an image shows, from the pixels, using DINOv2 nearest-neighbour
-retrieval against a reference set derived from the Family field (dynamic keywords).
+retrieval against a reference set derived from the Name field (modelkeyword).
 
-This plugin does not create that field. Runtime bind prefers resource_type_field.name = family
-once leftover Model-tree product_reference rows are gone. Saving Family on the setup page
-does not remap those rows — --migrate-family does. Do not pick Family before migrate.
+This plugin does not create that field. Runtime bind prefers resource_type_field.name = modelkeyword
+once leftover Model-tree and Family product_reference rows are gone. The setup page does not
+choose the product field. --migrate-family remaps those rows. Do not pick Family before migrate.
 
 1. Install and activate the plugin (Admin → System → Plugins).
 2. Run the companion service (plugins/product_recognition/scripts/). See scripts/README.md.
@@ -17,10 +17,14 @@ does not remap those rows — --migrate-family does. Do not pick Family before m
 
 4. Open the plugin setup page only after migrate. Set Service URL if it is not the Docker
    default http://product-recognition:8001. Optional: colorway, resource types, segment classes.
-   Leave Product field alone unless migrate could not store it.
+   There is no product-field setting. Products come from the Master Product List.
 5. Nightly cron (or the CLI) builds references from tagged resources, embeds previews,
    calibrates per-product thresholds, and opens suggestions for review.
 6. Grant "Accept product suggestions" to the groups that may write tags from the queue.
+7. Put a Google service-account JSON at /opt/rs-defaults/google-sheets.json inside the
+   container (not in the web root) and share the Master Product List with that account.
+   --sheet imports Sellable and SMU changes. --studio-seed fills empty metadata from
+   stored Dropbox paths and adds a Name reference only when the path names one product.
 
 Auto-apply is off until you turn it on. Suggestions never overwrite a product tag that
 is already on the resource.

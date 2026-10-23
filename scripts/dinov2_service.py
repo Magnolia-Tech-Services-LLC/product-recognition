@@ -331,8 +331,19 @@ def identify(
 
     sims = matrix @ (query / norm).astype(np.float32)
     candidates, top_sim, top_ref = vote(sims, resources, labels, k, exclude_resource=resource)
+    # The top-3 candidate list is already summed by model. Family and sub-class
+    # are a second sum over these neighbors, so the cut has to travel with them.
+    order = [i for i in np.argsort(-sims)[:k] if np.isfinite(sims[i])]
+    if resource is not None:
+        order = [i for i in order if int(resources[i]) != int(resource)]
+    neighbors = [{
+        "resource": int(resources[i]),
+        "model_node": int(labels[i]),
+        "similarity": float(max(sims[i], 0.0)),
+    } for i in order]
     return JSONResponse(content={
         "candidates": candidates[:top_n],
+        "neighbors": neighbors,
         "top_similarity": top_sim,
         "top_reference": top_ref,
         "reference_count": len(resources),

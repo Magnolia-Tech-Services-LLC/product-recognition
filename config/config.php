@@ -7,11 +7,14 @@ $product_recognition_service_url = "http://product-recognition:8001";
 $product_recognition_api_key = "";
 $product_recognition_space = "dinov2";
 
-# Product field. Runtime bind prefers the field named family once leftover
-# Model-tree product_reference rows are gone. Setup pointing at Family does
-# not remap those rows — --migrate-family does. 0 = not configured.
-# Recognition writes only through accept (or auto-apply); it never overwrites a value
-# the field already has.
+# Recognition bind. The setup page does not set this. pr_product_field() uses
+# modelkeyword (Name) once leftover Model-tree and Family product_reference rows
+# are gone. Until then it follows those rows. --migrate-family remaps them.
+# Products come from the Master Product List, not from this value.
+# The refresh reads that sheet with a service-account JSON at
+# /opt/rs-defaults/google-sheets.json, or PRODUCT_RECOGNITION_SHEET_JSON.
+# A missing file skips the refresh. Do not put the JSON in the web root.
+# 0 = not configured. Writes never overwrite a value the field already has.
 $product_recognition_field = 0;
 
 # Optional second field shown on the resource view next to the product (color, variant).
@@ -49,7 +52,7 @@ $product_recognition_auto_apply = false;
 
 # Size/trim variants the pixels cannot see. Missing names are a no-op.
 # Grow this list; never shorten it. Runtime also unions pr_never_auto_apply_default().
-$product_recognition_never_auto_apply = "Loma XL, Big Rig S-Class, Ryder 14, Loma Lite, El Camino Superlite, Ryder Lefty, Storm Ryder, Loma S-Class, Loma XL S-Class, El Camino S-Class, Ryder S-Class";
+$product_recognition_never_auto_apply = "Loma XL, Big Rig S-Class, Ryder 14, Loma Lite, El Camino Superlite, Ryder Lefty, Storm Ryder, Loma S-Class, Loma XL S-Class, El Camino S-Class, Ryder S-Class, Ryder 14 S-Class";
 
 # Comma-separated YOLO-World class names for POST /segment (lifestyle localisation).
 # Sent with each /segment request; the service also reads SEGMENT_CLASSES as a default.

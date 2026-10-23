@@ -13,6 +13,9 @@
  *   php product_recognition_cli.php --disagreement [--limit=N]  # default classify_batch; N=0 unlimited
  *   php product_recognition_cli.php --regions --resource=N [--resource=M ...]
  *   php product_recognition_cli.php --migrate-family [--dry-run]
+ *   php product_recognition_cli.php --accept-certain [--dry-run]
+ *   php product_recognition_cli.php --sheet [--dry-run]
+ *   php product_recognition_cli.php --studio-seed [--dry-run]
  *   php product_recognition_cli.php --all
  */
 include_once "/var/www/html/include/boot.php";
@@ -24,7 +27,7 @@ $dry_run = in_array('--dry-run', $modes, true);
 $mode = $modes[0] ?? '--help';
 
 if (!in_array($mode, ['--help', '-h', '--catalog', '--migrate-family'], true) && !pr_is_configured()) {
-    fwrite(STDERR, "product_recognition: configure the product field on the plugin setup page first\n");
+    fwrite(STDERR, "product_recognition: Name field is not available and no recognition field is bound\n");
     exit(1);
 }
 
@@ -59,13 +62,13 @@ switch ($mode) {
             fwrite(STDERR, "product_recognition: {$stats['error']}\n");
             exit(1);
         }
-        printf("Family field %d\n", $stats['field']);
+        printf("Name field %d\n", $stats['field']);
         printf("  remapped references %d\n", $stats['references']);
-        printf("  family stamped      %d\n", $stats['stamped']);
+        printf("  name stamped        %d\n", $stats['stamped']);
         printf("  orphaned            %d\n", $stats['orphaned']);
         printf("  suggestions cleared %d\n", $stats['suggestions_cleared']);
         if ($stats['field'] <= 0) {
-            fwrite(STDERR, "product_recognition: no field named family\n");
+            fwrite(STDERR, "product_recognition: no field named modelkeyword\n");
             exit(1);
         }
         if ($dry_run) {
@@ -112,9 +115,9 @@ switch ($mode) {
                    $c['resource'], $c['pinned_as'], $c['tagged_as']);
         }
         if (pr_pending_tree_field() > 0) {
-            fwrite(STDERR, "product_recognition: leftover Model-tree references. "
+            fwrite(STDERR, "product_recognition: leftover Model-tree or Family references. "
                 . "Run --migrate-family --dry-run, then --migrate-family. "
-                . "Do not set the setup Product field to Family first. "
+                . "Do not set the setup Product field to Name or Family first. "
                 . "Derived deletes are fenced until then.\n");
         }
         if ($dry_run) {
@@ -200,12 +203,10 @@ switch ($mode) {
         if ($stats === null) {
             exit(0);
         }
-        printf("Backfill from resource %d, limit %d\n", $stats['resumed_from'], $limit);
-        printf("  embedded            %d\n", $stats['embedded']);
-        printf("  skipped, no preview %d\n", $stats['skipped_no_preview']);
-        printf("  failed              %d\n", $stats['failed']);
-        printf("  stopped at resource %d\n", $stats['last']);
-        printf("  still outstanding   %d\n", $stats['remaining']);
+        echo 'backfill     ' . pr_format_backfill_summary($stats) . "\n";
+        if (!$dry_run) {
+            pr_report_backfill_slice($stats);
+        }
         if ($dry_run) {
             echo "\nDRY RUN - nothing written.\n";
         }
@@ -275,6 +276,8 @@ switch ($mode) {
         printf("  suggested             %d\n", $stats['suggested']);
         printf("  auto-applied          %d%s\n", $stats['auto_applied'],
                $GLOBALS['product_recognition_auto_apply'] ? '' : '  (auto-apply is OFF)');
+        printf("  certain accepted     %d\n", $stats['certain_accepted']);
+        printf("  certain left queued  %d\n", $stats['certain_skipped_never']);
         printf("  nothing similar       %d\n", $stats['skipped_low_similarity']);
         printf("  no candidates         %d\n", $stats['no_candidates']);
         printf("  candidate re-rejected %d\n", $stats['skipped_rejected']);
@@ -349,28 +352,91 @@ switch ($mode) {
             echo "Another run holds the lock - exiting without writing.\n";
             exit(0);
         }
+        $sheet = $result['sheet'] ?? [];
+        printf("sheet        imported %d, added %d, updated %d, removed %d%s\n",
+               (int)($sheet['imported'] ?? 0), (int)($sheet['added'] ?? 0),
+               (int)($sheet['updated'] ?? 0), (int)($sheet['removed'] ?? 0),
+               empty($sheet['error']) ? '' : ' (' . $sheet['error'] . ')');
+        $studio = $result['studio'] ?? [];
+        printf("studio       exact %d, family-only %d, tagged %d, referenced %d, held %d%s\n",
+               (int)($studio['exact'] ?? 0), (int)($studio['family_only'] ?? 0),
+               (int)($studio['tagged'] ?? 0), (int)($studio['referenced'] ?? 0),
+               (int)($studio['references_held'] ?? 0),
+               empty($studio['error']) ? '' : ' (' . $studio['error'] . ')');
+        echo "studio       tagged fills empty fields before any reference insert.\n";
         printf("references   derived %d, added %d, removed %d\n",
                $result['references']['derived'], $result['references']['added'],
                $result['references']['removed']);
-        printf("backfill     embedded %d, outstanding %d\n",
-               $result['backfill']['embedded'], $result['backfill']['remaining']);
+        echo 'backfill     ' . pr_format_backfill_summary($result['backfill']) . "\n";
         printf("calibration  %d model(s)\n", count($result['calibration']));
-        printf("classify     suggested %d, auto-applied %d\n",
-               $result['classification']['suggested'], $result['classification']['auto_applied']);
+        printf("classify     suggested %d, auto-applied %d, certain %d\n",
+               $result['classification']['suggested'], $result['classification']['auto_applied'],
+               $result['classification']['certain_accepted']);
         if (pr_pending_tree_field() > 0) {
-            fwrite(STDERR, "product_recognition: leftover Model-tree references. "
-                . "--all does not migrate. Run --migrate-family --dry-run, then --migrate-family. "
-                . "Do not set the setup Product field to Family first.\n");
+            fwrite(STDERR, "product_recognition: leftover Model-tree or Family references. "
+                . "--all does not migrate. Run --migrate-family --dry-run, then --migrate-family.\n");
         }
         break;
 
     case '--help':
     case '-h':
-        fwrite(STDOUT, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--regions|--migrate-family|--all [--dry-run]\n");
+        fwrite(STDOUT, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
+        break;
+
+    case '--sheet':
+        $stats = $pr_cli_run(fn() => pr_import_master_sheet($dry_run));
+        if ($stats === null) {
+            exit(0);
+        }
+        if (!empty($stats['error'])) {
+            fwrite(STDERR, "product_recognition: {$stats['error']}\n");
+            exit(1);
+        }
+        printf("Sellable rows %d, SMU rows %d\n", $stats['sellable'], $stats['smu']);
+        printf("  imported  %d\n  added     %d\n  updated   %d\n  removed   %d\n  unchanged %d\n  skipped   %d\n",
+               $stats['imported'], $stats['added'], $stats['updated'],
+               $stats['removed'], $stats['unchanged'], $stats['skipped']);
+        if ($dry_run) {
+            echo "\nDRY RUN - nothing written.\n";
+        }
+        break;
+
+    case '--studio-seed':
+        $stats = $pr_cli_run(fn() => pr_studio_seed($dry_run));
+        if ($stats === null) {
+            exit(0);
+        }
+        if (!empty($stats['error'])) {
+            fwrite(STDERR, "product_recognition: {$stats['error']}\n");
+            exit(1);
+        }
+        printf("exact %d\nfamily-only %d\ntagged %d\nreferenced %d\nheld %d\nskipped %d\n",
+               $stats['exact'], $stats['family_only'], $stats['tagged'],
+               $stats['referenced'], $stats['references_held'], $stats['skipped']);
+        echo "tagged fills empty fields before any reference insert. This command does not classify.\n";
+        if ($dry_run) {
+            echo "\nDRY RUN - nothing written.\n";
+        }
+        break;
+
+    case '--accept-certain':
+        $stats = $pr_cli_run(fn() => pr_accept_certain_open_suggestions($dry_run));
+        if ($stats === null) {
+            exit(0);
+        }
+        printf("certain accepted        %d\n", $stats['accepted']);
+        printf("  tagged without pin    %d\n", $stats['tagged']);
+        printf("  already tagged        %d\n", $stats['kept']);
+        printf("  left queued           %d\n", $stats['skipped_never']);
+        printf("  denied                %d\n", $stats['denied']);
+        printf("  other                 %d\n", $stats['other']);
+        if ($dry_run) {
+            echo "\nDRY RUN - nothing written.\n";
+        }
         break;
 
     default:
         fwrite(STDERR, "Unknown mode: $mode\n");
-        fwrite(STDERR, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--regions|--migrate-family|--all [--dry-run]\n");
+        fwrite(STDERR, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
         exit(1);
 }

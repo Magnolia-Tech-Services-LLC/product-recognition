@@ -46,24 +46,10 @@ function HookProduct_recognitionViewCustompanels()
         : [];
     natcasesort($colorway_leaves);
     $colorway_leaves = array_values($colorway_leaves);
-    $collab_field = pr_collaboration_field();
-    $collab_leaves = ($can_decide && $collab_field > 0)
-        ? array_values(pr_field_leaves($collab_field))
-        : [];
-    natcasesort($collab_leaves);
-    $collab_leaves = array_values($collab_leaves);
     $tagged_model = implode(', ', pr_field_leaf_names((int)$ref, (int)$product_recognition_field));
     $tagged_colorway = $colorway_field > 0
         ? implode(', ', pr_field_leaf_names((int)$ref, $colorway_field))
         : '';
-    $tagged_collab = $collab_field > 0
-        ? implode(', ', pr_field_leaf_names((int)$ref, $collab_field))
-        : '';
-    $collab_selected = $tagged_collab;
-    if (str_contains($tagged_collab, ',')) {
-        $parts = preg_split('/\s*,\s*/', $tagged_collab) ?: [];
-        $collab_selected = (string)($parts[0] ?? '');
-    }
     $ref_row = pr_reference_row((int)$ref);
     $ref_status = $ref_row['status'] ?? '';
     $region_count = count($rows);
@@ -99,6 +85,7 @@ function HookProduct_recognitionViewCustompanels()
                 'pinned' => 'product_recognition_ref_pinned_ok',
                 'kept' => 'product_recognition_ref_kept',
                 'excluded' => 'product_recognition_ref_excluded_ok',
+                'unpinned' => 'product_recognition_ref_unpinned_ok',
                 'need_cutout' => 'product_recognition_ref_need_cutout',
                 'need_model' => 'product_recognition_ref_need_model',
                 'denied' => 'product_recognition_ref_denied',
@@ -120,12 +107,21 @@ function HookProduct_recognitionViewCustompanels()
             if ($catalog_empty) {
                 echo '<p>' . escape($lang['product_recognition_catalog_empty']) . '</p>';
             }
-            if ($can_decide && $catalog !== [] && $tagged_model !== '') {
-                echo '<p>' . escape(sprintf($lang['product_recognition_model_kept'], $tagged_model)) . '</p>';
+            $ref_name = '';
+            if ($ref_row !== null) {
+                $ref_name = (string)ps_value(
+                    "SELECT name AS value FROM node WHERE ref = ?",
+                    array("i", (int)$ref_row['model_node']),
+                    ''
+                );
             }
             $ref_label = match ($ref_status) {
-                'pinned' => $lang['product_recognition_ref_pinned'],
-                'derived' => $lang['product_recognition_ref_derived'],
+                'pinned' => $ref_name !== ''
+                    ? sprintf($lang['product_recognition_ref_pinned_as'], $ref_name)
+                    : $lang['product_recognition_ref_pinned'],
+                'derived' => $ref_name !== ''
+                    ? sprintf($lang['product_recognition_ref_derived_as'], $ref_name)
+                    : $lang['product_recognition_ref_derived'],
                 'excluded' => $lang['product_recognition_ref_excluded'],
                 'orphaned' => $lang['product_recognition_ref_orphaned'],
                 default => $lang['product_recognition_ref_none'],
@@ -137,12 +133,9 @@ function HookProduct_recognitionViewCustompanels()
                 <table class="ListviewStyle">
                     <tr>
                         <th><?php echo escape($lang['product_recognition_detected_product']); ?></th>
-                        <th><?php echo escape($lang['product_recognition_code']); ?></th>
-                        <th><?php echo escape($lang['product_recognition_model']); ?></th>
-                        <th><?php echo escape($lang['product_recognition_colorway']); ?></th>
-                        <th><?php echo escape($lang['product_recognition_collab']); ?></th>
-                        <th><?php echo escape($lang['product_recognition_confidence']); ?></th>
-                        <th><?php echo escape($lang['actions']); ?></th>
+                        <th><?php echo escape($lang['product_recognition_family']); ?></th>
+                        <th><?php echo escape($lang['product_recognition_subclass']); ?></th>
+                        <th><?php echo escape($lang['product_recognition_subclass2']); ?></th>
                     </tr>
                     <?php foreach ($rows as $row) {
                         $mask = pr_mask_file((int)$ref, $checksum, (int)$row['region']);
@@ -183,14 +176,33 @@ function HookProduct_recognitionViewCustompanels()
                         $confidence_html = $row['confidence'] !== null
                             ? escape(sprintf('%.0f%%', 100 * (float)$row['confidence']))
                             : escape($lang['product_recognition_from_tag']);
+                        $facet_identity = pr_identity_for_reference_label((string)$row['model_name']);
+                        $facets = $facet_identity !== null
+                            ? pr_facets_from_identity($facet_identity)
+                            : [
+                                'family' => (string)($row['family'] ?? ''),
+                                'subclass' => (string)($row['subclass'] ?? ''),
+                                'subclass2' => (string)($row['subclass2'] ?? ''),
+                                'category' => '',
+                            ];
+                        if ($facets['family'] === '' && !empty($row['family'])) {
+                            $facets['family'] = (string)$row['family'];
+                            $facets['subclass'] = (string)($row['subclass'] ?? '');
+                            $facets['subclass2'] = (string)($row['subclass2'] ?? '');
+                        }
+                        $family_options = function_exists('product_family_values') && pr_load_identity_grammar()
+                            ? product_family_values()
+                            : $model_names;
                     ?>
                     <tr>
-                        <td>
+                        <td rowspan="2">
                             <img src="<?php echo escape($thumb_url); ?>"
                                  alt="<?php echo escape($row['product']); ?>"
                                  style="max-width:200px;max-height:200px;display:block;" />
+                            <?php if ($facets['category'] !== '') { ?>
+                            <div><?php echo escape($facets['category']); ?></div>
+                            <?php } ?>
                         </td>
-                        <td><?php echo escape($row['product']); ?></td>
                         <?php if ($can_decide && $model_names !== []) { ?>
                         <td>
                             <form id="<?php echo escape($picker_id); ?>" method="post"
@@ -199,23 +211,47 @@ function HookProduct_recognitionViewCustompanels()
                                 <?php generateFormToken('pr_catalog_apply'); ?>
                                 <input type="hidden" name="resource" value="<?php echo (int)$ref; ?>" />
                                 <input type="hidden" name="region" value="<?php echo (int)$row['region']; ?>" />
+                                <input type="hidden" name="model_text"
+                                       value="<?php echo escape((string)$row['model_name']); ?>" />
                                 <?php if ($in_modal) { ?>
                                 <input type="hidden" name="modal" value="true" />
                                 <?php } ?>
-                                <select name="model_text" style="max-width:12em;"
-                                        title="<?php echo escape($lang['product_recognition_model']); ?>">
-                                    <option value=""><?php echo escape($lang['product_recognition_pick_model']); ?></option>
-                                    <?php foreach ($model_names as $name) { ?>
-                                    <option value="<?php echo escape($name); ?>"
-                                        <?php echo pr_fold_label($pre['model_text']) === pr_fold_label($name)
-                                            || pr_fold_label($tagged_model) === pr_fold_label($name)
-                                            ? ' selected' : ''; ?>>
-                                        <?php echo escape($name); ?>
+                                <select name="family" style="max-width:12em;"
+                                        title="<?php echo escape($lang['product_recognition_family']); ?>">
+                                    <option value=""><?php echo escape($lang['product_recognition_pick_family']); ?></option>
+                                    <?php foreach ($family_options as $family_name) { ?>
+                                    <option value="<?php echo escape($family_name); ?>"
+                                        <?php echo pr_fold_label($facets['family']) === pr_fold_label($family_name) ? ' selected' : ''; ?>>
+                                        <?php echo escape($family_name); ?>
                                     </option>
                                     <?php } ?>
                                 </select>
                             </form>
                         </td>
+                        <td>
+                            <select form="<?php echo escape($picker_id); ?>" name="subclass" style="max-width:12em;"
+                                    title="<?php echo escape($lang['product_recognition_subclass']); ?>">
+                                <option value=""><?php echo escape($lang['product_recognition_pick_subclass']); ?></option>
+                                <?php if ($facets['subclass'] !== '') { ?>
+                                <option value="<?php echo escape($facets['subclass']); ?>" selected>
+                                    <?php echo escape($facets['subclass']); ?>
+                                </option>
+                                <?php } ?>
+                            </select>
+                        </td>
+                        <td>
+                            <select form="<?php echo escape($picker_id); ?>" name="subclass2" style="max-width:12em;"
+                                    title="<?php echo escape($lang['product_recognition_subclass2']); ?>">
+                                <option value=""><?php echo escape($lang['product_recognition_pick_subclass2']); ?></option>
+                                <?php if ($facets['subclass2'] !== '') { ?>
+                                <option value="<?php echo escape($facets['subclass2']); ?>" selected>
+                                    <?php echo escape($facets['subclass2']); ?>
+                                </option>
+                                <?php } ?>
+                            </select>
+                        </td>
+                    </tr>
+                    <tr>
                         <td>
                             <select form="<?php echo escape($picker_id); ?>" name="colorway_text"
                                     style="max-width:12em;"
@@ -246,23 +282,6 @@ function HookProduct_recognitionViewCustompanels()
                                 ?>
                             </select>
                         </td>
-                        <td>
-                            <?php if ($collab_leaves !== []) { ?>
-                            <select form="<?php echo escape($picker_id); ?>" name="collab_text"
-                                    style="max-width:12em;"
-                                    title="<?php echo escape($lang['product_recognition_collab']); ?>">
-                                <option value=""><?php echo escape($lang['product_recognition_pick_collab']); ?></option>
-                                <?php foreach ($collab_leaves as $collab_name) { ?>
-                                <option value="<?php echo escape($collab_name); ?>"
-                                    <?php echo $collab_selected === $collab_name ? ' selected' : ''; ?>>
-                                    <?php echo escape($collab_name); ?>
-                                </option>
-                                <?php } ?>
-                            </select>
-                            <?php } else {
-                                echo escape($tagged_collab);
-                            } ?>
-                        </td>
                         <td><?php echo $confidence_html; ?></td>
                         <td>
                             <button form="<?php echo escape($picker_id); ?>" type="submit">
@@ -285,6 +304,18 @@ function HookProduct_recognitionViewCustompanels()
                                 <button type="submit"><?php echo escape($lang['product_recognition_pin']); ?></button>
                             </form>
                             <?php } ?>
+                            <?php if ($ref_status === 'pinned') { ?>
+                            <form method="post" action="<?php echo escape($pin); ?>" style="display:inline;"
+                                  onsubmit="return <?php echo $post_js; ?>(this, true);">
+                                <?php generateFormToken('pr_reference'); ?>
+                                <input type="hidden" name="resource" value="<?php echo (int)$ref; ?>" />
+                                <input type="hidden" name="action" value="unpin" />
+                                <?php if ($in_modal) { ?>
+                                <input type="hidden" name="modal" value="true" />
+                                <?php } ?>
+                                <button type="submit"><?php echo escape($lang['product_recognition_unpin']); ?></button>
+                            </form>
+                            <?php } ?>
                             <?php if ($ref_status === 'pinned' || $ref_status === 'derived') { ?>
                             <form method="post" action="<?php echo escape($pin); ?>" style="display:inline;"
                                   onsubmit="return <?php echo $post_js; ?>(this, true);">
@@ -300,6 +331,14 @@ function HookProduct_recognitionViewCustompanels()
                             <form method="get" action="<?php echo escape($find); ?>" class="pr-find"
                                   style="display:inline;">
                                 <input type="hidden" name="resource" value="<?php echo (int)$ref; ?>" />
+                                <input type="hidden" name="family"
+                                       value="<?php echo escape($facets['family']); ?>" />
+                                <input type="hidden" name="subclass"
+                                       value="<?php echo escape($facets['subclass']); ?>" />
+                                <input type="hidden" name="subclass2"
+                                       value="<?php echo escape($facets['subclass2']); ?>" />
+                                <input type="hidden" name="colorway_text"
+                                       value="<?php echo escape($pre['colorway_text']); ?>" />
                                 <input type="hidden" name="model_text"
                                        id="<?php echo escape($picker_id); ?>-find-model"
                                        value="<?php echo escape($pre['model_text']); ?>" />
@@ -323,10 +362,14 @@ function HookProduct_recognitionViewCustompanels()
                             </form>
                             <?php } ?>
                         </td>
+                    </tr>
                         <?php } else { ?>
-                        <td><?php echo escape($row['model_name']); ?></td>
+                        <td><?php echo escape($facets['family']); ?></td>
+                        <td><?php echo escape($facets['subclass']); ?></td>
+                        <td><?php echo escape($facets['subclass2']); ?></td>
+                    </tr>
+                    <tr>
                         <td><?php echo escape($row['colorway'] !== '' ? $row['colorway'] : $tagged_colorway); ?></td>
-                        <td><?php echo escape($tagged_collab); ?></td>
                         <td><?php echo $confidence_html; ?></td>
                         <td>
                             <?php if ($can_decide) { ?>
@@ -343,6 +386,18 @@ function HookProduct_recognitionViewCustompanels()
                                 <input type="hidden" name="modal" value="true" />
                                 <?php } ?>
                                 <button type="submit"><?php echo escape($lang['product_recognition_pin']); ?></button>
+                            </form>
+                            <?php } ?>
+                            <?php if ($ref_status === 'pinned') { ?>
+                            <form method="post" action="<?php echo escape($pin); ?>" style="display:inline;"
+                                  onsubmit="return <?php echo $post_js; ?>(this, true);">
+                                <?php generateFormToken('pr_reference'); ?>
+                                <input type="hidden" name="resource" value="<?php echo (int)$ref; ?>" />
+                                <input type="hidden" name="action" value="unpin" />
+                                <?php if ($in_modal) { ?>
+                                <input type="hidden" name="modal" value="true" />
+                                <?php } ?>
+                                <button type="submit"><?php echo escape($lang['product_recognition_unpin']); ?></button>
                             </form>
                             <?php } ?>
                             <?php if ($ref_status === 'pinned' || $ref_status === 'derived') { ?>
@@ -373,8 +428,8 @@ function HookProduct_recognitionViewCustompanels()
                             </form>
                             <?php } ?>
                         </td>
-                        <?php } ?>
                     </tr>
+                        <?php } ?>
                     <?php } ?>
                 </table>
             </div>
@@ -384,10 +439,98 @@ function HookProduct_recognitionViewCustompanels()
     <script type="application/json" id="pr-colorway-json"><?php
         echo json_encode($colorway_leaves, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS);
     ?></script>
+    <script type="application/json" id="pr-facet-json"><?php
+        echo json_encode(pr_facet_catalog(), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS);
+    ?></script>
     <script>
     (function () {
         var cwEl = document.getElementById('pr-colorway-json');
         var fieldColorways = cwEl ? JSON.parse(cwEl.textContent) : [];
+        var facetEl = document.getElementById('pr-facet-json');
+        var facetCatalog = facetEl ? JSON.parse(facetEl.textContent) : [];
+        function facetSelect(form, name) {
+            return document.querySelector('select[name="' + name + '"][form="' + form.id + '"]');
+        }
+        function fillSelect(sel, blankLabel, values, keep) {
+            if (!sel) {
+                return;
+            }
+            sel.innerHTML = '';
+            var blank = document.createElement('option');
+            blank.value = '';
+            blank.textContent = blankLabel;
+            sel.appendChild(blank);
+            var seen = {};
+            values.forEach(function (value) {
+                if (!value || seen[value]) {
+                    return;
+                }
+                seen[value] = true;
+                var o = document.createElement('option');
+                o.value = value;
+                o.textContent = value;
+                sel.appendChild(o);
+            });
+            if (keep && seen[keep]) {
+                sel.value = keep;
+            }
+        }
+        function syncModel(form) {
+            var family = form.querySelector('[name=family]');
+            var sub = facetSelect(form, 'subclass');
+            var sub2 = facetSelect(form, 'subclass2');
+            var hidden = form.querySelector('[name=model_text]');
+            if (!family || !hidden) {
+                return;
+            }
+            var familyValue = family.value;
+            var subValue = sub ? sub.value : '';
+            var sub2Value = sub2 ? sub2.value : '';
+            var match = null;
+            facetCatalog.forEach(function (row) {
+                if (match || row.family !== familyValue) {
+                    return;
+                }
+                if ((row.subclass || '') !== subValue || (row.subclass2 || '') !== sub2Value) {
+                    return;
+                }
+                match = row;
+            });
+            if (match) {
+                hidden.value = match.name;
+            } else if (subValue === '' && sub2Value === '') {
+                hidden.value = familyValue;
+            } else {
+                hidden.value = '';
+            }
+        }
+        function fillFacets(form, resetSub) {
+            var family = form.querySelector('[name=family]');
+            var sub = facetSelect(form, 'subclass');
+            var sub2 = facetSelect(form, 'subclass2');
+            if (!family || !sub) {
+                return;
+            }
+            var subs = [];
+            var sub2s = [];
+            facetCatalog.forEach(function (row) {
+                if (row.family !== family.value) {
+                    return;
+                }
+                if (row.subclass) {
+                    subs.push(row.subclass);
+                }
+                if (!resetSub && sub.value !== '' && row.subclass !== sub.value) {
+                    return;
+                }
+                if (row.subclass2) {
+                    sub2s.push(row.subclass2);
+                }
+            });
+            fillSelect(sub, <?php echo json_encode($lang['product_recognition_pick_subclass']); ?>, subs, resetSub ? '' : sub.value);
+            fillSelect(sub2, <?php echo json_encode($lang['product_recognition_pick_subclass2']); ?>, sub2s, resetSub ? '' : (sub2 ? sub2.value : ''));
+            syncModel(form);
+        }
         function addColorway(sel, seen, name) {
             if (!name || seen[name]) {
                 return;
@@ -432,10 +575,23 @@ function HookProduct_recognitionViewCustompanels()
             }
         }
         document.querySelectorAll('form.pr-picker').forEach(function (form) {
-            var modelSel = modelSelectFor(form);
-            if (modelSel) {
-                modelSel.addEventListener('change', function () {
+            var familySel = form.querySelector('[name=family]');
+            if (familySel) {
+                familySel.addEventListener('change', function () {
+                    fillFacets(form, true);
                     fillColorway(form);
+                });
+            }
+            var subSel = facetSelect(form, 'subclass');
+            if (subSel) {
+                subSel.addEventListener('change', function () {
+                    fillFacets(form, false);
+                });
+            }
+            var sub2Sel = facetSelect(form, 'subclass2');
+            if (sub2Sel) {
+                sub2Sel.addEventListener('change', function () {
+                    syncModel(form);
                 });
             }
             fillColorway(form);
@@ -447,10 +603,21 @@ function HookProduct_recognitionViewCustompanels()
                     return;
                 }
                 var pickerId = hidden.id.replace(/-find-model$/, '');
-                var picker = document.querySelector('#' + pickerId + ' [name=model_text]');
-                if (picker) {
-                    hidden.value = picker.value;
+                var picker = document.getElementById(pickerId);
+                var model = picker ? picker.querySelector('[name=model_text]') : null;
+                if (model) {
+                    hidden.value = model.value;
                 }
+                ['family', 'subclass', 'subclass2', 'colorway_text'].forEach(function (name) {
+                    var src = picker ? picker.querySelector('[name="' + name + '"]') : null;
+                    if (!src) {
+                        src = document.querySelector('[name="' + name + '"][form="' + pickerId + '"]');
+                    }
+                    var dst = form.querySelector('[name="' + name + '"]');
+                    if (src && dst) {
+                        dst.value = src.value;
+                    }
+                });
             });
         });
         document.querySelectorAll('form.pr-pin').forEach(function (form) {

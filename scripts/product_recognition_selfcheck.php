@@ -291,27 +291,36 @@ pr_check("Friar Brown without slash binds",
 
 $pr_untagged = pr_catalog_apply_plan([], 6820, 1, [], null, [], 1);
 pr_check("untagged resource with one cutout adds model without auto-pin",
-         $pr_untagged === ['add_model' => true, 'skip_model' => false, 'pin' => false, 'add_colorway' => true, 'add_collab' => false]);
+         $pr_untagged === ['add_model' => true, 'replace_model' => false, 'skip_model' => false,
+             'pin' => false, 'add_colorway' => true, 'replace_colorway' => false,
+             'add_collab' => false, 'replace_collab' => false]);
 
 $pr_same = pr_catalog_apply_plan([6820], 6820, 1, [1], null, [], 1);
 pr_check("same model already present does not auto-pin, does not re-add colorway",
-         $pr_same === ['add_model' => true, 'skip_model' => false, 'pin' => false, 'add_colorway' => false, 'add_collab' => false]);
+         $pr_same === ['add_model' => true, 'replace_model' => false, 'skip_model' => false,
+             'pin' => false, 'add_colorway' => false, 'replace_colorway' => false,
+             'add_collab' => false, 'replace_collab' => false]);
 
 $pr_path = pr_catalog_apply_plan([6767], 6820, 1, [], null, [], 1);
-pr_check("path-derived different model is kept; colorway still added",
-         $pr_path === ['add_model' => false, 'skip_model' => true, 'pin' => false, 'add_colorway' => true, 'add_collab' => false]);
+pr_check("a different model is replaced; colorway is added; pin stays a button",
+         $pr_path === ['add_model' => false, 'replace_model' => true, 'skip_model' => false,
+             'pin' => false, 'add_colorway' => true, 'replace_colorway' => false,
+             'add_collab' => false, 'replace_collab' => false]);
 
 $pr_unbound = pr_catalog_apply_plan([], null, null, []);
 pr_check("unbound pick writes nothing",
-         $pr_unbound === ['add_model' => false, 'skip_model' => true, 'pin' => false, 'add_colorway' => false, 'add_collab' => false]);
+         $pr_unbound === ['add_model' => false, 'replace_model' => false, 'skip_model' => true,
+             'pin' => false, 'add_colorway' => false, 'replace_colorway' => false,
+             'add_collab' => false, 'replace_collab' => false]);
 
-$pr_two = pr_catalog_apply_plan([6820, 6767], 6799, 1, []);
-pr_check("two existing leaves still skip a third model",
-         $pr_two['skip_model'] === true && $pr_two['pin'] === false && $pr_two['add_colorway'] === true);
+$pr_two = pr_catalog_apply_plan([6820, 6767], 6799, 1, [2]);
+pr_check("two existing leaves are replaced by the chosen model",
+         $pr_two['replace_model'] === true && $pr_two['pin'] === false
+         && $pr_two['replace_colorway'] === true && $pr_two['add_colorway'] === false);
 
 $pr_dual = pr_catalog_apply_plan([6820, 6767], 6820, 1, []);
-pr_check("dual-tagged resource is not pinned for either leaf",
-         $pr_dual['skip_model'] === true && $pr_dual['pin'] === false);
+pr_check("explicit apply of one of two leaves drops the other",
+         $pr_dual['replace_model'] === true && $pr_dual['pin'] === false && $pr_dual['skip_model'] === false);
 
 $pr_collab_plan = pr_catalog_apply_plan([], null, null, [], 99, []);
 pr_check("collab-only pick adds collab",
@@ -329,6 +338,8 @@ pr_check("operator pin needs a positive leaf model",
          pr_operator_pin(0, 6820, 1) === 'failed');
 pr_check("operator exclude needs a resource",
          pr_operator_exclude(0, 1) === 'failed');
+pr_check("operator unpin needs a resource",
+         pr_operator_unpin(0, 1) === 'failed');
 
 $pr_class_mossy = pr_classify_sheet_color('Mossy Oak', 'Ryder_Mossy_Oak');
 pr_check("Mossy Oak sheet color is collab not colorway",
@@ -449,9 +460,25 @@ pr_check("API key tooltip says leave blank",
 pr_check("setup intro does not claim every label has a hover tooltip",
          !str_contains($pr_lang_src, 'Hover a label for what it does')
          && str_contains($pr_lang_src, 'Text fields have a hover description'));
+$pr_setup_form_src = (string)file_get_contents(dirname(__DIR__) . '/include/product_recognition_setup.php');
 pr_check("auto-apply help is visible HTML, not a boolean title",
-         str_contains($pr_setup_src, 'config_add_html')
-         && str_contains($pr_setup_src, 'product_recognition_setup_auto_apply_help'));
+         str_contains($pr_setup_form_src, 'config_add_html')
+         && str_contains($pr_setup_form_src, 'product_recognition_setup_auto_apply_help'));
+include_once dirname(__DIR__) . '/include/product_recognition_setup.php';
+$pr_setup_built = pr_setup_page_def();
+$pr_setup_post = strpos($pr_setup_src, 'config_gen_setup_post($page_def, $plugin_name)');
+$pr_setup_never_fn = strpos($pr_setup_src, 'pr_never_auto_apply_default()');
+$pr_setup_def_call = strpos($pr_setup_src, 'pr_setup_page_def()');
+pr_check("service URL stays outside Advanced and the knobs stay on the form",
+         pr_setup_advanced_inputs_inside_details($pr_setup_built['page_def'])
+         && $pr_setup_def_call !== false
+         && $pr_setup_post !== false
+         && $pr_setup_never_fn !== false
+         && $pr_setup_def_call < $pr_setup_post
+         && $pr_setup_post < $pr_setup_never_fn
+         && str_contains($pr_setup_src, 'product_recognition_setup_never_list_label')
+         && str_contains($pr_setup_src, 'product_recognition_setup_never_list_fixed')
+         && str_contains($pr_setup_src, '$page_def[$never_list_at]'));
 
 # --- never auto-apply list (#464): parse + unique leaf bind, no DB --------------------
 $pr_never_grown = pr_never_auto_apply_default();
@@ -470,21 +497,25 @@ pr_check("config.php default never-auto-apply list is the grown default",
          && str_contains($pr_never_grown, 'Loma S-Class')
          && str_contains($pr_never_grown, 'Loma XL S-Class')
          && str_contains($pr_never_grown, 'El Camino S-Class')
-         && str_contains($pr_never_grown, 'Ryder S-Class'));
-pr_check("grown never-auto-apply default folds to 11 names",
+         && str_contains($pr_never_grown, 'Ryder S-Class')
+         && str_contains($pr_never_grown, 'Ryder 14 S-Class'));
+pr_check("grown never-auto-apply default folds to 12 names",
          pr_never_auto_apply_names($pr_never_grown) === [
              'loma xl', 'big rig s class', 'ryder 14', 'loma lite', 'el camino superlite',
              'ryder lefty', 'storm ryder', 'loma s class', 'loma xl s class',
-             'el camino s class', 'ryder s class',
+             'el camino s class', 'ryder s class', 'ryder 14 s class',
          ]);
 pr_check("three-name never-auto-apply list still folds to 3 names",
          pr_never_auto_apply_names($pr_never_raw) === ['loma xl', 'big rig s class', 'ryder 14']);
 
 $pr_family_leaves = [6820 => 'Loma', 6842 => 'Loma XL', 6767 => 'Ryder',
                      6901 => 'Big Rig', 6911 => 'El Camino', 6912 => 'Loma Lite'];
-pr_check("never-auto-apply Name tokens bind the Family leaf",
+pr_check("never-auto-apply does not bind Ryder 14 or Big Rig S-Class onto the Family leaf",
          pr_load_identity_grammar()
-         && pr_never_auto_apply_nodes($pr_family_leaves, $pr_never_raw) === [6842, 6901, 6767]);
+         && pr_never_auto_apply_nodes($pr_family_leaves, $pr_never_raw) === [6842]
+         && pr_never_auto_apply_unmatched($pr_family_leaves, $pr_never_raw) === [
+             'big rig s class', 'ryder 14',
+         ]);
 pr_check("Loma unique-matches the parent node, not Loma XL",
          pr_never_auto_apply_nodes($pr_family_leaves, "Loma") === [6820]);
 pr_check("empty never-auto-apply list matches no nodes",
@@ -498,20 +529,39 @@ pr_check("grown never-auto-apply misses stay visible against family leaves",
              $pr_family_leaves,
              $pr_never_grown . ', Ryder 16'
          ), true));
-pr_check("grown never-auto-apply list binds Family leaves and dedupes variants",
+pr_check("grown never-auto-apply list binds Name leaves that are also families",
          pr_never_auto_apply_nodes($pr_family_leaves, $pr_never_grown) === [
-             6842, 6901, 6767, 6912, 6911, 6820,
+             6842, 6912,
          ]);
+$pr_name_leaves = [
+    4 => 'Ryder', 5 => 'Ryder 14', 6 => 'Ryder S-Class', 7 => 'Ryder 14 S-Class',
+    8 => 'Big Rig', 9 => 'Big Rig S-Class',
+];
+pr_check("never-auto-apply binds Ryder 14 and Ryder 14 S-Class on their own Name nodes",
+         pr_never_auto_apply_nodes($pr_name_leaves, "Ryder 14, Ryder 14 S-Class, Ryder S-Class") === [5, 7, 6]
+         && pr_never_auto_apply_nodes($pr_name_leaves, "Ryder 14") === [5]);
 
 pr_check("auto-apply setup flag stays false",
          (bool)$GLOBALS['product_recognition_auto_apply'] === false);
 $pr_ok_threshold = ['status' => 'ok', 'min_confidence' => 0.8, 'never_auto_apply' => 0];
-pr_check("100% match does not auto-apply while the flag is off",
-         pr_classify_should_auto_apply(false, 1.0, 1.0, $pr_ok_threshold, false, false) === false);
+pr_check("review page 100% is confidence rounded like the page",
+         pr_confidence_displays_as_100(1.0)
+         && pr_confidence_displays_as_100(0.995)
+         && !pr_confidence_displays_as_100(0.994));
+pr_check("review 100% auto-applies while the flag is off",
+         pr_classify_should_auto_apply(false, 0.8, 1.0, $pr_ok_threshold, false, false) === true
+         && pr_classify_should_auto_apply(false, 0.8, 0.995, null, false, false) === true);
+pr_check("99% does not auto-apply while the flag is off",
+         pr_classify_should_auto_apply(false, 1.0, 0.994, $pr_ok_threshold, false, false) === false);
 pr_check("100% match auto-applies when the flag is on",
          pr_classify_should_auto_apply(true, 1.0, 1.0, null, false, false) === true);
-pr_check("100% match still refuses never-auto-apply",
-         pr_classify_should_auto_apply(true, 1.0, 1.0, $pr_ok_threshold, false, true) === false);
+pr_check("100% on the never-auto-apply list still refuses",
+         pr_classify_should_auto_apply(false, 1.0, 1.0, $pr_ok_threshold, false, true) === false
+         && pr_classify_should_auto_apply(false, 1.0, 1.0, ['status' => 'ok', 'min_confidence' => 0.8, 'never_auto_apply' => 1], false, false) === false);
+pr_check("below 100% the never-auto-apply list still refuses",
+         pr_classify_should_auto_apply(true, 0.9, 0.9, $pr_ok_threshold, false, true) === false);
+pr_check("a prior rejection refuses even at 100% on the never-auto-apply list",
+         pr_classify_should_auto_apply(false, 1.0, 1.0, $pr_ok_threshold, true, true) === false);
 pr_check("flag on still needs threshold when similarity is not 100%",
          pr_classify_should_auto_apply(true, 0.9, 0.85, $pr_ok_threshold, false, false) === true
          && pr_classify_should_auto_apply(true, 0.9, 0.7, $pr_ok_threshold, false, false) === false);
@@ -770,6 +820,21 @@ if (function_exists('imagecreatetruecolor')) {
     ], [1 => 'Cruiser', 42 => 'El Camino'], ['El Camino']);
     pr_check('tagged model beats a higher-vote rival for colorway',
              $tagged['model_name'] === 'El Camino' && $tagged['top_reference'] === 57);
+    $tagged_cw = pr_identity_from_identify_result([
+        'candidates' => [
+            ['model_node' => 1, 'confidence' => 0.90, 'top_reference' => 10],
+            ['model_node' => 42, 'confidence' => 0.30, 'top_reference' => 57],
+        ],
+        'neighbors' => [
+            ['model_node' => 42, 'similarity' => 0.7, 'resource' => 1, 'colorway' => 'Cream'],
+            ['model_node' => 42, 'similarity' => 0.2, 'resource' => 2, 'colorway' => 'Black'],
+            ['model_node' => 1, 'similarity' => 0.9, 'resource' => 3, 'colorway' => 'Navy'],
+        ],
+    ], [1 => 'Cruiser', 42 => 'El Camino'], ['El Camino']);
+    pr_check('a tagged model votes colorway from its own neighbors',
+             $tagged_cw['model_name'] === 'El Camino'
+             && $tagged_cw['colorway'] === 'Cream'
+             && $tagged_cw['top_reference'] === 57);
     pr_check('tagged model absent from the vote stays empty',
              pr_identity_from_identify_result([
                  'candidates' => [[
