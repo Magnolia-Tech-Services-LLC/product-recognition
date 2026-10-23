@@ -1,6 +1,6 @@
 <?php
 /**
- * Catalog picker apply from the resource view panel. Add-only Model / Colorway / Collab.
+ * Panel apply. Replaces Name, colorway, and collaboration when she picks a different value.
  */
 include "../../../include/boot.php";
 include "../../../include/authenticate.php";
@@ -28,13 +28,16 @@ if (enforcePostRequest(false)) {
         $collab_text,
         (int)getval("region", 0)
     );
-    if ($plan["add_model"]) {
-        $status = ($plan["add_colorway"] || $plan["add_collab"]) ? "applied" : "model";
-    } elseif ($plan["add_colorway"] && $plan["add_collab"]) {
+    $model_changed = $plan["add_model"] || $plan["replace_model"];
+    $color_changed = $plan["add_colorway"] || $plan["replace_colorway"];
+    $collab_changed = $plan["add_collab"] || $plan["replace_collab"];
+    if ($model_changed) {
+        $status = ($color_changed || $collab_changed) ? "applied" : "model";
+    } elseif ($color_changed && $collab_changed) {
         $status = "applied";
-    } elseif ($plan["add_colorway"]) {
+    } elseif ($color_changed) {
         $status = "colorway";
-    } elseif ($plan["add_collab"]) {
+    } elseif ($collab_changed) {
         $status = "collab";
     } elseif ($model_text === "" && $colorway_text === "" && $collab_text === "") {
         $status = "none";

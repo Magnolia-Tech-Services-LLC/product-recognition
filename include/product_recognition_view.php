@@ -837,8 +837,8 @@ function pr_identity_colorway(int $model_node, int $top_reference): string
 
 /**
  * @param list<string> $prefer_models  If the resource is already tagged, use that model's
- *   candidate rather than a rival that won the vote. Colorway is still inferred
- *   only when the model has one colour.
+ *   candidate rather than a rival that won the vote. Colorway is voted from that
+ *   Name's neighbors. A blank vote still falls through to the one-colour catalog.
  * @return array{model_node:int,model_name:string,colorway:string,confidence:?float,top_reference:?int}
  */
 function pr_identity_from_identify_result(?array $result, array $leaf_models = [],
@@ -873,14 +873,53 @@ function pr_identity_from_identify_result(?array $result, array $leaf_models = [
         }
         $top = $matched;
     }
+    if ($prefer_models === [] && !empty($result['neighbors']) && is_array($result['neighbors'])) {
+        $agg = pr_aggregate_service_neighbors($result['neighbors'], $leaf_models);
+        if ($agg['suggest']) {
+            $label = $agg['name'] !== '' ? $agg['name'] : $agg['family'];
+            $node = 0;
+            foreach ($leaf_models as $id => $leaf) {
+                if (pr_fold_label((string)$leaf) === pr_fold_label($label)) {
+                    $node = (int)$id;
+                    break;
+                }
+            }
+            return [
+                'model_node' => $node,
+                'model_name' => $label,
+                'colorway' => $agg['name'] !== '' ? $agg['colorway'] : '',
+                'confidence' => $agg['confidence'],
+                'top_reference' => $agg['name'] !== '' && $agg['top_reference'] > 0 ? $agg['top_reference'] : null,
+                'family' => $agg['family'],
+                'subclass' => $agg['subclass'],
+                'subclass2' => $agg['subclass2'],
+                'name_resolved' => $agg['name'] !== '',
+            ];
+        }
+    }
     $node = (int)($top['model_node'] ?? 0);
     $ref = (int)($top['top_reference'] ?? $result['top_reference'] ?? 0);
+    $model_name = ($node > 0 && isset($leaf_models[$node])) ? (string)$leaf_models[$node] : '';
+    $facets = ['family' => '', 'subclass' => '', 'subclass2' => ''];
+    $identity = $model_name !== '' ? pr_identity_for_reference_label($model_name) : null;
+    if ($identity !== null) {
+        $facets = pr_facets_from_identity($identity);
+    }
+    $colorway = '';
+    if ($prefer_models !== [] && $model_name !== ''
+        && !empty($result['neighbors']) && is_array($result['neighbors'])) {
+        $colorway = pr_voted_colorway_for_names($result['neighbors'], $leaf_models, [$model_name]);
+    }
     return [
         'model_node' => $node,
-        'model_name' => ($node > 0 && isset($leaf_models[$node])) ? (string)$leaf_models[$node] : '',
-        'colorway' => '',
+        'model_name' => $model_name,
+        'colorway' => $colorway,
         'confidence' => isset($top['confidence']) ? (float)$top['confidence'] : null,
         'top_reference' => $ref > 0 ? $ref : null,
+        'family' => $facets['family'],
+        'subclass' => $facets['subclass'],
+        'subclass2' => $facets['subclass2'],
+        'name_resolved' => $identity !== null,
     ];
 }
 
@@ -890,8 +929,8 @@ function pr_identify_cache_file(int $ref, string $checksum, int $index): string
 }
 
 /**
- * DINOv2 /identify on one cutout. Colorway is filled only when that model has
- * one colour in the catalog (or, with no sheet row, on its reference photos).
+ * DINOv2 /identify on one cutout. A blank colorway vote is filled only when
+ * that model has one colour in the catalog (or, with no sheet row, on its reference photos).
  *
  * @return array{model_node:int,model_name:string,colorway:string,confidence:?float,top_reference:?int}
  */
@@ -930,7 +969,7 @@ function pr_region_identity(int $ref, string $checksum, int $index, string $mask
         $leaf_models = pr_leaf_models();
     }
     $identity = pr_identity_from_identify_result($result, $leaf_models, $prefer_models);
-    if ($identity['model_node'] > 0) {
+    if ($identity['model_node'] > 0 && ($identity['name_resolved'] ?? true) && $identity['colorway'] === '') {
         $identity['colorway'] = pr_identity_colorway(
             $identity['model_node'],
             (int)($identity['top_reference'] ?? 0)
@@ -1052,7 +1091,7 @@ function pr_view_product_rows(int $resource): array
         } elseif ($identity['colorway'] !== '') {
             $row_cw = $identity['colorway'];
         }
-        if ($row_cw === '' && $row_model !== '' && is_file($mask)) {
+        if ($row_cw === '' && $row_model !== '' && ($identity['name_resolved'] ?? true) && is_file($mask)) {
             $row_cw = pr_colorway_from_mask($mask, $row_model, $catalog);
         }
         $out[] = [
@@ -1061,6 +1100,9 @@ function pr_view_product_rows(int $resource): array
             'product' => $product,
             'model_name' => $row_model,
             'model_node' => (int)$identity['model_node'],
+            'family' => (string)($identity['family'] ?? ''),
+            'subclass' => (string)($identity['subclass'] ?? ''),
+            'subclass2' => (string)($identity['subclass2'] ?? ''),
             'colorway' => $row_cw,
             # Tagged resources already have a model; the vote share is not a suggestion score.
             'confidence' => $prefer === [] ? ($identity['confidence'] ?? $confidence) : $confidence,

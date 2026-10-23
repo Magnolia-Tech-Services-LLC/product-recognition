@@ -9,7 +9,7 @@
 include_once dirname(__FILE__) . '/product_recognition_identity.php';
 
 /**
- * True when the active product field exists (leftover Model-tree field, else Family).
+ * True when the active product field exists (leftover nodes, else Name).
  */
 function pr_is_configured(): bool
 {
@@ -81,7 +81,7 @@ function pr_service_health(): bool
 /**
  * Shared CTE: one product-field node per reference resource.
  *
- * Family (flat): exactly one Family node. A parent on that node is not copied.
+ * Name (flat): exactly one Name node. A parent on that node is not copied.
  * Model tree: most-specific leaf. Two `?` placeholders, both the product field.
  * `candidate` is not named `specific` (reserved in MySQL 9.7).
  */
@@ -331,6 +331,16 @@ function pr_reference_action(?array $current, int $model_node): string
 }
 
 /**
+ * A derived row already on Name must survive --references while leftover
+ * Family or Model-tree refs are still pending. Relabel would write the
+ * Family node back over it.
+ */
+function pr_sync_keeps_name_binding(string $action, bool $existing_on_name_field): bool
+{
+    return $action === 'relabel' && $existing_on_name_field;
+}
+
+/**
  * What an operator pin should do to one product_reference row.
  *
  * excluded and pinned-to-a-different-model are admin decisions and stay put.
@@ -508,6 +518,30 @@ function pr_operator_exclude(int $resource, int $user): string
         array("i", $user, "i", $resource)
     );
     return sql_affected_rows() === 1 ? 'excluded' : 'failed';
+}
+
+/**
+ * Remove the pin and leave a normal example of the same product.
+ *
+ * @return 'unpinned'|'denied'|'gone'|'failed'
+ */
+function pr_operator_unpin(int $resource, int $user): string
+{
+    if ($resource <= 0 || $user <= 0) {
+        return 'failed';
+    }
+    if (!pr_can_edit_resource($resource)) {
+        return 'denied';
+    }
+    $current = pr_reference_row($resource);
+    if ($current === null || $current['status'] !== 'pinned') {
+        return 'gone';
+    }
+    ps_query(
+        "UPDATE product_reference SET status = 'derived' WHERE resource = ? AND status = 'pinned'",
+        array("i", $resource)
+    );
+    return sql_affected_rows() === 1 ? 'unpinned' : 'failed';
 }
 
 /**
@@ -693,6 +727,42 @@ function pr_sync_references(bool $dry_run = false): array
         }
     }
 
+    # Orphaned rows whose model node still exists were refused by migrate
+    # (Name tags disagree, or two Names). Reviving those would retarget
+    # Ryder 14 S-Class onto Ryder. A deleted pin is not in this set: reconcile
+    # already marked it, and its node is gone, so revival stays the contract.
+    $live_orphan_nodes = [];
+    $orphan_node_ids = [];
+    foreach ($existing as $resource => $row) {
+        if ($row['status'] !== 'orphaned' || isset($reconciled['resources'][$resource])) {
+            continue;
+        }
+        $orphan_node_ids[(int)$row['model_node']] = true;
+    }
+    if ($orphan_node_ids !== []) {
+        $ids = array_keys($orphan_node_ids);
+        foreach (ps_query(
+            "SELECT ref FROM node WHERE ref IN (" . ps_param_insert(count($ids)) . ")",
+            ps_param_fill($ids, "i")
+        ) as $live) {
+            $live_orphan_nodes[(int)$live['ref']] = true;
+        }
+    }
+
+    $name_bound = [];
+    $name_field = pr_field_ref_by_name('modelkeyword');
+    if ($name_field > 0) {
+        foreach (ps_query(
+            "SELECT pr.resource FROM product_reference pr
+               JOIN node n ON n.ref = pr.model_node
+              WHERE n.resource_type_field = ?
+                AND pr.status = 'derived'",
+            ["i", $name_field]
+        ) as $bound) {
+            $name_bound[(int)$bound['resource']] = true;
+        }
+    }
+
     $stats = ['derived' => count($wanted), 'added' => 0, 'updated' => 0, 'removed' => 0,
               'pinned' => 0, 'excluded' => 0, 'orphaned' => 0, 'conflicts' => [],
               'revived' => [], 'reconciled' => $reconciled];
@@ -716,6 +786,9 @@ function pr_sync_references(bool $dry_run = false): array
                 break;
 
             case 'revive':
+                if (isset($live_orphan_nodes[(int)$current['model_node']])) {
+                    break;
+                }
                 # The pin's model node was deleted and the resource is tagged again. Revive it as
                 # 'derived' and SAY SO. Leaving it inert would strand it: nothing can ever write
                 # 'pinned' for a resource that already carries a product node (see
@@ -740,6 +813,9 @@ function pr_sync_references(bool $dry_run = false): array
                 break;
 
             case 'relabel':
+                if (pr_sync_keeps_name_binding('relabel', isset($name_bound[$resource]))) {
+                    break;
+                }
                 $stats['updated']++;
                 if (!$dry_run) {
                     # Relabelling in place is safe ONLY because load_references detects change
@@ -940,7 +1016,11 @@ function pr_backfill(int $limit, bool $dry_run = false): array
     if ($types === '') {
         throw new RuntimeException("pr_backfill: no resource types configured");
     }
+    # started_at is the cursor this slice resumed from. Wrap rewrites the scan origin to 0
+    # afterwards; the logged "from" must stay the saved cursor, not that 0.
     $resumed_from = (int)get_sysvar('product_recognition_backfill_position', 0);
+    $started_at = $resumed_from;
+    $wrapped = false;
 
     # Stale rows (already embedded, but the file changed since) are NOT cursor-gated. The
     # forward scan below only reaches a given ref once per lap, so a file replaced behind the
@@ -979,12 +1059,26 @@ function pr_backfill(int $limit, bool $dry_run = false): array
     $rows = $remaining > 0 ? ps_query($sql, array("i", $resumed_from, "i", $remaining)) : [];
     if ($rows === [] && $remaining > 0 && $resumed_from > 0) {
         # End of the library: wrap to the start so new arrivals below the cursor are picked up.
+        # A non-empty tail does not wrap in this call. The next call does, once those rows are past.
+        $wrapped = true;
         $resumed_from = 0;
         $rows = ps_query($sql, array("i", 0, "i", $remaining));
     }
 
-    $stats = ['embedded' => 0, 'skipped_no_preview' => 0, 'failed' => 0,
-              'resumed_from' => $resumed_from, 'last' => $resumed_from];
+    $stats = [
+        'embedded' => 0,
+        'skipped_no_preview' => 0,
+        'skipped_no_preview_stale' => 0,
+        'skipped_no_preview_forward' => 0,
+        'failed' => 0,
+        'failed_stale' => 0,
+        'failed_forward' => 0,
+        'started_at' => $started_at,
+        'wrapped' => $wrapped,
+        # resumed_from stays the pre-wrap cursor. last starts at the scan origin (0 after a wrap).
+        'resumed_from' => $started_at,
+        'last' => $resumed_from,
+    ];
 
     # Shared per-row embed step. $advances_cursor is false for stale rows: a stale row can have
     # any ref, including one below the forward-scan cursor, and must not drag $stats['last']
@@ -999,12 +1093,16 @@ function pr_backfill(int $limit, bool $dry_run = false): array
             return;
         }
         $path = get_resource_path($ref, true, 'pre', false, 'jpg');
+        $lane = $advances_cursor ? 'forward' : 'stale';
         if (!file_exists($path)) {
             # A preview-less resource is counted and skipped, never allowed to stall a batch.
             # Library-wide there are 9 such resources; 4 of them are of an eligible resource
             # type and so are the ones this backfill actually meets. Both numbers are real -
             # they describe different populations.
+            # file_exists is false for a missing file and for a stat error, so a mount blip
+            # counts as no preview. Forward misses move last and wait until the cursor wraps.
             $stats['skipped_no_preview']++;
+            $stats['skipped_no_preview_' . $lane]++;
             return;
         }
         try {
@@ -1014,10 +1112,12 @@ function pr_backfill(int $limit, bool $dry_run = false): array
                 # One corrupt file (the known IDAT CRC error PNG) must never abort a batch -
                 # the lesson of #35 and #36.
                 $stats['failed']++;
+                $stats['failed_' . $lane]++;
             }
         } catch (Throwable $e) {
             logScript("product_recognition: resource $ref failed: " . $e->getMessage());
             $stats['failed']++;
+            $stats['failed_' . $lane]++;
         }
     };
 
@@ -1043,6 +1143,71 @@ function pr_backfill(int $limit, bool $dry_run = false): array
         array(), 0
     );
     return $stats;
+}
+
+/**
+ * True when this slice selected work and stored no vectors.
+ * A slice that selected nobody stays quiet: remaining can still be the preview-less floor.
+ */
+function pr_backfill_stored_nothing(array $stats): bool
+{
+    return (int)($stats['embedded'] ?? 0) === 0
+        && ((int)($stats['skipped_no_preview'] ?? 0) + (int)($stats['failed'] ?? 0)) > 0;
+}
+
+/** One backfill line, shared by the nightly log, --all, and --backfill. */
+function pr_format_backfill_summary(array $stats): string
+{
+    return sprintf(
+        'embedded %d, skipped no preview %d (stale %d, forward %d), failed %d (stale %d, forward %d), from %d to %d%s, outstanding %d',
+        (int)($stats['embedded'] ?? 0),
+        (int)($stats['skipped_no_preview'] ?? 0),
+        (int)($stats['skipped_no_preview_stale'] ?? 0),
+        (int)($stats['skipped_no_preview_forward'] ?? 0),
+        (int)($stats['failed'] ?? 0),
+        (int)($stats['failed_stale'] ?? 0),
+        (int)($stats['failed_forward'] ?? 0),
+        (int)($stats['resumed_from'] ?? 0),
+        (int)($stats['last'] ?? 0),
+        empty($stats['wrapped']) ? '' : ', wrapped',
+        (int)($stats['remaining'] ?? 0)
+    );
+}
+
+/**
+ * The empty-slice sentence. Forward misses are not retried until the cursor wraps.
+ * Stale misses are re-selected next slice and do not move last.
+ */
+function pr_backfill_empty_note(array $stats): string
+{
+    $note = sprintf(
+        'product_recognition: backfill stored no vectors in this slice (skipped no preview %d, failed %d). Cursor saved at %d.',
+        (int)($stats['skipped_no_preview'] ?? 0),
+        (int)($stats['failed'] ?? 0),
+        (int)($stats['last'] ?? 0)
+    );
+    $forward = (int)($stats['skipped_no_preview_forward'] ?? 0) + (int)($stats['failed_forward'] ?? 0);
+    if ($forward > 0) {
+        $note .= ' Forward skips and failures wait until the cursor wraps.';
+    }
+    return $note;
+}
+
+/** Log the slice immediately, and write the empty-slice sentence to the script log and STDERR. */
+function pr_report_backfill_slice(array $stats): void
+{
+    $line = 'product_recognition: backfill ' . pr_format_backfill_summary($stats);
+    if (function_exists('logScript')) {
+        logScript($line);
+    }
+    if (!pr_backfill_stored_nothing($stats)) {
+        return;
+    }
+    $note = pr_backfill_empty_note($stats);
+    if (function_exists('logScript')) {
+        logScript($note);
+    }
+    fwrite(STDERR, $note . "\n");
 }
 
 /**
@@ -1287,6 +1452,125 @@ function pr_calibrate(bool $dry_run = false): array
 }
 
 /**
+ * Become the Super Admin user so a CLI accept passes the same edit check as the review page.
+ */
+function pr_act_as_super_admin(): int
+{
+    global $userref, $usergroup, $userpermissions;
+    $groups = ps_query(
+        "SELECT ref, permissions FROM usergroup WHERE name = 'Super Admin' ORDER BY ref LIMIT 1"
+    );
+    if ($groups === []) {
+        return 0;
+    }
+    $users = ps_query(
+        "SELECT ref FROM user WHERE usergroup = ? ORDER BY ref LIMIT 1",
+        array("i", (int)$groups[0]['ref'])
+    );
+    if ($users === []) {
+        return 0;
+    }
+    $userref = (int)$users[0]['ref'];
+    $usergroup = (int)$groups[0]['ref'];
+    $userpermissions = array_values(array_filter(
+        explode(',', (string)$groups[0]['permissions']),
+        'strlen'
+    ));
+    return $userref;
+}
+
+/**
+ * Accept open review rows the page shows as 100% confidence.
+ * A never-auto-apply name stays queued at 100%. Below 100% is not in this set.
+ * The write is the Accept button.
+ *
+ * @return array{accepted:int,tagged:int,kept:int,skipped_never:int,denied:int,other:int,user:int}
+ */
+function pr_accept_certain_open_suggestions(bool $dry_run = false): array
+{
+    $stats = [
+        'accepted' => 0,
+        'tagged' => 0,
+        'kept' => 0,
+        'skipped_never' => 0,
+        'denied' => 0,
+        'other' => 0,
+        'user' => 0,
+    ];
+    $field = pr_product_field();
+    if ($field <= 0) {
+        return $stats;
+    }
+    # Same hold as classify. A displayed 100% must not tag while tree refs remain.
+    # A person accepting still goes through pr_accept_suggestion, which uses
+    # pr_is_leaf_model and is not blocked here.
+    if (pr_pending_tree_field() > 0) {
+        return $stats;
+    }
+    $rows = ps_query(
+        "SELECT s.ref, s.model_node, s.confidence
+           FROM product_suggestion s
+           JOIN resource r ON r.ref = s.resource AND r.archive = 0
+          WHERE s.state = 'open'
+            AND s.confidence >= 0.994
+            AND NOT EXISTS (
+                  SELECT 1 FROM resource_node rn
+                    JOIN node mn ON mn.ref = rn.node AND mn.resource_type_field = ?
+                   WHERE rn.resource = s.resource)
+          ORDER BY s.resource, s.rank_order",
+        array("i", $field)
+    );
+    $never_nodes = pr_nodes_withheld_from_auto_apply();
+    $todo = [];
+    foreach ($rows as $row) {
+        if (!pr_confidence_displays_as_100((float)$row['confidence'])) {
+            continue;
+        }
+        if (!pr_is_leaf_model((int)$row['model_node'])) {
+            continue;
+        }
+        if (isset($never_nodes[(int)$row['model_node']])) {
+            $stats['skipped_never']++;
+            continue;
+        }
+        $todo[] = (int)$row['ref'];
+    }
+    if ($dry_run) {
+        $stats['accepted'] = count($todo);
+        return $stats;
+    }
+    if ($todo === []) {
+        return $stats;
+    }
+    $user = pr_act_as_super_admin();
+    $stats['user'] = $user;
+    if ($user <= 0) {
+        $stats['other'] = count($todo);
+        return $stats;
+    }
+    $done = 0;
+    foreach ($todo as $suggestion) {
+        $status = pr_accept_suggestion($suggestion, $user);
+        if ($status === 'accepted') {
+            $stats['accepted']++;
+        } elseif ($status === 'tagged') {
+            $stats['tagged']++;
+        } elseif ($status === 'keep') {
+            $stats['kept']++;
+        } elseif ($status === 'denied') {
+            $stats['denied']++;
+        } else {
+            $stats['other']++;
+        }
+        $done++;
+        if (PHP_SAPI === 'cli' && $done % 200 === 0) {
+            fwrite(STDERR, "certain processed $done\n");
+        }
+    }
+    return $stats;
+}
+
+/**
  * Classify resources that have a vector and no product tag.
  *
  * Only ever adds. A resource that already carries a product node is skipped outright, so
@@ -1302,6 +1586,7 @@ function pr_classify(int $limit, bool $dry_run = false): array
     if ($limit <= 0) {
         throw new RuntimeException("pr_classify: batch limit is $limit; is \$product_recognition_classify_batch set?");
     }
+    $certain = pr_accept_certain_open_suggestions($dry_run);
 
     # Skip fully-rejected resources: every prior candidate was rejected, nothing is open or
     # accepted. Re-running /identify every night would only re-hit the same rejections. Delete
@@ -1354,7 +1639,9 @@ function pr_classify(int $limit, bool $dry_run = false): array
 
     $stats = ['considered' => 0, 'suggested' => 0, 'skipped_low_similarity' => 0,
               'no_candidates' => 0, 'auto_applied' => 0, 'skipped_rejected' => 0,
-              'resumed_from' => $resumed_from, 'last' => $resumed_from];
+              'resumed_from' => $resumed_from, 'last' => $resumed_from,
+              'certain_accepted' => $certain['accepted'] + $certain['tagged'],
+              'certain_skipped_never' => $certain['skipped_never']];
 
     foreach ($candidates as $row) {
         $resource = (int)$row['resource'];
@@ -1399,7 +1686,8 @@ function pr_classify(int $limit, bool $dry_run = false): array
             $rejected[(int)$r['model_node']] = true;
         }
 
-        $eligible = pr_classify_should_auto_apply(
+        $eligible = pr_classify_may_auto_apply(
+            $node,
             (bool)$product_recognition_auto_apply,
             (float)$result['top_similarity'],
             $confidence,
@@ -1425,8 +1713,14 @@ function pr_classify(int $limit, bool $dry_run = false): array
         # writes nothing, but would report as a suggestion on every run from then on.
         $rank = 0;
         foreach ($result['candidates'] as $candidate) {
-            if (isset($rejected[(int)$candidate['model_node']])) {
+            $candidate_node = (int)$candidate['model_node'];
+            if (isset($rejected[$candidate_node])) {
                 $stats['skipped_rejected']++;
+                continue;
+            }
+            # A node on another field is not a product leaf. Queuing it would let the
+            # next certain-accept pass try a 100% row the never-list cannot see.
+            if (!pr_is_leaf_model($candidate_node)) {
                 continue;
             }
             $rank++;
@@ -1678,9 +1972,13 @@ function pr_is_leaf_model(int $node): bool
  * queue is not stuck on the lowest resource IDs. The confidence floor is applied in
  * the page so a resource with only junk suggestions still gets a picker.
  *
+ * A displayed 100% that will be applied does not belong in Product suggestions.
+ * A 100% never-auto-apply name will not be applied, so that resource stays visible.
+ * While leftover tree references remain, nothing is applied, so every row stays visible.
+ *
  * Suggestions can outlive an external tag. Showing those rows would invite an accept that
- * dual-tags the asset; hide them instead. Closing them is left to accept/reject or the next
- * classify pass (which skips resources with a product node).
+ * dual-tags the asset; the product-node check hides them. A past accepted row does not
+ * hide the resource once that tag is gone.
  */
 function pr_open_suggestions(int $limit = 100): array
 {
@@ -1690,6 +1988,24 @@ function pr_open_suggestions(int $limit = 100): array
         return [];
     }
     $fetch = $limit * 2;
+    $certain_sql = '';
+    if (pr_pending_tree_field() <= 0) {
+        # 0.995 rounds to 100% on the review page. 0.994 rounds to 99%.
+        # Hide the resource when a 100% row will actually be applied. A
+        # never-auto-apply node at 100% stays visible so a person can Reject.
+        $visible_certain = pr_nodes_withheld_from_auto_apply();
+        $except_sql = '';
+        if ($visible_certain !== []) {
+            $except_sql = ' AND certain.model_node NOT IN ('
+                . implode(',', array_map('intval', array_keys($visible_certain))) . ')';
+        }
+        $certain_sql = " AND NOT EXISTS (
+                  SELECT 1 FROM product_suggestion certain
+                   WHERE certain.resource = s.resource
+                     AND certain.state = 'open'
+                     AND certain.confidence >= 0.995
+                     {$except_sql})";
+    }
     $resource_rows = ps_query(
         "SELECT s.resource
            FROM product_suggestion s
@@ -1700,6 +2016,7 @@ function pr_open_suggestions(int $limit = 100): array
                   SELECT 1 FROM resource_node rn
                     JOIN node mn ON mn.ref = rn.node AND mn.resource_type_field = ?
                    WHERE rn.resource = s.resource)
+            {$certain_sql}
           GROUP BY s.resource
           ORDER BY MAX(s.confidence) DESC, s.resource
           LIMIT ?",
@@ -2041,11 +2358,11 @@ function pr_cron_due(): bool
 }
 
 /**
- * The nightly pass: references, then a bounded embedding slice, then calibration, then
- * classification. One lock across all four.
+ * The nightly pass: sheet import, studio seed, references, then a bounded embedding
+ * slice, then calibration, then classification. One lock across the whole pass.
  *
- * The hook that calls this also waits ~20 hours between successes so RS's five-minute
- * cron does not re-run a 30-minute pass the moment the lock drops. CLI --all still
+ * The hook that calls this also waits ~20 hours between successes so a short cron
+ * interval does not re-run a 30-minute pass the moment the lock drops. CLI --all still
  * runs on demand and records the timestamp so the next unattended tick backs off.
  *
  * The backfill can outrun its window by design - the full library is ~12 hours - so a slow
@@ -2062,9 +2379,29 @@ function pr_run_all(): array
     }
 
     $out = pr_with_lock(function () use ($product_recognition_batch, $product_recognition_classify_batch) {
+        $sheet = pr_import_master_sheet(false);
+        $studio = pr_studio_seed(false);
+        if (function_exists('logScript')) {
+            $sheet_note = (string)($sheet['error'] ?? '');
+            $studio_note = (string)($studio['error'] ?? '');
+            logScript(sprintf(
+                'product_recognition: sheet %s; studio tagged %d, referenced %d, held %d%s',
+                $sheet_note !== '' ? $sheet_note : 'ok',
+                (int)($studio['tagged'] ?? 0),
+                (int)($studio['referenced'] ?? 0),
+                (int)($studio['references_held'] ?? 0),
+                $studio_note !== '' ? '; studio error: ' . $studio_note : ''
+            ));
+        }
+        $references = pr_sync_references();
+        $backfill = pr_backfill((int)$product_recognition_batch);
+        # STDERR here, before calibrate and classify, so a kill mid-pass still has the line.
+        pr_report_backfill_slice($backfill);
         return [
-            'references' => pr_sync_references(),
-            'backfill' => pr_backfill((int)$product_recognition_batch),
+            'sheet' => $sheet,
+            'studio' => $studio,
+            'references' => $references,
+            'backfill' => $backfill,
             'calibration' => pr_calibrate(),
             'classification' => pr_classify((int)$product_recognition_classify_batch),
         ];
@@ -2526,7 +2863,7 @@ function pr_sync_catalog_nodes(bool $dry_run = false): array
     ) as $row) {
         $model = pr_catalog_model_text($row);
         if (pr_product_field_is_flat()) {
-            $model = pr_catalog_family_label($model);
+            $model = pr_reference_label($model);
         }
         # Towels / section-only: model_text empty uses section — still a model leaf.
         # Refuse pipe / capital-I leftovers from product splits (Magnetic Towel | BLACK).
@@ -2612,6 +2949,23 @@ function pr_unique_folded_node(string $text, array $nodes): ?int
 }
 
 /**
+ * Name-list nodes plus any product_threshold row flagged never_auto_apply.
+ * A displayed 100% on one of these stays in Product suggestions.
+ *
+ * @return array<int,true>
+ */
+function pr_nodes_withheld_from_auto_apply(): array
+{
+    $nodes = array_fill_keys(pr_never_auto_apply_nodes(pr_leaf_models()), true);
+    foreach (ps_query("SELECT model_node, never_auto_apply FROM product_threshold") as $row) {
+        if ((int)$row['never_auto_apply'] === 1) {
+            $nodes[(int)$row['model_node']] = true;
+        }
+    }
+    return $nodes;
+}
+
+/**
  * Folded never-auto-apply names. Split on comma, semicolon, or newline.
  *
  * @return list<string>
@@ -2637,14 +2991,13 @@ function pr_never_auto_apply_names(?string $raw = null): array
 }
 
 /**
- * Config token → Family leaf label. Name-grain tokens (Ryder 14) bind the Family
- * (Ryder) so the list still matches after migrate. Unknown tokens stay as written.
+ * Config token → Name leaf label. Ryder 14 stays Ryder 14. Ryder 14 S-Class
+ * stays Ryder 14 S-Class. Unknown tokens stay as written so the miss is visible.
  */
 function pr_never_auto_apply_bind_label(string $name): string
 {
-    $identity = pr_identity_for_name($name);
-    $family = (string)($identity['family'] ?? '');
-    return $family !== '' ? $family : $name;
+    $label = pr_reference_label($name);
+    return $label !== '' ? $label : $name;
 }
 
 /**
@@ -2778,13 +3131,14 @@ function pr_catalog_picker_rows(): array
 }
 
 /**
- * Decide catalog writes without touching the DB. Path-derived Model is kept (no dual-tag,
- * no replace). Colorway and Collaboration are add-only.
+ * Decide catalog writes without touching the DB. An explicit Apply replaces a
+ * different Name. Colorway and Collaboration replace when the field already has
+ * a value. Pinning stays a separate button.
  *
  * @param list<int> $existing_leaves
  * @param list<int> $existing_colorway
  * @param list<int> $existing_collab
- * @return array{add_model:bool,skip_model:bool,pin:bool,add_colorway:bool,add_collab:bool}
+ * @return array{add_model:bool,replace_model:bool,skip_model:bool,pin:bool,add_colorway:bool,replace_colorway:bool,add_collab:bool,replace_collab:bool}
  */
 function pr_catalog_apply_plan(
     array $existing_leaves,
@@ -2798,18 +3152,60 @@ function pr_catalog_apply_plan(
     $others = $model_node === null
         ? $existing_leaves
         : array_values(array_diff($existing_leaves, [$model_node]));
-    $has_other = $others !== [];
-    $add_model = $model_node !== null && !$has_other;
+    $replace_model = $model_node !== null && $others !== [];
+    $same_colorway = $colorway_node !== null
+        && in_array($colorway_node, $existing_colorway, true);
+    $same_collab = $collab_node !== null
+        && in_array($collab_node, $existing_collab, true);
     # Apply tags only. Pinning is an explicit operator action (panel Pin button / Accept).
     return [
-        'add_model' => $add_model,
-        'skip_model' => !$add_model,
+        'add_model' => $model_node !== null && !$replace_model,
+        'replace_model' => $replace_model,
+        'skip_model' => $model_node === null,
         'pin' => false,
-        'add_colorway' => $colorway_node !== null
-            && !in_array($colorway_node, $existing_colorway, true),
-        'add_collab' => $collab_node !== null
-            && !in_array($collab_node, $existing_collab, true),
+        'add_colorway' => $colorway_node !== null && $existing_colorway === [],
+        'replace_colorway' => $colorway_node !== null && $existing_colorway !== [] && !$same_colorway,
+        'add_collab' => $collab_node !== null && $existing_collab === [],
+        'replace_collab' => $collab_node !== null && $existing_collab !== [] && !$same_collab,
     ];
+}
+
+/**
+ * Drop field nodes that are not part of $keep, then the caller adds the new leaf.
+ *
+ * @param list<int> $existing
+ * @param list<int> $keep
+ */
+function pr_remove_other_field_nodes(int $resource, array $existing, array $keep): void
+{
+    $remove = array_values(array_diff($existing, $keep));
+    if ($remove === []) {
+        return;
+    }
+    delete_resource_nodes($resource, $remove, false);
+}
+
+/**
+ * A Name change moves a pinned or derived example onto the new product.
+ * Excluded rows stay excluded.
+ */
+function pr_follow_reference(int $resource, int $model_node): void
+{
+    $current = pr_reference_row($resource);
+    if ($current === null || $model_node <= 0) {
+        return;
+    }
+    if (!in_array($current['status'], ['pinned', 'derived', 'orphaned'], true)) {
+        return;
+    }
+    $status = $current['status'] === 'orphaned' ? 'derived' : $current['status'];
+    if ($current['model_node'] === $model_node && $current['status'] === $status) {
+        return;
+    }
+    ps_query(
+        "UPDATE product_reference SET model_node = ?, status = ? WHERE resource = ?",
+        array("i", $model_node, "s", $status, "i", $resource)
+    );
 }
 
 function pr_apply_colorway(int $resource, int $node): void
@@ -2841,11 +3237,12 @@ function pr_apply_collab(int $resource, int $node): void
 }
 
 /**
- * Apply a catalog Model + Colorway + Collaboration pick. Add-only. SKU is an audit string
- * from the matching catalog row, not an input the operator posts.
+ * Apply a Name + Colorway + Collaboration pick from the panel. Replaces a different
+ * Name and the identity fields that belong to it. SKU is an audit string.
+ * A pinned example follows the new Name. Nightly sync still does not move a pin.
  *
  * @param list<array{sku:string,model_text:string,colorway_text:string}> $catalog
- * @return array{sku:string,add_model:bool,skip_model:bool,pin:bool,add_colorway:bool,add_collab:bool}
+ * @return array{sku:string,add_model:bool,replace_model:bool,skip_model:bool,pin:bool,add_colorway:bool,replace_colorway:bool,add_collab:bool,replace_collab:bool}
  */
 function pr_apply_catalog_pick(
     int $resource,
@@ -2867,10 +3264,7 @@ function pr_apply_catalog_pick(
     $leaves = pr_leaf_models();
     $bind_text = $model_text;
     if (pr_product_field_is_flat()) {
-        $mapped = pr_catalog_family_label($model_text);
-        if ($mapped !== '') {
-            $bind_text = $mapped;
-        }
+        $bind_text = pr_reference_label($model_text);
     }
     $model_node = pr_bind_catalog_model($bind_text, $leaves);
     $cw_field = (int)($product_recognition_colorway_field ?? 0);
@@ -2905,8 +3299,12 @@ function pr_apply_catalog_pick(
     $plan['sku'] = $sku;
     $plan['pinned'] = false;
 
-    if ($plan['add_model'] && $model_node !== null) {
-        $missing = array_values(array_diff(pr_nodes_to_apply($model_node), $existing_model));
+    if (($plan['add_model'] || $plan['replace_model']) && $model_node !== null) {
+        $want = pr_nodes_to_apply($model_node);
+        if ($plan['replace_model']) {
+            pr_remove_other_field_nodes($resource, $existing_model, $want);
+        }
+        $missing = array_values(array_diff($want, $existing_model));
         if ($missing !== []) {
             add_resource_nodes($resource, $missing, false, false);
             resource_log(
@@ -2916,12 +3314,25 @@ function pr_apply_catalog_pick(
                 sprintf("Product recognition: catalog SKU %s → node %d", $sku, $model_node)
             );
         }
-        pr_write_accept_identity($resource, $model_node);
+        pr_write_accept_identity($resource, $model_node, $model_text, $plan['replace_model']);
+        if ($plan['replace_model']) {
+            pr_follow_reference($resource, $model_node);
+        }
     }
-    if ($plan['add_colorway'] && $colorway_node !== null) {
+    if ($plan['replace_colorway'] && $colorway_node !== null) {
+        pr_remove_other_field_nodes(
+            $resource,
+            $existing_cw,
+            pr_model_nodes_with_ancestors($colorway_node)
+        );
+    }
+    if (($plan['add_colorway'] || $plan['replace_colorway']) && $colorway_node !== null) {
         pr_apply_colorway($resource, $colorway_node);
     }
-    if ($plan['add_collab'] && $collab_node !== null) {
+    if ($plan['replace_collab'] && $collab_node !== null) {
+        pr_remove_other_field_nodes($resource, $existing_collab, [$collab_node]);
+    }
+    if (($plan['add_collab'] || $plan['replace_collab']) && $collab_node !== null) {
         pr_apply_collab($resource, $collab_node);
     }
     return $plan;
@@ -2932,6 +3343,36 @@ function pr_apply_catalog_pick(
  *
  * @param list<int> $refs
  */
+/**
+ * @@ search AND-ing every non-empty product field. A missing node fails closed
+ * so a family-only pick cannot drop Category or Colorway and search the family alone.
+ *
+ * @param array<string,string> $plan
+ */
+function pr_product_field_search(array $plan): string
+{
+    $parts = [];
+    foreach (['family', 'productcategory', 'modelkeyword', 'edition', 'collaboration', 'clubtype', 'retailchannel', 'colorway'] as $key) {
+        $value = trim((string)($plan[$key] ?? ''));
+        if ($value === '') {
+            continue;
+        }
+        $field = pr_sheet_field($key);
+        if ($field <= 0) {
+            return '';
+        }
+        $leaves = pr_field_leaves($field);
+        $node = $key === 'colorway'
+            ? pr_bind_catalog_colorway($value, $leaves)
+            : pr_unique_folded_node($value, $leaves);
+        if ($node === null || $node <= 0) {
+            return '';
+        }
+        $parts[] = '@@' . $node;
+    }
+    return implode(' ', $parts);
+}
+
 function pr_other_match_search_token(array $refs): string
 {
     $refs = array_values(array_filter(array_map('intval', $refs), fn($n) => $n > 0));

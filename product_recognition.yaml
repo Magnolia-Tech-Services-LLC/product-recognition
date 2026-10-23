@@ -1,7 +1,7 @@
 name: product_recognition
 title: Product Recognition
 author: Magnolia Tech Services
-version: 1
+version: 2
 desc: Identifies which product an image shows, from the pixels, using DINOv2 nearest-neighbour retrieval against a reference set derived from an existing product field.
 icon: shirt
 icon-colour: seagreen

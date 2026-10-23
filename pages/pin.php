@@ -1,6 +1,6 @@
 <?php
 /**
- * Explicit Pin / Exclude from the resource view panel.
+ * Explicit Pin, Remove pin, or Exclude from the resource view panel.
  */
 include "../../../include/boot.php";
 include "../../../include/authenticate.php";
@@ -21,6 +21,8 @@ if (enforcePostRequest(false)) {
     $region = (int)getval("region", 0);
     if ($action === "exclude") {
         $status = pr_operator_exclude($resource, (int)$userref);
+    } elseif ($action === "unpin") {
+        $status = pr_operator_unpin($resource, (int)$userref);
     } elseif ($action === "pin") {
         $model_text = trim((string)getval("model_text", ""));
         $leaves = pr_leaf_models();
