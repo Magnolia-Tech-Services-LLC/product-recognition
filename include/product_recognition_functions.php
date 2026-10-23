@@ -6,12 +6,14 @@
  * Embeddings live in resource_dinov2_vector (named for the model, not this plugin).
  */
 
+include_once dirname(__FILE__) . '/product_recognition_identity.php';
+
 /**
- * True when an admin has pointed the plugin at a real category-tree field.
+ * True when the active product field exists (leftover Model-tree field, else Family).
  */
 function pr_is_configured(): bool
 {
-    $field = (int)($GLOBALS["product_recognition_field"] ?? 0);
+    $field = pr_product_field();
     if ($field <= 0) {
         return false;
     }
@@ -77,14 +79,23 @@ function pr_service_health(): bool
 }
 
 /**
- * Shared CTE: most-specific product-field leaf per resource.
+ * Shared CTE: one product-field node per reference resource.
  *
- * Two `?` placeholders, both the product field. `candidate` is not named `specific`
- * (reserved in MySQL 9.7). Parent+leaf resources keep the leaf; "exactly one Model
- * node" would drop them.
+ * Family (flat): exactly one Family node. A parent on that node is not copied.
+ * Model tree: most-specific leaf. Two `?` placeholders, both the product field.
+ * `candidate` is not named `specific` (reserved in MySQL 9.7).
  */
 function pr_tagged_leaf_cte(): string
 {
+    if (pr_product_field_is_flat()) {
+        return "WITH tagged AS (
+             SELECT rn.resource, MIN(rn.node) AS model_node
+               FROM resource_node rn
+               JOIN node n ON n.ref = rn.node AND n.resource_type_field = ?
+              GROUP BY rn.resource
+             HAVING COUNT(*) = 1
+         )";
+    }
     return "WITH RECURSIVE closure AS (
              SELECT ref AS ancestor, ref AS descendant FROM node WHERE resource_type_field = ?
              UNION ALL
@@ -110,6 +121,38 @@ function pr_tagged_leaf_cte(): string
 }
 
 /**
+ * Placeholders for pr_tagged_leaf_cte(), bound to the active product field.
+ *
+ * @return list<mixed>
+ */
+function pr_tagged_leaf_field_params(): array
+{
+    $field = pr_product_field();
+    if (pr_product_field_is_flat()) {
+        return ["i", $field];
+    }
+    return ["i", $field, "i", $field];
+}
+
+/**
+ * Drop rows whose model_node is not a current product-field leaf (ignored labels).
+ *
+ * @param list<array<string,mixed>> $rows
+ * @return list<array<string,mixed>>
+ */
+function pr_keep_leaf_rows(array $rows): array
+{
+    $leaves = pr_leaf_models();
+    $out = [];
+    foreach ($rows as $row) {
+        if (isset($leaves[(int)$row['model_node']])) {
+            $out[] = $row;
+        }
+    }
+    return $out;
+}
+
+/**
  * Every resource that qualifies as a reference, and the product it is a reference for.
  *
  * The rule, in two steps, and the order matters:
@@ -128,17 +171,15 @@ function pr_tagged_leaf_cte(): string
  */
 function pr_reference_rows(): array
 {
-    global $product_recognition_field;
-
     if (!pr_is_configured()) {
         return [];
     }
 
-    return ps_query(
+    return pr_keep_leaf_rows(ps_query(
         pr_tagged_leaf_cte() . "
          SELECT resource, model_node FROM tagged ORDER BY resource",
-        array("i", $product_recognition_field, "i", $product_recognition_field)
-    );
+        pr_tagged_leaf_field_params()
+    ));
 }
 
 /**
@@ -151,8 +192,6 @@ function pr_reference_rows(): array
  */
 function pr_tagged_leaf_with_vector_sql(int $limit): array
 {
-    global $product_recognition_field;
-
     if ($limit < 0) {
         throw new InvalidArgumentException("pr_tagged_leaf_with_vector: limit is $limit");
     }
@@ -163,7 +202,7 @@ function pr_tagged_leaf_with_vector_sql(int $limit): array
            JOIN resource_dinov2_vector v ON v.resource = t.resource
            JOIN resource r ON r.ref = t.resource AND r.archive >= 0
           ORDER BY t.resource";
-    $params = array("i", $product_recognition_field, "i", $product_recognition_field);
+    $params = pr_tagged_leaf_field_params();
     if ($limit > 0) {
         $sql .= " LIMIT ?";
         $params[] = "i";
@@ -186,7 +225,7 @@ function pr_tagged_leaf_with_vector(int $limit): array
     }
 
     [$sql, $params] = pr_tagged_leaf_with_vector_sql($limit);
-    return ps_query($sql, $params);
+    return pr_keep_leaf_rows(ps_query($sql, $params));
 }
 
 /**
@@ -197,7 +236,7 @@ function pr_tagged_leaf_with_vector(int $limit): array
  */
 function pr_parent_and_leaf_resources(): array
 {
-    global $product_recognition_field;
+    $product_recognition_field = pr_product_field();
 
     # COUNT(*) is taken on tagged alone. Joining pairs first would multiply that
     # count if a resource has more than one directed ancestor edge.
@@ -238,13 +277,18 @@ function pr_parent_and_leaf_resources(): array
  */
 function pr_leaf_models(): array
 {
-    global $product_recognition_field;
-
     if (!pr_is_configured()) {
         return [];
     }
 
-    return pr_field_leaves((int)$product_recognition_field);
+    $out = [];
+    foreach (pr_field_leaves(pr_product_field()) as $id => $name) {
+        if (pr_is_ignored_product_label((string)$name)) {
+            continue;
+        }
+        $out[(int)$id] = $name;
+    }
+    return $out;
 }
 
 /**
@@ -284,6 +328,186 @@ function pr_reference_action(?array $current, int $model_node): string
         return 'revive';
     }
     return $current['model_node'] !== $model_node ? 'relabel' : 'keep';
+}
+
+/**
+ * What an operator pin should do to one product_reference row.
+ *
+ * excluded and pinned-to-a-different-model are admin decisions and stay put.
+ * derived/orphaned follow the model the operator just named.
+ *
+ * @param array|null $current ['model_node' => int, 'status' => string], or null if no row exists
+ * @return 'add'|'keep'|'upgrade'|'defer'
+ */
+function pr_pin_action(?array $current, int $model_node): string
+{
+    if ($model_node <= 0) {
+        return 'defer';
+    }
+    if ($current === null) {
+        return 'add';
+    }
+    $status = (string)$current['status'];
+    if ($status === 'excluded') {
+        return 'defer';
+    }
+    if ($status === 'pinned') {
+        return (int)$current['model_node'] === $model_node ? 'keep' : 'defer';
+    }
+    return 'upgrade';
+}
+
+/**
+ * Pin $resource as a reference for $model_node. Never retarget excluded or a
+ * pin for a different model. derived/orphaned rows move to the named model.
+ */
+function pr_pin_reference(int $resource, int $model_node, int $user): bool
+{
+    if ($resource <= 0 || $model_node <= 0 || $user <= 0) {
+        return false;
+    }
+    $rows = ps_query(
+        "SELECT model_node, status FROM product_reference WHERE resource = ?",
+        array("i", $resource)
+    );
+    $current = $rows === [] ? null : [
+        'model_node' => (int)$rows[0]['model_node'],
+        'status' => (string)$rows[0]['status'],
+    ];
+    switch (pr_pin_action($current, $model_node)) {
+        case 'add':
+            ps_query(
+                "INSERT INTO product_reference (resource, model_node, status, created_by)
+                 VALUES (?,?,'pinned',?)",
+                array("i", $resource, "i", $model_node, "i", $user)
+            );
+            return true;
+        case 'upgrade':
+            ps_query(
+                "UPDATE product_reference
+                    SET model_node = ?, status = 'pinned', created_by = ?
+                  WHERE resource = ? AND status IN ('derived','orphaned')",
+                array("i", $model_node, "i", $user, "i", $resource)
+            );
+            return sql_affected_rows() === 1;
+        case 'keep':
+            return true;
+        default:
+            return false;
+    }
+}
+
+/**
+ * Current product_reference row for a resource, if any.
+ *
+ * @return array{model_node:int,status:string}|null
+ */
+function pr_reference_row(int $resource): ?array
+{
+    if ($resource <= 0) {
+        return null;
+    }
+    $rows = ps_query(
+        "SELECT model_node, status FROM product_reference WHERE resource = ?",
+        array("i", $resource)
+    );
+    if ($rows === []) {
+        return null;
+    }
+    return [
+        'model_node' => (int)$rows[0]['model_node'],
+        'status' => (string)$rows[0]['status'],
+    ];
+}
+
+/**
+ * Operator pin: cutout embed + pinned row. May revive excluded → pinned.
+ *
+ * @return 'pinned'|'kept'|'denied'|'need_cutout'|'need_model'|'failed'
+ */
+function pr_operator_pin(int $resource, int $model_node, int $user, int $region_index = 0): string
+{
+    if ($resource <= 0 || $user <= 0) {
+        return 'failed';
+    }
+    if (!pr_can_edit_resource($resource)) {
+        return 'denied';
+    }
+    if ($model_node <= 0 || !pr_is_leaf_model($model_node)) {
+        return 'need_model';
+    }
+    if (pr_stored_region_count($resource) !== 1) {
+        return 'need_cutout';
+    }
+    $resource_data = get_resource_data($resource);
+    if ($resource_data === false) {
+        return 'failed';
+    }
+    $checksum = (string)$resource_data['file_checksum'];
+    $mask = pr_mask_file($resource, $checksum, $region_index);
+    if (!is_file($mask)) {
+        return 'need_cutout';
+    }
+
+    $current = pr_reference_row($resource);
+    if ($current !== null
+        && $current['status'] === 'pinned'
+        && $current['model_node'] === $model_node) {
+        # Refresh the cutout vector even when already pinned.
+        pr_embed_resource($resource, $mask);
+        return 'kept';
+    }
+
+    if ($current === null) {
+        ps_query(
+            "INSERT INTO product_reference (resource, model_node, status, created_by)
+             VALUES (?,?,'pinned',?)",
+            array("i", $resource, "i", $model_node, "i", $user)
+        );
+        if (sql_affected_rows() !== 1) {
+            return 'failed';
+        }
+    } else {
+        # Operator pin may replace derived/orphaned/excluded and retarget a pin.
+        ps_query(
+            "UPDATE product_reference
+                SET model_node = ?, status = 'pinned', created_by = ?
+              WHERE resource = ?",
+            array("i", $model_node, "i", $user, "i", $resource)
+        );
+        if (sql_affected_rows() !== 1) {
+            return 'failed';
+        }
+    }
+    pr_embed_resource($resource, $mask);
+    return 'pinned';
+}
+
+/**
+ * Operator exclude: keep the row but remove it from the k-NN vote set.
+ *
+ * @return 'excluded'|'denied'|'gone'|'failed'
+ */
+function pr_operator_exclude(int $resource, int $user): string
+{
+    if ($resource <= 0 || $user <= 0) {
+        return 'failed';
+    }
+    if (!pr_can_edit_resource($resource)) {
+        return 'denied';
+    }
+    $current = pr_reference_row($resource);
+    if ($current === null) {
+        return 'gone';
+    }
+    if ($current['status'] === 'excluded') {
+        return 'excluded';
+    }
+    ps_query(
+        "UPDATE product_reference SET status = 'excluded', created_by = ? WHERE resource = ?",
+        array("i", $user, "i", $resource)
+    );
+    return sql_affected_rows() === 1 ? 'excluded' : 'failed';
 }
 
 /**
@@ -529,12 +753,16 @@ function pr_sync_references(bool $dry_run = false): array
         }
     }
 
-    foreach ($existing as $resource => $row) {
-        if ($row['status'] === 'derived' && !isset($wanted[$resource])) {
-            $stats['removed']++;
-            if (!$dry_run) {
-                ps_query("DELETE FROM product_reference WHERE resource = ? AND status = 'derived'",
-                         array("i", $resource));
+    # Leftover Model-tree refs: never DELETE derived. Bind already follows
+    # pending, but this freeze is independent of bind — migrate remaps.
+    if (pr_pending_tree_field() <= 0) {
+        foreach ($existing as $resource => $row) {
+            if ($row['status'] === 'derived' && !isset($wanted[$resource])) {
+                $stats['removed']++;
+                if (!$dry_run) {
+                    ps_query("DELETE FROM product_reference WHERE resource = ? AND status = 'derived'",
+                             array("i", $resource));
+                }
             }
         }
     }
@@ -643,7 +871,7 @@ function pr_service_post(string $path, array $fields, ?string $file = null,
  * use it: the service detects change by (row count, max ref), and an in-place update moves
  * neither, so the cache would serve the superseded vector forever.
  */
-function pr_embed_resource(int $ref): bool
+function pr_embed_resource(int $ref, ?string $image_path = null): bool
 {
     global $product_recognition_space;
 
@@ -651,9 +879,9 @@ function pr_embed_resource(int $ref): bool
     if ($resource === false) {
         return false;
     }
-    $path = get_resource_path($ref, true, 'pre', false, 'jpg');
+    $path = $image_path ?? get_resource_path($ref, true, 'pre', false, 'jpg');
     if (!file_exists($path)) {
-        logScript("product_recognition: resource $ref has no preview at $path");
+        logScript("product_recognition: resource $ref has no image at $path");
         return false;
     }
 
@@ -672,6 +900,21 @@ function pr_embed_resource(int $ref): bool
         array("i", $ref, "s", $blob, "s", (string)$resource['file_checksum'])
     );
     return true;
+}
+
+/**
+ * Pin and refresh the stored vector from the single product cutout.
+ * Multi-product and fallback (no region / no mask) get tags only — never a full-frame pin embed.
+ *
+ * @return bool true when pinned (or already pinned); false when pin was skipped or failed
+ */
+function pr_pin_and_embed(int $resource, int $model_node, int $user, int $region_index = 0): bool
+{
+    return in_array(
+        pr_operator_pin($resource, $model_node, $user, $region_index),
+        ['pinned', 'kept'],
+        true
+    );
 }
 
 /**
@@ -882,7 +1125,7 @@ function pr_threshold_for_model(array $observations, float $target): ?array
  */
 function pr_models_losing_references_to_children(): array
 {
-    global $product_recognition_field;
+    $product_recognition_field = pr_product_field();
 
     return ps_query(
         "SELECT t.model_node, n.name, t.reference_count AS previous_count
@@ -1026,13 +1269,13 @@ function pr_calibrate(bool $dry_run = false): array
             "INSERT INTO product_threshold
                 (model_node, min_confidence, measured_precision, wilson_lower, sample_size,
                  reference_count, status, never_auto_apply, calibrated_at)
-             VALUES (?,?,?,?,?,?,?,?,NOW())
+             VALUES (?,?,?,?,?,?,?,?,NOW()) AS new
              ON DUPLICATE KEY UPDATE
-                min_confidence=VALUES(min_confidence), measured_precision=VALUES(measured_precision),
-                wilson_lower=VALUES(wilson_lower), sample_size=VALUES(sample_size),
-                reference_count=VALUES(reference_count), status=VALUES(status),
-                never_auto_apply=IF(VALUES(never_auto_apply)=1, 1, never_auto_apply),
-                calibrated_at=VALUES(calibrated_at)",
+                min_confidence=new.min_confidence, measured_precision=new.measured_precision,
+                wilson_lower=new.wilson_lower, sample_size=new.sample_size,
+                reference_count=new.reference_count, status=new.status,
+                never_auto_apply=IF(new.never_auto_apply=1, 1, product_threshold.never_auto_apply),
+                calibrated_at=new.calibrated_at",
             array("i", $node,
                   "d", $row['min_confidence'], "d", $row['measured_precision'],
                   "d", $row['wilson_lower'], "i", $row['sample_size'],
@@ -1052,37 +1295,55 @@ function pr_calibrate(bool $dry_run = false): array
  */
 function pr_classify(int $limit, bool $dry_run = false): array
 {
-    global $product_recognition_field, $product_recognition_space, $product_recognition_k,
+    global $product_recognition_space, $product_recognition_k,
            $product_recognition_min_similarity, $product_recognition_auto_apply;
+    $product_recognition_field = pr_product_field();
+
+    if ($limit <= 0) {
+        throw new RuntimeException("pr_classify: batch limit is $limit; is \$product_recognition_classify_batch set?");
+    }
 
     # Skip fully-rejected resources: every prior candidate was rejected, nothing is open or
     # accepted. Re-running /identify every night would only re-hit the same rejections. Delete
     # the rejected rows (or accept a new suggestion after a re-queue) to put the resource back
     # in play - e.g. after the vocabulary or reference set moves enough that a new top-k is
     # plausible.
-    $candidates = ps_query(
-        "SELECT v.resource
-           FROM resource_dinov2_vector v
-           JOIN resource r ON r.ref = v.resource AND r.archive >= 0
-          WHERE NOT EXISTS (
-                  SELECT 1 FROM resource_node rn
-                    JOIN node n ON n.ref = rn.node AND n.resource_type_field = ?
-                   WHERE rn.resource = v.resource)
-            AND NOT EXISTS (
-                  SELECT 1 FROM product_suggestion s
-                   WHERE s.resource = v.resource AND s.state = 'open')
-            AND NOT (
-                  EXISTS (
-                      SELECT 1 FROM product_suggestion s
-                       WHERE s.resource = v.resource AND s.state = 'rejected')
-                  AND NOT EXISTS (
-                      SELECT 1 FROM product_suggestion s
-                       WHERE s.resource = v.resource AND s.state IN ('open','accepted'))
-                )
-          ORDER BY v.resource
-          LIMIT ?",
-        array("i", $product_recognition_field, "i", $limit)
-    );
+    #
+    # Cursor is a scan-range optimisation like pr_backfill. A no-match writes nothing, so
+    # without a cursor the same low-ref resources are re-identified every run and starve the
+    # rest of the library. After a lap they are retried (the reference set may have grown).
+    $sql = "SELECT v.resource
+              FROM resource_dinov2_vector v
+              JOIN resource r ON r.ref = v.resource AND r.archive >= 0
+             WHERE v.resource > ?
+               AND NOT EXISTS (
+                     SELECT 1 FROM resource_node rn
+                       JOIN node n ON n.ref = rn.node AND n.resource_type_field = ?
+                      WHERE rn.resource = v.resource)
+               AND NOT EXISTS (
+                     SELECT 1 FROM product_suggestion s
+                      WHERE s.resource = v.resource AND s.state = 'open')
+               AND NOT (
+                     EXISTS (
+                         SELECT 1 FROM product_suggestion s
+                          WHERE s.resource = v.resource AND s.state = 'rejected')
+                     AND NOT EXISTS (
+                         SELECT 1 FROM product_suggestion s
+                          WHERE s.resource = v.resource AND s.state IN ('open','accepted'))
+                   )
+               AND NOT EXISTS (
+                     SELECT 1 FROM product_region pr
+                      WHERE pr.resource = v.resource
+                        AND pr.bbox LIKE '%],[%')
+             ORDER BY v.resource
+             LIMIT ?";
+
+    $resumed_from = (int)get_sysvar('product_recognition_classify_position', 0);
+    $candidates = ps_query($sql, array("i", $resumed_from, "i", $product_recognition_field, "i", $limit));
+    if ($candidates === [] && $resumed_from > 0) {
+        $resumed_from = 0;
+        $candidates = ps_query($sql, array("i", 0, "i", $product_recognition_field, "i", $limit));
+    }
 
     $thresholds = [];
     foreach (ps_query("SELECT * FROM product_threshold") as $row) {
@@ -1092,11 +1353,13 @@ function pr_classify(int $limit, bool $dry_run = false): array
     $never_nodes = array_fill_keys(pr_never_auto_apply_nodes(pr_leaf_models()), true);
 
     $stats = ['considered' => 0, 'suggested' => 0, 'skipped_low_similarity' => 0,
-              'no_candidates' => 0, 'auto_applied' => 0, 'skipped_rejected' => 0];
+              'no_candidates' => 0, 'auto_applied' => 0, 'skipped_rejected' => 0,
+              'resumed_from' => $resumed_from, 'last' => $resumed_from];
 
     foreach ($candidates as $row) {
         $resource = (int)$row['resource'];
         $stats['considered']++;
+        $stats['last'] = $resource;
 
         $result = pr_service_post('/identify', [
             'db' => $GLOBALS['mysql_db'],
@@ -1124,7 +1387,7 @@ function pr_classify(int $limit, bool $dry_run = false): array
         $threshold = $thresholds[$node] ?? null;
 
         # Computed BEFORE the eligibility test, because auto-apply must respect a rejection
-        # too. A human who rejected a model for this resource has said so; auto-applying it as
+        # too. A human who rejected "Loma" for this resource has said so; auto-applying it as
         # a tag the next night would be the same failure as re-suggesting it, in a form that
         # writes to the asset instead of to a queue. Fully-rejected resources are also excluded
         # from the outer candidate query above, so this path is only for partial rejections
@@ -1136,20 +1399,20 @@ function pr_classify(int $limit, bool $dry_run = false): array
             $rejected[(int)$r['model_node']] = true;
         }
 
-        $eligible = $product_recognition_auto_apply
-            && !isset($rejected[$node])
-            && $threshold !== null
-            && (int)$threshold['never_auto_apply'] === 0
-            && !isset($never_nodes[$node])
-            && $threshold['status'] === 'ok'
-            && $threshold['min_confidence'] !== null
-            && $confidence >= (float)$threshold['min_confidence'];
+        $eligible = pr_classify_should_auto_apply(
+            (bool)$product_recognition_auto_apply,
+            (float)$result['top_similarity'],
+            $confidence,
+            $threshold,
+            isset($rejected[$node]),
+            isset($never_nodes[$node])
+        );
 
         if ($eligible) {
             if (!$dry_run) {
                 pr_apply_model($resource, $node, $confidence,
                                (int)($top['top_reference'] ?? $result['top_reference']),
-                               (float)$threshold['min_confidence']);
+                               (float)($threshold['min_confidence'] ?? 0));
             }
             $stats['auto_applied']++;
             continue;
@@ -1185,6 +1448,9 @@ function pr_classify(int $limit, bool $dry_run = false): array
         if ($rank > 0) {
             $stats['suggested']++;
         }
+    }
+    if (!$dry_run) {
+        set_sysvar('product_recognition_classify_position', (string)$stats['last']);
     }
     return $stats;
 }
@@ -1365,15 +1631,16 @@ function pr_model_nodes_with_ancestors(int $node): array
 function pr_apply_model(int $resource, int $node, float $confidence, int $top_reference,
                         float $threshold): void
 {
-    global $product_recognition_field;
+    $product_recognition_field = pr_product_field();
 
-    $nodes = pr_model_nodes_with_ancestors($node);
+    $nodes = pr_nodes_to_apply($node);
     add_resource_nodes($resource, $nodes, false, false);
     resource_log(
         $resource, LOG_CODE_EDITED, $product_recognition_field,
         sprintf("Product recognition: node %d at confidence %.3f (threshold %.3f), "
                 . "nearest reference resource %d", $node, $confidence, $threshold, $top_reference)
     );
+    pr_write_accept_identity($resource, $node);
 }
 
 /**
@@ -1383,9 +1650,7 @@ function pr_apply_model(int $resource, int $node, float $confidence, int $top_re
  */
 function pr_resource_model_nodes(int $resource): array
 {
-    global $product_recognition_field;
-
-    return pr_resource_field_nodes($resource, (int)$product_recognition_field);
+    return pr_resource_field_nodes($resource, pr_product_field());
 }
 
 /**
@@ -1394,19 +1659,24 @@ function pr_resource_model_nodes(int $resource): array
  */
 function pr_is_leaf_model(int $node): bool
 {
-    global $product_recognition_field;
-
     $rows = ps_query(
-        "SELECT n.ref FROM node n
+        "SELECT n.ref, n.name FROM node n
           WHERE n.ref = ? AND n.resource_type_field = ?
             AND NOT EXISTS (SELECT 1 FROM node ch WHERE ch.parent = n.ref)",
-        array("i", $node, "i", $product_recognition_field)
+        array("i", $node, "i", pr_product_field())
     );
-    return $rows !== [];
+    if ($rows === []) {
+        return false;
+    }
+    return !pr_is_ignored_product_label((string)$rows[0]['name']);
 }
 
 /**
- * Open suggestions for resources that still have no product tag, best candidate first.
+ * Open suggestions for active resources that still have no product tag.
+ *
+ * LIMIT is a resource count, not a row count, ordered by best open confidence so the
+ * queue is not stuck on the lowest resource IDs. The confidence floor is applied in
+ * the page so a resource with only junk suggestions still gets a picker.
  *
  * Suggestions can outlive an external tag. Showing those rows would invite an accept that
  * dual-tags the asset; hide them instead. Closing them is left to accept/reject or the next
@@ -1414,22 +1684,73 @@ function pr_is_leaf_model(int $node): bool
  */
 function pr_open_suggestions(int $limit = 100): array
 {
-    global $product_recognition_field;
+    $product_recognition_field = pr_product_field();
 
-    return ps_query(
-        "SELECT s.ref, s.resource, s.model_node, s.confidence, s.top_similarity,
-                s.top_reference, s.rank_order, n.name AS model_name
+    if ($limit <= 0) {
+        return [];
+    }
+    $fetch = $limit * 2;
+    $resource_rows = ps_query(
+        "SELECT s.resource
            FROM product_suggestion s
+           JOIN resource r ON r.ref = s.resource AND r.archive = 0
            JOIN node n ON n.ref = s.model_node
           WHERE s.state = 'open'
             AND NOT EXISTS (
                   SELECT 1 FROM resource_node rn
                     JOIN node mn ON mn.ref = rn.node AND mn.resource_type_field = ?
                    WHERE rn.resource = s.resource)
-          ORDER BY s.resource, s.rank_order
+          GROUP BY s.resource
+          ORDER BY MAX(s.confidence) DESC, s.resource
           LIMIT ?",
-        array("i", $product_recognition_field, "i", $limit)
+        array("i", $product_recognition_field, "i", $fetch)
     );
+    $ids = [];
+    foreach ($resource_rows as $row) {
+        $ref = (int)$row['resource'];
+        if (function_exists('get_resource_access') && get_resource_access($ref) > 1) {
+            continue;
+        }
+        $ids[] = $ref;
+        if (count($ids) >= $limit) {
+            break;
+        }
+    }
+    if ($ids === []) {
+        return [];
+    }
+    $in = implode(',', array_map('intval', $ids));
+    return ps_query(
+        "SELECT s.ref, s.resource, s.model_node, s.confidence, s.top_similarity,
+                s.top_reference, s.rank_order, n.name AS model_name
+           FROM product_suggestion s
+           JOIN node n ON n.ref = s.model_node
+          WHERE s.state = 'open' AND s.resource IN ($in)
+          ORDER BY FIELD(s.resource, $in), s.rank_order"
+    );
+}
+
+/**
+ * Product-field leaves already on the resource. Parent-only tags do not count:
+ * completing them with a leaf is add-only, not a dual-tag.
+ *
+ * @return list<int>
+ */
+function pr_resource_model_leaves(int $resource): array
+{
+    $leaves = pr_leaf_models();
+    return array_values(array_intersect(pr_resource_model_nodes($resource), array_keys($leaves)));
+}
+
+function pr_can_edit_resource(int $resource): bool
+{
+    if ($resource <= 0) {
+        return false;
+    }
+    if (!function_exists('get_edit_access')) {
+        return true;
+    }
+    return get_edit_access($resource);
 }
 
 /**
@@ -1442,31 +1763,38 @@ function pr_open_suggestions(int $limit = 100): array
  * Order matters: claim the open row before writing the tag. Two concurrent accepts of
  * different candidates for the same resource must not both add product nodes. Writing the
  * tag first left a window where both succeeded and the last pin won.
+ *
+ * @return 'accepted'|'tagged'|'keep'|'denied'|'gone'|'failed'
  */
-function pr_accept_suggestion(int $suggestion, int $user): bool
+function pr_accept_suggestion(int $suggestion, int $user): string
 {
-    global $product_recognition_field;
-
     $rows = ps_query("SELECT * FROM product_suggestion WHERE ref = ? AND state = 'open'",
                      array("i", $suggestion));
     if ($rows === []) {
-        return false;
+        return 'gone';
     }
     $row = $rows[0];
     $resource = (int)$row['resource'];
     $node = (int)$row['model_node'];
 
+    if (!pr_can_edit_resource($resource)) {
+        return 'denied';
+    }
+
     # A non-leaf is a category. Accepting it would tag the asset with a branch and pin
     # that category into the voting set.
     if (!pr_is_leaf_model($node)) {
-        return false;
+        return 'failed';
     }
 
     $existing = pr_resource_model_nodes($resource);
-    # Already tagged with a different model: do not dual-tag. Leave the open row alone so an
-    # operator can reject it; the review queue no longer lists it (pr_open_suggestions).
-    if ($existing !== [] && !in_array($node, $existing, true)) {
-        return false;
+    $existing_leaves = pr_resource_model_leaves($resource);
+    $plan = pr_review_pick_plan($suggestion, $existing_leaves, $node);
+    if ($plan === 'keep') {
+        return 'keep';
+    }
+    if ($plan !== 'accept') {
+        return 'failed';
     }
 
     # Claim this candidate first. If another accept already took it (or superseded it as a
@@ -1477,7 +1805,7 @@ function pr_accept_suggestion(int $suggestion, int $user): bool
         array("i", $user, "i", $suggestion)
     );
     if (sql_affected_rows() !== 1) {
-        return false;
+        return 'gone';
     }
     ps_query(
         "UPDATE product_suggestion SET state = 'superseded', decided_by = ?, decided_at = NOW()
@@ -1485,44 +1813,180 @@ function pr_accept_suggestion(int $suggestion, int $user): bool
         array("i", $user, "i", $resource)
     );
 
-    if ($existing === []) {
+    if ($existing_leaves === []) {
         pr_apply_model($resource, $node, (float)$row['confidence'], (int)$row['top_reference'], 0.0);
     } else {
-        # Same leaf already present (tagged while the suggestion was open): pin only,
-        # but fill any missing ancestors so a lone leaf under a tree field still matches
-        # the parent+leaf shape.
-        $missing = array_values(array_diff(pr_model_nodes_with_ancestors($node), $existing));
+        # Same leaf already present (tagged while the suggestion was open): pin only.
+        # Tree fields still fill missing ancestors; Family is flat so this is a no-op.
+        $missing = array_values(array_diff(pr_nodes_to_apply($node), $existing));
         if ($missing !== []) {
             add_resource_nodes($resource, $missing, false, false);
         }
+        pr_write_accept_identity($resource, $node);
     }
 
-    ps_query(
-        "INSERT INTO product_reference (resource, model_node, status, created_by)
-         VALUES (?,?,'pinned',?)
-         ON DUPLICATE KEY UPDATE model_node=VALUES(model_node), status='pinned',
-                                 created_by=VALUES(created_by)",
-        array("i", $resource, "i", $node, "i", $user)
-    );
-    return true;
+    $pin = pr_operator_pin($resource, $node, $user);
+    # Suggestion + model tag are committed. Pin needs a single cutout; otherwise say tagged
+    # so the operator can Pin explicitly from the panel.
+    return in_array($pin, ['pinned', 'kept'], true) ? 'accepted' : 'tagged';
 }
 
 /**
  * Reject one candidate. The resource's other candidates stay open - rejecting one product
  * is not a statement about another.
+ *
+ * @return 'rejected'|'denied'|'gone'
  */
-function pr_reject_suggestion(int $suggestion, int $user): bool
+function pr_reject_suggestion(int $suggestion, int $user): string
 {
-    $rows = ps_query("SELECT ref FROM product_suggestion WHERE ref = ? AND state = 'open'",
-                     array("i", $suggestion));
+    $rows = ps_query(
+        "SELECT ref, resource FROM product_suggestion WHERE ref = ? AND state = 'open'",
+        array("i", $suggestion)
+    );
     if ($rows === []) {
-        return false;
+        return 'gone';
+    }
+    if (!pr_can_edit_resource((int)$rows[0]['resource'])) {
+        return 'denied';
     }
     ps_query(
         "UPDATE product_suggestion SET state='rejected', decided_by=?, decided_at=NOW() WHERE ref=?",
         array("i", $user, "i", $suggestion)
     );
-    return true;
+    return 'rejected';
+}
+
+/**
+ * Review-queue floor percents shown in the filter control.
+ *
+ * @return list<int>
+ */
+function pr_review_confidence_floors(): array
+{
+    return [0, 50, 60, 70, 80, 90];
+}
+
+/**
+ * Review-queue floor. GET is a percent 0–100 so "70" is 70%, not 0.7.
+ * Values snap down to a listed floor so the select cannot show "Any" while filtering.
+ *
+ * Resources stay listed when every suggestion is below the floor — that is the
+ * Whataburger case: hide junk, still offer a product picker.
+ */
+function pr_review_min_confidence(?string $raw = null): float
+{
+    $raw = trim((string)$raw);
+    if ($raw === '' || !is_numeric($raw)) {
+        return 0.0;
+    }
+    $n = (int)round((float)$raw);
+    $chosen = 0;
+    foreach (pr_review_confidence_floors() as $floor) {
+        if ($floor <= $n) {
+            $chosen = $floor;
+        }
+    }
+    return $chosen / 100.0;
+}
+
+/**
+ * @param list<array{confidence:mixed}> $rows
+ * @return list<array{confidence:mixed}>
+ */
+function pr_suggestions_at_or_above(array $rows, float $min): array
+{
+    $out = [];
+    foreach ($rows as $row) {
+        if ((float)$row['confidence'] >= $min) {
+            $out[] = $row;
+        }
+    }
+    return $out;
+}
+
+/**
+ * How a review-page product pick should write. Pure so the selfcheck can cover
+ * the dual-tag / accept-existing / tag-new split without the DB.
+ *
+ * @param list<int> $existing_leaves
+ * @return 'none'|'keep'|'accept'|'tag'
+ */
+function pr_review_pick_plan(?int $matching_open_suggestion, array $existing_leaves, int $model_node): string
+{
+    if ($model_node <= 0) {
+        return 'none';
+    }
+    $others = array_values(array_diff($existing_leaves, [$model_node]));
+    if ($others !== []) {
+        return 'keep';
+    }
+    if ($matching_open_suggestion !== null && $matching_open_suggestion > 0) {
+        return 'accept';
+    }
+    return 'tag';
+}
+
+/**
+ * Tag a resource from the review picker with a product-field leaf that may not
+ * be one of the k-NN suggestions. Same add-only rule as accept: never dual-tag.
+ *
+ * An open suggestion for that leaf is accepted (confidence + top_reference
+ * preserved). Any other open rows are superseded so they cannot be accepted later.
+ *
+ * @return 'none'|'keep'|'denied'|'tagged'|'accepted'|'failed'|'gone'
+ */
+function pr_apply_review_pick(int $resource, int $model_node, int $user): string
+{
+    $product_recognition_field = pr_product_field();
+
+    if ($resource <= 0 || $user <= 0 || $model_node <= 0) {
+        return 'none';
+    }
+    if (!pr_can_edit_resource($resource)) {
+        return 'denied';
+    }
+    if (!pr_is_configured() || !pr_is_leaf_model($model_node)) {
+        return 'failed';
+    }
+
+    $existing = pr_resource_model_nodes($resource);
+    $existing_leaves = pr_resource_model_leaves($resource);
+    $match_rows = ps_query(
+        "SELECT ref FROM product_suggestion
+          WHERE resource = ? AND model_node = ? AND state = 'open'",
+        array("i", $resource, "i", $model_node)
+    );
+    $matching = $match_rows === [] ? null : (int)$match_rows[0]['ref'];
+    $plan = pr_review_pick_plan($matching, $existing_leaves, $model_node);
+    if ($plan === 'accept') {
+        return pr_accept_suggestion((int)$matching, $user);
+    }
+    if ($plan === 'keep' || $plan === 'none') {
+        return $plan;
+    }
+
+    ps_query(
+        "UPDATE product_suggestion SET state = 'superseded', decided_by = ?, decided_at = NOW()
+          WHERE resource = ? AND state = 'open'",
+        array("i", $user, "i", $resource)
+    );
+
+    $missing = array_values(array_diff(pr_nodes_to_apply($model_node), $existing));
+    if ($missing !== []) {
+        add_resource_nodes($resource, $missing, false, false);
+        if ($existing_leaves === []) {
+            resource_log(
+                $resource,
+                LOG_CODE_EDITED,
+                $product_recognition_field,
+                sprintf("Product recognition: review pick node %d", $model_node)
+            );
+        }
+    }
+    pr_write_accept_identity($resource, $model_node);
+
+    $pin = pr_operator_pin($resource, $model_node, $user);
+    return in_array($pin, ['pinned', 'kept'], true) ? 'accepted' : 'tagged';
 }
 
 /**
@@ -1565,9 +2029,24 @@ function pr_with_lock(callable $fn): array
     }
 }
 
+function pr_cron_interval_seconds(): int
+{
+    return 20 * 3600;
+}
+
+function pr_cron_due(): bool
+{
+    $last = (int)get_sysvar('product_recognition_last_run', 0);
+    return $last <= 0 || (time() - $last) >= pr_cron_interval_seconds();
+}
+
 /**
  * The nightly pass: references, then a bounded embedding slice, then calibration, then
  * classification. One lock across all four.
+ *
+ * The hook that calls this also waits ~20 hours between successes so RS's five-minute
+ * cron does not re-run a 30-minute pass the moment the lock drops. CLI --all still
+ * runs on demand and records the timestamp so the next unattended tick backs off.
  *
  * The backfill can outrun its window by design - the full library is ~12 hours - so a slow
  * night must not overlap the next. A second run exits immediately rather than embedding the
@@ -1582,7 +2061,7 @@ function pr_run_all(): array
         return ["unconfigured" => true];
     }
 
-    return pr_with_lock(function () use ($product_recognition_batch, $product_recognition_classify_batch) {
+    $out = pr_with_lock(function () use ($product_recognition_batch, $product_recognition_classify_batch) {
         return [
             'references' => pr_sync_references(),
             'backfill' => pr_backfill((int)$product_recognition_batch),
@@ -1590,6 +2069,10 @@ function pr_run_all(): array
             'classification' => pr_classify((int)$product_recognition_classify_batch),
         ];
     });
+    if (empty($out['locked']) && empty($out['unconfigured'])) {
+        set_sysvar('product_recognition_last_run', (string)time());
+    }
+    return $out;
 }
 
 /**
@@ -1601,8 +2084,8 @@ function pr_run_all(): array
  *
  * Deliberately a faithful transcript, not a bound taxonomy: rows carry the raw strings the
  * sheet uses, not node refs. Matching those onto the product tree is the review-queue half of
- * the ingest design and is not built - so a sheet that says `Olive/Yellow` where the
- * tree says `Olive` records `Olive/Yellow` here and nothing tries to reconcile it.
+ * the ingest design and is not built - so a sheet that says `Friar Brown/Yellow` where the
+ * tree says `Friar Brown` records `Friar Brown/Yellow` here and nothing tries to reconcile it.
  * That is what makes this stage independently useful and the next one optional.
  * ---------------------------------------------------------------------------------------
  */
@@ -1610,19 +2093,19 @@ function pr_run_all(): array
 /**
  * Split a sheet PRODUCT string into model text and colorway text.
  *
- * The sheet uses three separators depending on section - `NORTH-Matte Black` (hyphen),
- * `Cooler Bag | Frost Box | BLACK` (pipe) and `Example Cap I BLACK` (a capital I
+ * The sheet uses three separators depending on section - `LOMA-Matte Black` (hyphen),
+ * `Cooler Bag | Big Frosty | BLACK` (pipe) and `Sunday Golf Dad Hat I BLACK` (a capital I
  * standing in for a pipe, in the source data itself). Splitting on the LAST separator is
  * what handles the multi-part hat and cooler rows, where the colorway is the final segment
  * and everything before it is the product name.
  *
  * With no separator the string is a colorway, not a model: the Towels section names its
- * products by colorway, and the model for all of them is the
+ * products `Stars and Striped`, `Miami Vice`, `Mud City`, and the model for all of them is the
  * section. So an unsplittable string goes to colorway and `model_text` is left empty for the
- * section to supply - putting it in `model_text` would file colorways as model names.
+ * section to supply - putting it in `model_text` would file 25 colorways as model names.
  *
  * ponytail: heuristic with a known ceiling. It is wrong where the last segment is a size
- * rather than a colour (`North Rainhood | Black | Magnum` yields colorway `Magnum`), where the
+ * rather than a colour (`Loma Rainhood | Black | Magnum` yields colorway `Magnum`), where the
  * tail is a variant (`Double Straps - Universal Backpack Straps`), and it would split a
  * hyphenated word if the sheet ever contained one - no row does today, but `Pro-Fit Hat` would
  * become `Pro` / `Fit Hat` the day one appears. All three are why `product` is stored raw
@@ -1651,7 +2134,7 @@ function pr_split_product(string $product): array
  *
  * Structure: a `SKU  <section name>  UPC ...` header opens a section and every following row
  * whose first column is a bare code belongs to it. The sheet is two pages concatenated, each
- * with its own master `SKU  PRODUCT  UPC CODE ...` header and its own `North Bag` section, so
+ * with its own master `SKU  PRODUCT  UPC CODE ...` header and its own `Loma Bag` section, so
  * sections repeat and the parser must not treat a second header as the end of anything.
  *
  * Column positions are not stable between pages or sections, so nothing is read positionally
@@ -1739,13 +2222,18 @@ function pr_pdf_text(int $resource): ?string
 /**
  * Find the SKU sheet to read.
  *
- * Not a fixed resource ref on purpose. The sheet is re-imported, and the copies are not
- * equal: one may be a superset of another. Rather than encode which ref is best and go
- * stale, parse every candidate and keep the one that yields the most rows.
+ * Not a fixed resource ref on purpose. The sheet is re-imported - it exists at four refs with
+ * one checksum today - and the variants are not equal: `DAM_SKU Sheet_DSG` is a strict
+ * superset of `DAM_SKU Sheet` (123 SKUs against 112, plus a Dick's Sporting Goods section).
+ * Rather than encode which ref is best and go stale, parse every candidate and keep the one
+ * that yields the most rows, which is the superset by construction.
  *
- * Known cost of that rule: the superset by SKU is not always the superset by quality.
- * A second copy can label a section with the wrong name. This stays a faithful transcript
- * of the sheet rather than second-guessing a header. Fix that in the sheet, not here.
+ * Known cost of that rule, worth stating rather than discovering later: the DSG sheet is the
+ * superset by SKU but not by quality. Its second page opens with a section header labelled
+ * `Loma Bag` above three towel rows (TWL125, TWL126, TWL130), which the main sheet files
+ * correctly under `Towels`. The defect is in the client's spreadsheet, and this stays a
+ * faithful transcript of it rather than second-guessing a header - but it means three of the
+ * 127 rows carry a section that is wrong at source. Worth fixing in the sheet, not here.
  *
  * @return array{resource:int,rows:array}|null
  */
@@ -1861,12 +2349,240 @@ function pr_sync_catalog(bool $dry_run = false, ?int $resource = null): array
     }
 
     ksort($stats['sections']);
+    $node_stats = pr_sync_catalog_nodes($dry_run);
+    foreach ($node_stats as $key => $value) {
+        $stats['nodes_' . $key] = $value;
+    }
+    return $stats;
+}
+
+/**
+ * Collaboration field: setup override, else resource_type_field.name = collaboration.
+ */
+function pr_collaboration_field(): int
+{
+    global $product_recognition_collab_field;
+
+    $configured = (int)($product_recognition_collab_field ?? 0);
+    if ($configured > 0) {
+        return $configured;
+    }
+    return (int)ps_value(
+        "SELECT ref AS value FROM resource_type_field WHERE name = 'collaboration' LIMIT 1",
+        [],
+        0
+    );
+}
+
+/**
+ * Strip channel / print noise from sheet color text before bind or create.
+ */
+function pr_sheet_display_name(string $raw): string
+{
+    $name = trim(html_entity_decode($raw, ENT_QUOTES, 'UTF-8'));
+    $name = preg_replace('/\s*\(DSG\s+ONLY\)\s*/i', '', $name) ?? $name;
+    $name = preg_replace('/\s+/', ' ', $name) ?? $name;
+    return trim($name);
+}
+
+/**
+ * Partner names that the sheet sometimes parks in the Color column.
+ *
+ * @return array<string,list<string>> canonical => aliases (folded later)
+ */
+function pr_sheet_collab_vocab(): array
+{
+    return [
+        'Mossy Oak' => ['mossy oak', 'mossyoak', 'bottomland', 'country dna', 'countrydna'],
+        'Bob Marley' => ['bob marley', 'bobmarley'],
+        'Whataburger' => ['whataburger', 'whata burger'],
+        '7-Eleven' => ['7 eleven', '7-eleven', '7eleven', '711'],
+        'Costco' => ['costco'],
+        'Masters' => ['masters', 'masters camo'],
+        'Long Drink' => ['long drink', 'longdrink'],
+        'Pins & Aces' => ['pins and aces', 'pins aces'],
+        'Scheels' => ['scheels'],
+        'Linksoul' => ['linksoul', 'link soul'],
+        'Tom Brady' => ['tom brady', 'tombrady'],
+        'National Wild Turkey Federation' => ['nwtf', 'wild turkey'],
+        'Ducks Unlimited' => ['ducks unlimited'],
+    ];
+}
+
+/**
+ * Sheet Color tails that are not Colorway vocabulary (size, kit, blank, channel).
+ */
+function pr_sheet_colorway_is_junk(string $colorway): bool
+{
+    $fold = pr_fold_label($colorway);
+    if ($fold === '') {
+        return true;
+    }
+    foreach ([
+        'cooler pack', 'universal backpack straps', 'premium backpack straps',
+        'universal', 'magnum', 'blank', 'blank black', 'blank tan', 'blank navy',
+    ] as $junk) {
+        if ($fold === $junk || str_starts_with($fold, 'blank ')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Split a sheet Color / product tail into colorway + optional collab.
+ *
+ * @return array{colorway:string,collab:string,junk:bool}
+ */
+function pr_classify_sheet_color(string $colorway_text, string $product = ''): array
+{
+    $raw = pr_sheet_display_name($colorway_text);
+    $blob = pr_fold_label($raw . ' ' . $product);
+    $collab = '';
+    foreach (pr_sheet_collab_vocab() as $canonical => $aliases) {
+        foreach ($aliases as $alias) {
+            if ($blob !== '' && str_contains($blob, pr_fold_label($alias))) {
+                $collab = $canonical;
+                break 2;
+            }
+        }
+    }
+    if ($raw === '' || pr_sheet_colorway_is_junk($raw)) {
+        return ['colorway' => '', 'collab' => $collab, 'junk' => true];
+    }
+    # Whole tail is the partner name (or only partner signal) — not a colorway.
+    if ($collab !== '' && pr_fold_label($raw) === pr_fold_label($collab)) {
+        return ['colorway' => '', 'collab' => $collab, 'junk' => false];
+    }
+    if ($collab !== '' && pr_fold_label($raw) === pr_fold_label('Masters Camo')) {
+        return ['colorway' => '', 'collab' => $collab, 'junk' => false];
+    }
+    # Slash pairs stay unbound for create; Apply already refuses them.
+    if (str_contains($raw, '/')) {
+        return ['colorway' => '', 'collab' => $collab, 'junk' => false];
+    }
+    return ['colorway' => $raw, 'collab' => $collab, 'junk' => false];
+}
+
+/**
+ * Ensure a fixed-list / tree leaf exists. Fold-match first; create only when unbound.
+ *
+ * @param array<int,string> $leaves
+ * @return array{0:?int,1:string} [node_id, action: exists|created|skipped]
+ */
+function pr_ensure_field_leaf(int $field, string $name, array &$leaves, bool $dry_run): array
+{
+    $name = pr_sheet_display_name($name);
+    if ($field <= 0 || $name === '') {
+        return [null, 'skipped'];
+    }
+    $existing = pr_unique_folded_node($name, $leaves);
+    if ($existing !== null) {
+        return [$existing, 'exists'];
+    }
+    if ($dry_run) {
+        return [null, 'created'];
+    }
+    $ref = set_node(null, $field, $name, null, null);
+    if (!$ref) {
+        return [null, 'skipped'];
+    }
+    $leaves[(int)$ref] = $name;
+    return [(int)$ref, 'created'];
+}
+
+/**
+ * Upsert Model / Colorway / Collaboration nodes from product_catalog rows.
+ * Does not tag resources — vocabulary only.
+ *
+ * @return array<string,int>
+ */
+function pr_sync_catalog_nodes(bool $dry_run = false): array
+{
+    global $product_recognition_colorway_field;
+
+    $stats = [
+        'model_exists' => 0, 'model_created' => 0, 'model_skipped' => 0,
+        'colorway_exists' => 0, 'colorway_created' => 0, 'colorway_skipped' => 0,
+        'collab_exists' => 0, 'collab_created' => 0, 'collab_skipped' => 0,
+    ];
+    $model_field = pr_product_field();
+    $cw_field = (int)($product_recognition_colorway_field ?? 0);
+    $collab_field = pr_collaboration_field();
+    if ($model_field <= 0 && $cw_field <= 0 && $collab_field <= 0) {
+        return $stats;
+    }
+
+    $models = $model_field > 0 ? pr_field_leaves($model_field) : [];
+    $colorways = $cw_field > 0 ? pr_field_leaves($cw_field) : [];
+    $collabs = $collab_field > 0 ? pr_field_leaves($collab_field) : [];
+
+    $seen_model = [];
+    $seen_cw = [];
+    $seen_collab = [];
+
+    foreach (ps_query(
+        "SELECT section, product, model_text, colorway_text FROM product_catalog"
+    ) as $row) {
+        $model = pr_catalog_model_text($row);
+        if (pr_product_field_is_flat()) {
+            $model = pr_catalog_family_label($model);
+        }
+        # Towels / section-only: model_text empty uses section — still a model leaf.
+        # Refuse pipe / capital-I leftovers from product splits (Magnetic Towel | BLACK).
+        if (
+            $model !== ''
+            && !str_contains($model, '|')
+            && !preg_match('/\s+I\s+/', $model)
+            && !isset($seen_model[pr_fold_label($model)])
+        ) {
+            $seen_model[pr_fold_label($model)] = true;
+            if ($model_field > 0) {
+                [, $action] = pr_ensure_field_leaf($model_field, $model, $models, $dry_run);
+                $stats['model_' . $action]++;
+            }
+        } elseif ($model !== '' && (str_contains($model, '|') || preg_match('/\s+I\s+/', $model))) {
+            $fold = pr_fold_label($model);
+            if (!isset($seen_model[$fold])) {
+                $seen_model[$fold] = true;
+                $stats['model_skipped']++;
+            }
+        }
+
+        $class = pr_classify_sheet_color(
+            (string)$row['colorway_text'],
+            (string)$row['product']
+        );
+        if ($class['colorway'] !== '' && $cw_field > 0) {
+            $fold = pr_fold_label($class['colorway']);
+            if (!isset($seen_cw[$fold])) {
+                $seen_cw[$fold] = true;
+                [, $action] = pr_ensure_field_leaf($cw_field, $class['colorway'], $colorways, $dry_run);
+                $stats['colorway_' . $action]++;
+            }
+        } elseif ($cw_field > 0 && (string)$row['colorway_text'] !== '') {
+            $fold = pr_fold_label((string)$row['colorway_text']);
+            if ($fold !== '' && !isset($seen_cw[$fold])) {
+                $seen_cw[$fold] = true;
+                $stats['colorway_skipped']++;
+            }
+        }
+        if ($class['collab'] !== '' && $collab_field > 0) {
+            $fold = pr_fold_label($class['collab']);
+            if (!isset($seen_collab[$fold])) {
+                $seen_collab[$fold] = true;
+                [, $action] = pr_ensure_field_leaf($collab_field, $class['collab'], $collabs, $dry_run);
+                $stats['collab_' . $action]++;
+            }
+        }
+    }
+
     return $stats;
 }
 
 /**
  * Fold a sheet string or node name for unique binding. Case, punctuation, and extra
- * spaces drop out so `NORTH` matches `North` without matching `North XL`.
+ * spaces drop out so `LOMA` matches `Loma` without matching `Loma XL`.
  */
 function pr_fold_label(string $name): string
 {
@@ -1902,7 +2618,11 @@ function pr_unique_folded_node(string $text, array $nodes): ?int
  */
 function pr_never_auto_apply_names(?string $raw = null): array
 {
+    $union_default = $raw === null;
     $raw ??= (string)($GLOBALS['product_recognition_never_auto_apply'] ?? '');
+    if ($union_default) {
+        $raw = pr_never_auto_apply_default() . ', ' . $raw;
+    }
     $out = [];
     $seen = [];
     foreach (preg_split('/[,;\r\n]+/', $raw) ?: [] as $part) {
@@ -1917,6 +2637,17 @@ function pr_never_auto_apply_names(?string $raw = null): array
 }
 
 /**
+ * Config token → Family leaf label. Name-grain tokens (Ryder 14) bind the Family
+ * (Ryder) so the list still matches after migrate. Unknown tokens stay as written.
+ */
+function pr_never_auto_apply_bind_label(string $name): string
+{
+    $identity = pr_identity_for_name($name);
+    $family = (string)($identity['family'] ?? '');
+    return $family !== '' ? $family : $name;
+}
+
+/**
  * Unique leaf ids for never-auto-apply names. Misses and ambiguous hits are skipped.
  *
  * @param array<int,string> $leaves node_id => name
@@ -1925,9 +2656,11 @@ function pr_never_auto_apply_names(?string $raw = null): array
 function pr_never_auto_apply_nodes(array $leaves, ?string $raw = null): array
 {
     $ids = [];
+    $seen = [];
     foreach (pr_never_auto_apply_names($raw) as $name) {
-        $id = pr_unique_folded_node($name, $leaves);
-        if ($id !== null) {
+        $id = pr_unique_folded_node(pr_never_auto_apply_bind_label($name), $leaves);
+        if ($id !== null && !isset($seen[$id])) {
+            $seen[$id] = true;
             $ids[] = $id;
         }
     }
@@ -1944,7 +2677,7 @@ function pr_never_auto_apply_unmatched(array $leaves, ?string $raw = null): arra
 {
     $miss = [];
     foreach (pr_never_auto_apply_names($raw) as $name) {
-        if (pr_unique_folded_node($name, $leaves) === null) {
+        if (pr_unique_folded_node(pr_never_auto_apply_bind_label($name), $leaves) === null) {
             $miss[] = $name;
         }
     }
@@ -1957,7 +2690,7 @@ function pr_bind_catalog_model(string $model_text, array $leaves): ?int
 }
 
 /**
- * Slash colorways (`Olive/Yellow`) stay unbound — a person picks `Olive`.
+ * Slash colorways (`Friar Brown/Yellow`) stay unbound — a person picks `Friar Brown`.
  */
 function pr_bind_catalog_colorway(string $colorway_text, array $leaves): ?int
 {
@@ -2046,29 +2779,36 @@ function pr_catalog_picker_rows(): array
 
 /**
  * Decide catalog writes without touching the DB. Path-derived Model is kept (no dual-tag,
- * no replace). Colorway is add-only.
+ * no replace). Colorway and Collaboration are add-only.
  *
  * @param list<int> $existing_leaves
  * @param list<int> $existing_colorway
- * @return array{add_model:bool,skip_model:bool,pin:bool,add_colorway:bool}
+ * @param list<int> $existing_collab
+ * @return array{add_model:bool,skip_model:bool,pin:bool,add_colorway:bool,add_collab:bool}
  */
 function pr_catalog_apply_plan(
     array $existing_leaves,
     ?int $model_node,
     ?int $colorway_node,
-    array $existing_colorway
+    array $existing_colorway,
+    ?int $collab_node = null,
+    array $existing_collab = [],
+    int $stored_region_count = 0
 ): array {
     $others = $model_node === null
         ? $existing_leaves
         : array_values(array_diff($existing_leaves, [$model_node]));
     $has_other = $others !== [];
     $add_model = $model_node !== null && !$has_other;
+    # Apply tags only. Pinning is an explicit operator action (panel Pin button / Accept).
     return [
         'add_model' => $add_model,
         'skip_model' => !$add_model,
-        'pin' => $add_model,
+        'pin' => false,
         'add_colorway' => $colorway_node !== null
             && !in_array($colorway_node, $existing_colorway, true),
+        'add_collab' => $collab_node !== null
+            && !in_array($collab_node, $existing_collab, true),
     ];
 }
 
@@ -2085,43 +2825,88 @@ function pr_apply_colorway(int $resource, int $node): void
     );
 }
 
+function pr_apply_collab(int $resource, int $node): void
+{
+    $field = pr_collaboration_field();
+    if ($field <= 0 || $node <= 0) {
+        return;
+    }
+    add_resource_nodes($resource, [$node], false, false);
+    resource_log(
+        $resource,
+        LOG_CODE_EDITED,
+        $field,
+        sprintf("Product recognition: catalog collab node %d", $node)
+    );
+}
+
 /**
- * Apply a catalog Model + Colorway pick. Add-only. SKU is an audit string from the
- * matching catalog row, not an input the operator posts.
+ * Apply a catalog Model + Colorway + Collaboration pick. Add-only. SKU is an audit string
+ * from the matching catalog row, not an input the operator posts.
  *
  * @param list<array{sku:string,model_text:string,colorway_text:string}> $catalog
- * @return array{sku:string,add_model:bool,skip_model:bool,pin:bool,add_colorway:bool}
+ * @return array{sku:string,add_model:bool,skip_model:bool,pin:bool,add_colorway:bool,add_collab:bool}
  */
 function pr_apply_catalog_pick(
     int $resource,
     string $model_text,
     string $colorway_text,
     int $user,
-    array $catalog
+    array $catalog,
+    string $collab_text = '',
+    int $region_index = 0
 ): array {
-    global $product_recognition_field, $product_recognition_colorway_field;
+    global $product_recognition_colorway_field;
+    $product_recognition_field = pr_product_field();
 
-    $sku = pr_catalog_sku_for_pick($model_text, $colorway_text, $catalog);
     $blank = pr_catalog_apply_plan([], null, null, []);
-    $blank['sku'] = $sku;
-    if ($resource <= 0 || $sku === '' || !pr_is_configured()) {
+    $blank['sku'] = '';
+    if ($resource <= 0 || !pr_is_configured()) {
         return $blank;
     }
     $leaves = pr_leaf_models();
-    $model_node = pr_bind_catalog_model($model_text, $leaves);
+    $bind_text = $model_text;
+    if (pr_product_field_is_flat()) {
+        $mapped = pr_catalog_family_label($model_text);
+        if ($mapped !== '') {
+            $bind_text = $mapped;
+        }
+    }
+    $model_node = pr_bind_catalog_model($bind_text, $leaves);
     $cw_field = (int)($product_recognition_colorway_field ?? 0);
     $colorway_node = $cw_field > 0
         ? pr_bind_catalog_colorway($colorway_text, pr_field_leaves($cw_field))
         : null;
+    $collab_field = pr_collaboration_field();
+    $collab_node = ($collab_field > 0 && $collab_text !== '')
+        ? pr_unique_folded_node($collab_text, pr_field_leaves($collab_field))
+        : null;
+    # SKU is audit only. Collab colorways (Mindy Lemon) bind to field 89 with no sheet row.
+    $sku = pr_catalog_sku_for_pick($model_text, $colorway_text, $catalog);
+    if ($model_node === null && $colorway_node === null && $collab_node === null) {
+        $blank['sku'] = $sku;
+        return $blank;
+    }
 
     $existing_model = pr_resource_model_nodes($resource);
     $existing_leaves = array_values(array_intersect($existing_model, array_keys($leaves)));
     $existing_cw = $cw_field > 0 ? pr_resource_field_nodes($resource, $cw_field) : [];
-    $plan = pr_catalog_apply_plan($existing_leaves, $model_node, $colorway_node, $existing_cw);
+    $existing_collab = $collab_field > 0 ? pr_resource_field_nodes($resource, $collab_field) : [];
+    $stored_regions = pr_stored_region_count($resource);
+    $plan = pr_catalog_apply_plan(
+        $existing_leaves,
+        $model_node,
+        $colorway_node,
+        $existing_cw,
+        $collab_node,
+        $existing_collab,
+        $stored_regions
+    );
     $plan['sku'] = $sku;
+    $plan['pinned'] = false;
 
     if ($plan['add_model'] && $model_node !== null) {
-        $missing = array_values(array_diff(pr_model_nodes_with_ancestors($model_node), $existing_model));
+        $missing = array_values(array_diff(pr_nodes_to_apply($model_node), $existing_model));
         if ($missing !== []) {
             add_resource_nodes($resource, $missing, false, false);
             resource_log(
@@ -2131,28 +2916,13 @@ function pr_apply_catalog_pick(
                 sprintf("Product recognition: catalog SKU %s → node %d", $sku, $model_node)
             );
         }
-        $existing_ref = (int)ps_value(
-            "SELECT model_node AS value FROM product_reference WHERE resource = ?",
-            array("i", $resource),
-            0
-        );
-        # UNIQUE(resource): never retarget a pin/derived row for a different model.
-        if ($existing_ref === 0) {
-            ps_query(
-                "INSERT INTO product_reference (resource, model_node, status, created_by)
-                 VALUES (?,?,'pinned',?)",
-                array("i", $resource, "i", $model_node, "i", $user)
-            );
-        } elseif ($existing_ref === $model_node) {
-            ps_query(
-                "UPDATE product_reference SET status = 'pinned', created_by = ?
-                  WHERE resource = ? AND model_node = ? AND status IN ('derived','orphaned')",
-                array("i", $user, "i", $resource, "i", $model_node)
-            );
-        }
+        pr_write_accept_identity($resource, $model_node);
     }
     if ($plan['add_colorway'] && $colorway_node !== null) {
         pr_apply_colorway($resource, $colorway_node);
+    }
+    if ($plan['add_collab'] && $collab_node !== null) {
+        pr_apply_collab($resource, $collab_node);
     }
     return $plan;
 }
@@ -2180,7 +2950,7 @@ function pr_other_match_search_token(array $refs): string
  */
 function pr_other_match_refs(int $model_node, int $exclude, int $limit = 80): array
 {
-    global $product_recognition_field;
+    $product_recognition_field = pr_product_field();
 
     if ($model_node <= 0 || $limit <= 0) {
         return [];
@@ -2226,6 +2996,256 @@ function pr_other_match_refs(int $model_node, int $exclude, int $limit = 80): ar
 }
 
 /**
+ * Branded colorway names → a swatch. Slash variants stay unbound. Unknown
+ * names (Sunset, Magnum) return null so the second pass will not guess them.
+ *
+ * @return array{0:float,1:float,2:float}|null  r,g,b 0–255
+ */
+function pr_colorway_swatch(string $colorway): ?array
+{
+    if (str_contains($colorway, '/')) {
+        return null;
+    }
+    $skip = [
+        'matte' => true, 'gloss' => true, 'glossy' => true, 'metallic' => true,
+        'satin' => true, 'sundaze' => true, 'big' => true, 'frosty' => true,
+        'limited' => true, 'edition' => true,
+    ];
+    $swatch = [
+        'black' => [28.0, 28.0, 28.0],
+        'white' => [236.0, 236.0, 230.0],
+        'ivory' => [236.0, 232.0, 214.0],
+        'cream' => [240.0, 230.0, 200.0],
+        'red' => [180.0, 32.0, 32.0],
+        'burgundy' => [110.0, 20.0, 40.0],
+        'blue' => [30.0, 80.0, 170.0],
+        'navy' => [18.0, 32.0, 72.0],
+        'cobalt' => [0.0, 70.0, 170.0],
+        'brown' => [110.0, 70.0, 40.0],
+        'tan' => [180.0, 140.0, 90.0],
+        'khaki' => [170.0, 160.0, 110.0],
+        'grey' => [128.0, 128.0, 128.0],
+        'gray' => [128.0, 128.0, 128.0],
+        'charcoal' => [70.0, 70.0, 70.0],
+        'green' => [40.0, 110.0, 50.0],
+        'olive' => [90.0, 100.0, 45.0],
+        'yellow' => [220.0, 190.0, 40.0],
+        'gold' => [190.0, 150.0, 40.0],
+        'orange' => [210.0, 100.0, 30.0],
+        'pink' => [210.0, 110.0, 140.0],
+        'purple' => [90.0, 40.0, 120.0],
+        'silver' => [180.0, 180.0, 185.0],
+    ];
+    $mapped = [];
+    foreach (explode(' ', pr_fold_label($colorway)) as $token) {
+        if ($token === '' || isset($skip[$token])) {
+            continue;
+        }
+        if (!isset($swatch[$token])) {
+            return null;
+        }
+        $mapped[] = $swatch[$token];
+    }
+    if ($mapped === []) {
+        return null;
+    }
+    if (count($mapped) === 1) {
+        return $mapped[0];
+    }
+    $r = $g = $b = 0.0;
+    foreach ($mapped as $rgb) {
+        $r += $rgb[0];
+        $g += $rgb[1];
+        $b += $rgb[2];
+    }
+    $n = count($mapped);
+    return [$r / $n, $g / $n, $b / $n];
+}
+
+/**
+ * @param array{0:float,1:float,2:float} $rgb
+ * @return array{0:float,1:float,2:float}
+ */
+function pr_rgb_to_lab(array $rgb): array
+{
+    $lin = [];
+    foreach ([$rgb[0], $rgb[1], $rgb[2]] as $c) {
+        $c = max(0.0, min(255.0, $c)) / 255.0;
+        $lin[] = $c <= 0.04045 ? $c / 12.92 : (( ($c + 0.055) / 1.055) ** 2.4);
+    }
+    $x = (0.4124564 * $lin[0] + 0.3575761 * $lin[1] + 0.1804375 * $lin[2]) / 0.95047;
+    $y = 0.2126729 * $lin[0] + 0.7151522 * $lin[1] + 0.0721750 * $lin[2];
+    $z = (0.0193339 * $lin[0] + 0.1191920 * $lin[1] + 0.9503041 * $lin[2]) / 1.08883;
+    $f = [];
+    foreach ([$x, $y, $z] as $v) {
+        $f[] = $v > 0.008856 ? $v ** (1 / 3) : (7.787 * $v + 16 / 116);
+    }
+    return [116.0 * $f[1] - 16.0, 500.0 * ($f[0] - $f[1]), 200.0 * ($f[1] - $f[2])];
+}
+
+/**
+ * @param array{0:float,1:float,2:float} $a
+ * @param array{0:float,1:float,2:float} $b
+ */
+function pr_delta_e(array $a, array $b): float
+{
+    $la = pr_rgb_to_lab($a);
+    $lb = pr_rgb_to_lab($b);
+    return sqrt(
+        ($la[0] - $lb[0]) ** 2 + ($la[1] - $lb[1]) ** 2 + ($la[2] - $lb[2]) ** 2
+    );
+}
+
+/**
+ * Second pass: the cutout's colour onto this model's branded names. Ambiguous
+ * (two blacks, a grey sitting between navy and black, an unmapped Sunset) stays blank.
+ *
+ * @param array{0:float,1:float,2:float} $query_rgb
+ * @param list<string> $colorways
+ */
+function pr_pick_named_colorway(array $query_rgb, array $colorways): string
+{
+    $by_key = [];
+    foreach ($colorways as $name) {
+        $name = trim((string)$name);
+        $swatch = pr_colorway_swatch($name);
+        if ($name === '' || $swatch === null) {
+            continue;
+        }
+        $key = sprintf('%.0f,%.0f,%.0f', $swatch[0], $swatch[1], $swatch[2]);
+        $by_key[$key]['swatch'] = $swatch;
+        $by_key[$key]['names'][$name] = $name;
+    }
+    $ranked = [];
+    foreach ($by_key as $group) {
+        $ranked[] = [
+            'de' => pr_delta_e($query_rgb, $group['swatch']),
+            'names' => array_values($group['names']),
+        ];
+    }
+    usort($ranked, fn($a, $b) => $a['de'] <=> $b['de']);
+    if ($ranked === [] || $ranked[0]['de'] > 28.0) {
+        return '';
+    }
+    if (count($ranked[0]['names']) !== 1) {
+        return '';
+    }
+    if (isset($ranked[1]) && ($ranked[1]['de'] - $ranked[0]['de']) < 8.0) {
+        return '';
+    }
+    return $ranked[0]['names'][0];
+}
+
+/**
+ * Median RGB of opaque mask pixels. Null when the cutout is empty or all background.
+ *
+ * @return array{0:float,1:float,2:float}|null
+ */
+function pr_mask_dominant_rgb(string $path): ?array
+{
+    if (!is_file($path) || !function_exists('imagecreatefrompng')) {
+        return null;
+    }
+    $im = @imagecreatefrompng($path);
+    if ($im === false) {
+        return null;
+    }
+    $w = imagesx($im);
+    $h = imagesy($im);
+    $rs = $gs = $bs = [];
+    $step = max(1, (int)floor(max($w, $h) / 80));
+    for ($y = 0; $y < $h; $y += $step) {
+        for ($x = 0; $x < $w; $x += $step) {
+            $rgba = imagecolorat($im, $x, $y);
+            $a = ($rgba & 0x7F000000) >> 24;
+            if ($a > 16) {
+                continue;
+            }
+            $r = ($rgba >> 16) & 255;
+            $g = ($rgba >> 8) & 255;
+            $b = $rgba & 255;
+            if (max($r, $g, $b) > 245 && min($r, $g, $b) > 230) {
+                continue;
+            }
+            $rs[] = $r;
+            $gs[] = $g;
+            $bs[] = $b;
+        }
+    }
+    $n = count($rs);
+    if ($n < 20) {
+        return null;
+    }
+    sort($rs);
+    sort($gs);
+    sort($bs);
+    $m = intdiv($n, 2);
+    return [(float)$rs[$m], (float)$gs[$m], (float)$bs[$m]];
+}
+
+/**
+ * @param list<array{sku:string,model_text:string,colorway_text:string}> $catalog
+ */
+function pr_colorway_from_mask(string $mask, string $model_name, array $catalog): string
+{
+    $rgb = pr_mask_dominant_rgb($mask);
+    $want = pr_fold_label($model_name);
+    if ($rgb === null || $want === '') {
+        return '';
+    }
+    $cws = [];
+    foreach ($catalog as $row) {
+        if (pr_fold_label($row['model_text']) === $want && $row['colorway_text'] !== '') {
+            $cws[] = $row['colorway_text'];
+        }
+    }
+    return pr_pick_named_colorway($rgb, $cws);
+}
+
+/**
+ * Infer a colorway only when this model has one colour. Several SKUs of the
+ * same bag (Matte Black vs Cobalt) must not collapse to the first row.
+ *
+ * @param list<string> $colorways
+ */
+function pr_unique_or_blank_colorway(array $colorways): string
+{
+    $names = [];
+    foreach ($colorways as $c) {
+        $c = trim((string)$c);
+        if ($c === '') {
+            continue;
+        }
+        $key = pr_fold_label($c);
+        if ($key === '' || isset($names[$key])) {
+            continue;
+        }
+        $names[$key] = $c;
+    }
+    if (count($names) !== 1) {
+        return '';
+    }
+    return (string)array_values($names)[0];
+}
+
+/**
+ * Guess a colour only when this model is not sold in several. Catalog SKUs win
+ * when present; reference-photo tags are a fallback for collabs with no sheet row.
+ *
+ * @param list<string> $catalog_colorways
+ * @param list<string> $reference_colorways
+ */
+function pr_infer_colorway(array $catalog_colorways, array $reference_colorways): string
+{
+    $catalog_unique = pr_unique_or_blank_colorway($catalog_colorways);
+    if ($catalog_colorways !== [] && $catalog_unique === '') {
+        return '';
+    }
+    return $catalog_unique !== '' ? $catalog_unique
+        : pr_unique_or_blank_colorway($reference_colorways);
+}
+
+/**
  * First catalog SKU whose picker labels match the posted selects. Empty model is
  * nothing to apply. Exact on the already-resolved picker texts (section fills an
  * empty sheet model). Caller passes pr_catalog_picker_rows() — do not take a SKU.
@@ -2246,35 +3266,91 @@ function pr_catalog_sku_for_pick(string $model_text, string $colorway_text, arra
 }
 
 /**
+ * First tagged leaf that binds to a catalog model. Dual-tagged resources
+ * ("Ryder, Ryder S-Class") must not become an unbound comma string.
+ *
+ * @param list<string> $leaf_names
+ * @param list<array{sku:string,model_text:string,colorway_text:string}> $catalog
+ */
+function pr_primary_tagged_model(array $leaf_names, array $catalog): string
+{
+    foreach ($leaf_names as $name) {
+        $name = trim((string)$name);
+        if ($name === '') {
+            continue;
+        }
+        if (pr_picker_preselect($name, '', $catalog)['model_text'] !== '') {
+            return $name;
+        }
+    }
+    return trim((string)($leaf_names[0] ?? ''));
+}
+
+/**
  * @param list<array{sku:string,model_text:string,colorway_text:string}> $catalog
  * @return array{sku:string,model_text:string,colorway_text:string}
  */
 function pr_picker_preselect(string $model_name, string $colorway, array $catalog): array
 {
     $empty = ['sku' => '', 'model_text' => '', 'colorway_text' => ''];
+    # Comma-joined multi-tags: try each leaf (view should pass one; tolerate implode).
+    if (str_contains($model_name, ',')) {
+        $parts = preg_split('/\s*,\s*/', $model_name) ?: [];
+        $primary = pr_primary_tagged_model($parts, $catalog);
+        if ($primary === '') {
+            return $empty;
+        }
+        return pr_picker_preselect($primary, $colorway, $catalog);
+    }
     $want_model = pr_fold_label($model_name);
     if ($want_model === '' || $catalog === []) {
         return $empty;
     }
     $want_cw = pr_fold_label($colorway);
-    $first = $empty;
+    $matches = [];
     foreach ($catalog as $row) {
         if (pr_fold_label($row['model_text']) !== $want_model) {
             continue;
         }
-        $pick = [
-            'sku' => $row['sku'],
-            'model_text' => $row['model_text'],
-            'colorway_text' => $row['colorway_text'],
-        ];
-        if ($first['sku'] === '') {
-            $first = $pick;
-        }
+        $matches[] = $row;
         if ($want_cw !== '' && pr_fold_label($row['colorway_text']) === $want_cw) {
-            return $pick;
+            return [
+                'sku' => $row['sku'],
+                'model_text' => $row['model_text'],
+                'colorway_text' => $row['colorway_text'],
+            ];
         }
     }
-    return $first;
+    if ($matches === []) {
+        return $empty;
+    }
+    $model_text = (string)$matches[0]['model_text'];
+    # Resource already tagged with a branded colorway (Mindy Lemon) that is not a sheet row.
+    if ($want_cw !== '') {
+        return [
+            'sku' => '',
+            'model_text' => $model_text,
+            'colorway_text' => trim($colorway),
+        ];
+    }
+    $unique = pr_unique_or_blank_colorway(array_column($matches, 'colorway_text'));
+    if ($unique !== '') {
+        foreach ($matches as $row) {
+            if (pr_fold_label($row['colorway_text']) === pr_fold_label($unique)) {
+                return [
+                    'sku' => $row['sku'],
+                    'model_text' => $row['model_text'],
+                    'colorway_text' => $row['colorway_text'],
+                ];
+            }
+        }
+    }
+    # Same model, several colours: name the model, do not guess a SKU.
+    return [
+        'sku' => '',
+        'model_text' => $model_text,
+        'colorway_text' => '',
+    ];
 }
 
 include_once __DIR__ . '/product_recognition_view.php';

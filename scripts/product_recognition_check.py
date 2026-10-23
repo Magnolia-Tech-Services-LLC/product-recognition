@@ -159,7 +159,7 @@ def test_segmenter_unavailable_is_cached():
 
     with _isolated_segmenter() as sp:
         builtins.__import__ = fake_import
-        _assert_cached_unavailable(sp, "clip", ["backpack"])
+        _assert_cached_unavailable(sp, "clip", ["golf bag"])
     print("ok  missing CLIP is cached SegmenterUnavailable without loading YOLO")
 
 

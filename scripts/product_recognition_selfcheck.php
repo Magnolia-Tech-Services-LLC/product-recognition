@@ -18,7 +18,7 @@ include_once "/var/www/html/include/boot.php";
 include_once "/var/www/html/plugins/product_recognition/include/product_recognition_functions.php";
 command_line_only();
 
-global $product_recognition_field;
+$product_recognition_field = pr_product_field();
 
 function pr_check(string $label, bool $ok): void
 {
@@ -174,25 +174,25 @@ pr_check("too few observations produce nothing", pr_threshold_for_model([
 
 $fixture = <<<'SHEET'
 SKU      PRODUCT                       UPC CODE       Case QTY   Description (<55 Char)
-SKU      North Bag                     UPC CODE
-BAG101   NORTH-Matte Black             100000000001              A lightweight stand bag
-BAG129   NORTH-Olive/Yellow            100000000002              A lightweight stand bag
-SKU      South 23 Stand Bag            UPC CODE                  Description
-BAG401   SOUTH 23 STAND BAG - Matte Black   100000000003         Lightweight stand bag
+SKU      Loma Bag                      UPC CODE
+BAG101   LOMA-Matte Black              759687567473              A lightweight 2-way top, 6 club stand bag
+BAG129   LOMA-Friar Brown/Yellow       735203473954              A lightweight 2-way top, 6 club stand bag
+SKU      Ryder 23' Stand Bag           UPC CODE                  Description
+BAG401   RYDER 23' STAND BAG - Matte Black   735203274728        Lightweight 5-way top, 14 club Stand Bag
 SKU      Towels                        UPC                       DESCRIPTION
-TWL101   Stars and Striped             100000000004              Microfiber waffle towel
+TWL101   Stars and Striped             759687690195              Microfiber Waffle golf towel
 SKU      PRODUCT                       UPC CODE       Case QTY   Description (<55 Char)
-SKU      North Bag                     UPC CODE
-BAG109   NORTH-Sunset                  100000000005              A lightweight stand bag
+SKU      Loma Bag                      UPC CODE
+BAG109   LOMA-Sunset                   735203111111              A lightweight 2-way top, 6 club stand bag
 SKU      Hats                          UPC
-HAT101   Ridge Crushable | BLACK RIDGE   100000000006            Crushable rope hat | Icon | Black
-HAT123   Example Cap I BLACK           100000000007              Example Cap I BLACK
-HAT140-712  Example Pro Fit Hat | NAVY  100000000008                 7 - 1/2 Example Pro Fit Hat | NAVY
-SKU      Cooler Bag | Frost Box        UPC
-CLBAG101  Cooler Bag | Frost Box | BLACK    100000000009         Cooler Bag | BLACK
-ICEBRICK  Ice Brick | Cooler Pack      100000000010
+HAT101   Sundaze Crushable | BLACK SUNDAZE   657768314919        Crushable Rope Hat | Sunday Icon | Black
+HAT123   Sunday Golf Dad Hat I BLACK   735203248118              Sunday Golf Dad Hat I BLACK
+HAT140-712  Sunday Pro Fit Hat | NAVY  735203051541                 7 - 1/2 Sunday Pro Fit Hat | NAVY
+SKU      Cooler Bag | Big Frosty       UPC
+CLBAG101  Cooler Bag | Big Frosty | BLACK    657768237331        Cooler Bag | BLACK
+ICEBRICK  Ice Brick | Cooler Pack      735203171577
 SKU      Rainhood                      UPC                       Description
-RH201    North / XL Rainhood | Black | Magnum                    Rainhood | BLACK
+RH201    Loma / XL Rainhood | Black | Magnum                     Rainhood | BLACK
 SKU      Double Straps                 UPC CODE
 STRP101  Double Straps - Premium Backpack Straps
 SHEET;
@@ -203,11 +203,11 @@ pr_check("fixture parses every row and no header (" . count($parsed) . " of 12)"
          count($parsed) === 12);
 
 # The master header repeats on page two and must not open a section called PRODUCT, and the
-# second page's North Bag rows must land in the section the first page opened, not in limbo.
+# second page's Loma Bag rows must land in the section the first page opened, not in limbo.
 pr_check("master header never becomes a section",
          !in_array('PRODUCT', array_column($parsed, 'section'), true));
 pr_check("page two rows keep their section",
-         ($parsed['BAG109']['section'] ?? '') === 'North Bag');
+         ($parsed['BAG109']['section'] ?? '') === 'Loma Bag');
 pr_check("section count is 7 (" . count(array_unique(array_column($parsed, 'section'))) . ")",
          count(array_unique(array_column($parsed, 'section'))) === 7);
 
@@ -223,17 +223,17 @@ pr_check("row with neither UPC nor description parses",
          isset($parsed['STRP101']) && $parsed['STRP101']['upc'] === null
          && $parsed['STRP101']['description'] === null);
 pr_check("UPC is not mistaken for a description",
-         isset($parsed['ICEBRICK']) && $parsed['ICEBRICK']['upc'] === '100000000010'
+         isset($parsed['ICEBRICK']) && $parsed['ICEBRICK']['upc'] === '735203171577'
          && $parsed['ICEBRICK']['description'] === null);
 
 # The three separators, and the multi-part rows that decide split-on-last over split-on-first.
 $splits = [
-    'BAG101'   => ['NORTH', 'Matte Black'],
-    'BAG129'   => ['NORTH', 'Olive/Yellow'],
-    'BAG401'   => ['SOUTH 23 STAND BAG', 'Matte Black'],
-    'HAT101'   => ['Ridge Crushable', 'BLACK RIDGE'],
-    'HAT123'   => ['Example Cap', 'BLACK'],
-    'CLBAG101' => ['Cooler Bag | Frost Box', 'BLACK'],
+    'BAG101'   => ['LOMA', 'Matte Black'],
+    'BAG129'   => ['LOMA', 'Friar Brown/Yellow'],
+    'BAG401'   => ["RYDER 23' STAND BAG", 'Matte Black'],
+    'HAT101'   => ['Sundaze Crushable', 'BLACK SUNDAZE'],
+    'HAT123'   => ['Sunday Golf Dad Hat', 'BLACK'],
+    'CLBAG101' => ['Cooler Bag | Big Frosty', 'BLACK'],
     'TWL101'   => ['', 'Stars and Striped'],   # no separator: the section is the model
 ];
 foreach ($splits as $sku => $want) {
@@ -257,50 +257,53 @@ if ($stored > 0) {
 }
 
 # --- catalog pickers (#458): bind + add-only plan, no DB, no /identify --------------------
-$pr_leaves = [6820 => 'North', 6842 => 'North XL', 6767 => 'South', 6799 => 'Headcover'];
-$pr_cways = [1 => 'Matte Black', 2 => 'Olive', 3 => 'Cobalt Blue'];
+$pr_leaves = [6820 => 'Loma', 6842 => 'Loma XL', 6767 => 'Ryder', 6799 => 'Headcover'];
+$pr_cways = [1 => 'Matte Black', 2 => 'Friar Brown', 3 => 'Cobalt Blue'];
 
-pr_check("fold matches NORTH to North without matching North XL",
-         pr_fold_label('NORTH') === 'north'
-         && pr_fold_label('North') === 'north'
-         && pr_fold_label('North XL') === 'north xl'
-         && pr_fold_label('SOUTH 23 STAND BAG') === 'south 23 stand bag');
+pr_check("fold matches LOMA to Loma without matching Loma XL",
+         pr_fold_label('LOMA') === 'loma'
+         && pr_fold_label('Loma') === 'loma'
+         && pr_fold_label('Loma XL') === 'loma xl'
+         && pr_fold_label("RYDER 23' STAND BAG") === 'ryder 23 stand bag');
 
-pr_check("NORTH binds to North, not North XL",
-         pr_bind_catalog_model('NORTH', $pr_leaves) === 6820);
-pr_check("NORTH XL binds to North XL",
-         pr_bind_catalog_model('NORTH XL', $pr_leaves) === 6842);
+pr_check("LOMA binds to Loma, not Loma XL",
+         pr_bind_catalog_model('LOMA', $pr_leaves) === 6820);
+pr_check("LOMA XL binds to Loma XL",
+         pr_bind_catalog_model('LOMA XL', $pr_leaves) === 6842);
 pr_check("unknown sheet model is unbound",
-         pr_bind_catalog_model('Ridge Crushable', $pr_leaves) === null);
+         pr_bind_catalog_model('Sundaze Crushable', $pr_leaves) === null);
 pr_check("empty model text is unbound",
          pr_bind_catalog_model('', $pr_leaves) === null);
+pr_check("plugin does not ship a second identity grammar",
+         !is_file(dirname(__DIR__) . '/include/product-category-map.php')
+         && !is_file(dirname(__DIR__) . '/product-category-map.php'));
 pr_check("empty sheet model uses section",
          pr_catalog_model_text(['model_text' => '', 'section' => 'Towels']) === 'Towels');
 pr_check("non-empty sheet model wins over section",
-         pr_catalog_model_text(['model_text' => 'NORTH', 'section' => 'North Bag']) === 'NORTH');
+         pr_catalog_model_text(['model_text' => 'LOMA', 'section' => 'Loma Bag']) === 'LOMA');
 
 pr_check("Matte Black binds",
          pr_bind_catalog_colorway('Matte Black', $pr_cways) === 1);
-pr_check("Olive/Yellow stays unbound (slash)",
-         pr_bind_catalog_colorway('Olive/Yellow', $pr_cways) === null);
-pr_check("Olive without slash binds",
-         pr_bind_catalog_colorway('Olive', $pr_cways) === 2);
+pr_check("Friar Brown/Yellow stays unbound (slash)",
+         pr_bind_catalog_colorway('Friar Brown/Yellow', $pr_cways) === null);
+pr_check("Friar Brown without slash binds",
+         pr_bind_catalog_colorway('Friar Brown', $pr_cways) === 2);
 
-$pr_untagged = pr_catalog_apply_plan([], 6820, 1, []);
-pr_check("untagged resource adds model, pins, adds colorway",
-         $pr_untagged === ['add_model' => true, 'skip_model' => false, 'pin' => true, 'add_colorway' => true]);
+$pr_untagged = pr_catalog_apply_plan([], 6820, 1, [], null, [], 1);
+pr_check("untagged resource with one cutout adds model without auto-pin",
+         $pr_untagged === ['add_model' => true, 'skip_model' => false, 'pin' => false, 'add_colorway' => true, 'add_collab' => false]);
 
-$pr_same = pr_catalog_apply_plan([6820], 6820, 1, [1]);
-pr_check("same model already present still pins, does not re-add colorway",
-         $pr_same === ['add_model' => true, 'skip_model' => false, 'pin' => true, 'add_colorway' => false]);
+$pr_same = pr_catalog_apply_plan([6820], 6820, 1, [1], null, [], 1);
+pr_check("same model already present does not auto-pin, does not re-add colorway",
+         $pr_same === ['add_model' => true, 'skip_model' => false, 'pin' => false, 'add_colorway' => false, 'add_collab' => false]);
 
-$pr_path = pr_catalog_apply_plan([6767], 6820, 1, []);
+$pr_path = pr_catalog_apply_plan([6767], 6820, 1, [], null, [], 1);
 pr_check("path-derived different model is kept; colorway still added",
-         $pr_path === ['add_model' => false, 'skip_model' => true, 'pin' => false, 'add_colorway' => true]);
+         $pr_path === ['add_model' => false, 'skip_model' => true, 'pin' => false, 'add_colorway' => true, 'add_collab' => false]);
 
 $pr_unbound = pr_catalog_apply_plan([], null, null, []);
 pr_check("unbound pick writes nothing",
-         $pr_unbound === ['add_model' => false, 'skip_model' => true, 'pin' => false, 'add_colorway' => false]);
+         $pr_unbound === ['add_model' => false, 'skip_model' => true, 'pin' => false, 'add_colorway' => false, 'add_collab' => false]);
 
 $pr_two = pr_catalog_apply_plan([6820, 6767], 6799, 1, []);
 pr_check("two existing leaves still skip a third model",
@@ -310,6 +313,39 @@ $pr_dual = pr_catalog_apply_plan([6820, 6767], 6820, 1, []);
 pr_check("dual-tagged resource is not pinned for either leaf",
          $pr_dual['skip_model'] === true && $pr_dual['pin'] === false);
 
+$pr_collab_plan = pr_catalog_apply_plan([], null, null, [], 99, []);
+pr_check("collab-only pick adds collab",
+         $pr_collab_plan['add_collab'] === true && $pr_collab_plan['add_model'] === false);
+
+$pr_multi = pr_catalog_apply_plan([], 6820, 1, [], null, [], 2);
+pr_check("two stored regions tag model without pin",
+         $pr_multi['add_model'] === true && $pr_multi['pin'] === false);
+
+$pr_fallback_plan = pr_catalog_apply_plan([], 6820, 1, [], null, [], 0);
+pr_check("fallback with no stored region tags without pin",
+         $pr_fallback_plan['add_model'] === true && $pr_fallback_plan['pin'] === false);
+
+pr_check("operator pin needs a positive leaf model",
+         pr_operator_pin(0, 6820, 1) === 'failed');
+pr_check("operator exclude needs a resource",
+         pr_operator_exclude(0, 1) === 'failed');
+
+$pr_class_mossy = pr_classify_sheet_color('Mossy Oak', 'Ryder_Mossy_Oak');
+pr_check("Mossy Oak sheet color is collab not colorway",
+         $pr_class_mossy['collab'] === 'Mossy Oak' && $pr_class_mossy['colorway'] === '');
+$pr_class_strap = pr_classify_sheet_color('Universal Backpack Straps', 'Double Straps');
+pr_check("strap kit sheet color is junk",
+         $pr_class_strap['junk'] === true && $pr_class_strap['colorway'] === '');
+$pr_class_matte = pr_classify_sheet_color('Matte Black', 'LOMA-Matte Black');
+pr_check("Matte Black sheet color stays colorway",
+         $pr_class_matte['colorway'] === 'Matte Black' && $pr_class_matte['collab'] === '');
+$pr_class_dsg = pr_classify_sheet_color('Americana (White) (DSG ONLY)', 'LOMA');
+pr_check("DSG ONLY stripped from colorway display",
+         $pr_class_dsg['colorway'] === 'Americana (White)');
+$pr_class_masters = pr_classify_sheet_color('Camo Green/Yellow', 'Masters Camo - Camo Green/Yellow');
+pr_check("Masters Camo product yields Masters collab; slash color skipped",
+         $pr_class_masters['collab'] === 'Masters' && $pr_class_masters['colorway'] === '');
+
 pr_check("!list token is colon-separated",
          pr_other_match_search_token([1334, 1335, 1336]) === '!list1334:1335:1336');
 pr_check("empty match list is not a bare !list",
@@ -318,50 +354,169 @@ pr_check("zero and negative refs drop out of !list",
          pr_other_match_search_token([0, -1, 9]) === '!list9');
 
 $pr_pick_cat = [
-    ['sku' => 'BAG101', 'model_text' => 'NORTH', 'colorway_text' => 'Matte Black'],
-    ['sku' => 'BAG102', 'model_text' => 'NORTH', 'colorway_text' => 'Cobalt Blue'],
-    ['sku' => 'BAG201', 'model_text' => 'SOUTH', 'colorway_text' => 'Matte Black'],
+    ['sku' => 'BAG101', 'model_text' => 'LOMA', 'colorway_text' => 'Matte Black'],
+    ['sku' => 'BAG102', 'model_text' => 'LOMA', 'colorway_text' => 'Cobalt Blue'],
+    ['sku' => 'BAG201', 'model_text' => 'RYDER', 'colorway_text' => 'Matte Black'],
 ];
 pr_check("preselect hits model+colorway SKU",
-         pr_picker_preselect('North', 'Cobalt Blue', $pr_pick_cat)
-         === ['sku' => 'BAG102', 'model_text' => 'NORTH', 'colorway_text' => 'Cobalt Blue']);
-pr_check("preselect falls back to first SKU of the model",
-         pr_picker_preselect('North', '', $pr_pick_cat)
-         === ['sku' => 'BAG101', 'model_text' => 'NORTH', 'colorway_text' => 'Matte Black']);
+         pr_picker_preselect('Loma', 'Cobalt Blue', $pr_pick_cat)
+         === ['sku' => 'BAG102', 'model_text' => 'LOMA', 'colorway_text' => 'Cobalt Blue']);
+pr_check("preselect does not guess a colour when the model has several",
+         pr_picker_preselect('Loma', '', $pr_pick_cat)
+         === ['sku' => '', 'model_text' => 'LOMA', 'colorway_text' => '']);
+pr_check("preselect fills colour only when the model has one SKU colour",
+         pr_picker_preselect('Ryder', '', $pr_pick_cat)
+         === ['sku' => 'BAG201', 'model_text' => 'RYDER', 'colorway_text' => 'Matte Black']);
+pr_check("preselect keeps a tagged colorway that is not a sheet row",
+         pr_picker_preselect('Loma', 'Mindy Lemon', $pr_pick_cat)
+         === ['sku' => '', 'model_text' => 'LOMA', 'colorway_text' => 'Mindy Lemon']);
+pr_check("preselect picks Ryder from a dual-tagged comma string",
+         pr_picker_preselect('Ryder, Ryder S-Class', 'Pink', $pr_pick_cat)
+         === ['sku' => '', 'model_text' => 'RYDER', 'colorway_text' => 'Pink']);
+pr_check("primary tagged model skips unbound dual tags",
+         pr_primary_tagged_model(['Ryder S-Class', 'Ryder'], $pr_pick_cat) === 'Ryder');
 pr_check("preselect misses unknown model",
          pr_picker_preselect('Patches', 'Red', $pr_pick_cat)
          === ['sku' => '', 'model_text' => '', 'colorway_text' => '']);
+pr_check("several colour names collapse to blank",
+         pr_unique_or_blank_colorway(['Matte Black', 'Cobalt Blue']) === '');
+pr_check("one colour name is kept",
+         pr_unique_or_blank_colorway(['Matte Black', 'matte-black']) === 'Matte Black');
+pr_check("catalog with several colours never infers from a Matte Black reference",
+         pr_infer_colorway(['Matte Black', 'Cobalt Blue'], ['Matte Black']) === '');
+pr_check("catalog with one colour fills that colour",
+         pr_infer_colorway(['Matte Black'], ['Cobalt Blue']) === 'Matte Black');
+pr_check("no catalog row falls back to a unique reference colour",
+         pr_infer_colorway([], ['Matte Black']) === 'Matte Black');
+pr_check("Matte Black swatch is a dark colour",
+         ($pr_mb = pr_colorway_swatch('Matte Black')) !== null && $pr_mb[0] < 40);
+pr_check("slash colorway has no swatch",
+         pr_colorway_swatch('Friar Brown/Yellow') === null);
+pr_check("Sunset has no swatch (not a colour word)",
+         pr_colorway_swatch('Sunset') === null);
+pr_check("second pass picks Cobalt Blue from a blue cutout",
+         pr_pick_named_colorway([0, 70, 170], ['Matte Black', 'Cobalt Blue']) === 'Cobalt Blue');
+pr_check("second pass picks Matte Black from a black cutout",
+         pr_pick_named_colorway([20, 20, 20], ['Matte Black', 'Cobalt Blue']) === 'Matte Black');
+pr_check("two black names stay blank",
+         pr_pick_named_colorway([20, 20, 20], ['Matte Black', 'BLACK']) === '');
+pr_check("grey between navy and black stays blank",
+         pr_pick_named_colorway([80, 80, 90], ['Matte Black', 'Navy']) === '');
 
 pr_check("posted model+colorway resolves SKU",
-         pr_catalog_sku_for_pick('NORTH', 'Cobalt Blue', $pr_pick_cat) === 'BAG102');
+         pr_catalog_sku_for_pick('LOMA', 'Cobalt Blue', $pr_pick_cat) === 'BAG102');
 pr_check("empty model is nothing to apply",
          pr_catalog_sku_for_pick('', 'Matte Black', $pr_pick_cat) === '');
 pr_check("mismatched colorway resolves nothing",
-         pr_catalog_sku_for_pick('NORTH', 'Red', $pr_pick_cat) === '');
+         pr_catalog_sku_for_pick('LOMA', 'Red', $pr_pick_cat) === '');
+
+# --- review queue floor + pick (#504): parse + plan, no DB --------------------
+pr_check("empty min-confidence is any",
+         pr_review_min_confidence('') === 0.0
+         && pr_review_min_confidence(null) === 0.0);
+pr_check("percent 70 is 0.70, not 70",
+         (int)round(100 * pr_review_min_confidence('70')) === 70);
+pr_check("non-numeric and negative floors are any",
+         pr_review_min_confidence('abc') === 0.0
+         && pr_review_min_confidence('-10') === 0.0);
+pr_check("percent 75 snaps down to the 70 floor",
+         (int)round(100 * pr_review_min_confidence('75')) === 70);
+pr_check("percent above 100 snaps to the 90 floor",
+         (int)round(100 * pr_review_min_confidence('150')) === 90);
+pr_check("floor keeps an exact-threshold row",
+         pr_suggestions_at_or_above(
+             [['confidence' => 0.4], ['confidence' => 0.7], ['confidence' => 0.8]],
+             0.7
+         ) === [['confidence' => 0.7], ['confidence' => 0.8]]);
+pr_check("untagged pick with no matching suggestion tags",
+         pr_review_pick_plan(null, [], 6820) === 'tag');
+pr_check("untagged pick of an open suggestion accepts it",
+         pr_review_pick_plan(12, [], 6820) === 'accept');
+pr_check("path-derived other model is kept",
+         pr_review_pick_plan(null, [6767], 6820) === 'keep');
+pr_check("same leaf already present still tags (pin path)",
+         pr_review_pick_plan(null, [6820], 6820) === 'tag');
+pr_check("blank model pick writes nothing",
+         pr_review_pick_plan(null, [], 0) === 'none');
+
+$pr_lang_src = (string)file_get_contents(dirname(__DIR__) . '/languages/en.php');
+$pr_setup_src = (string)file_get_contents(dirname(__DIR__) . '/pages/setup.php');
+pr_check("setup intro tells the operator to leave defaults",
+         str_contains($pr_lang_src, 'product_recognition_setup_intro_defaults')
+         && str_contains($pr_setup_src, 'product_recognition_setup_intro_defaults'));
+pr_check("API key tooltip says leave blank",
+         str_contains($pr_lang_src, 'Leave blank. Only needed if the sidecar is published outside Docker'));
+pr_check("setup intro does not claim every label has a hover tooltip",
+         !str_contains($pr_lang_src, 'Hover a label for what it does')
+         && str_contains($pr_lang_src, 'Text fields have a hover description'));
+pr_check("auto-apply help is visible HTML, not a boolean title",
+         str_contains($pr_setup_src, 'config_add_html')
+         && str_contains($pr_setup_src, 'product_recognition_setup_auto_apply_help'));
 
 # --- never auto-apply list (#464): parse + unique leaf bind, no DB --------------------
-$pr_never_raw = "North XL, Cargo S-Class, South 14";
+$pr_never_grown = pr_never_auto_apply_default();
+$pr_never_raw = "Loma XL, Big Rig S-Class, Ryder 14";
 $pr_never_src = (string)file_get_contents(dirname(__DIR__) . '/config/config.php');
-pr_check("config.php default never-auto-apply list is empty",
-         (bool)preg_match(
-             '/\$product_recognition_never_auto_apply\s*=\s*""\s*;/',
-             $pr_never_src
-         ));
-pr_check("sample never-auto-apply list folds to 3 names",
-         pr_never_auto_apply_names($pr_never_raw) === ['north xl', 'cargo s class', 'south 14']);
+pr_check("config.php default never-auto-apply list is the grown default",
+         str_contains(
+             $pr_never_src,
+             '$product_recognition_never_auto_apply = "' . $pr_never_grown . '";'
+         )
+         && str_contains($pr_never_grown, 'Loma XL, Big Rig S-Class, Ryder 14')
+         && str_contains($pr_never_grown, 'Loma Lite')
+         && str_contains($pr_never_grown, 'El Camino Superlite')
+         && str_contains($pr_never_grown, 'Ryder Lefty')
+         && str_contains($pr_never_grown, 'Storm Ryder')
+         && str_contains($pr_never_grown, 'Loma S-Class')
+         && str_contains($pr_never_grown, 'Loma XL S-Class')
+         && str_contains($pr_never_grown, 'El Camino S-Class')
+         && str_contains($pr_never_grown, 'Ryder S-Class'));
+pr_check("grown never-auto-apply default folds to 11 names",
+         pr_never_auto_apply_names($pr_never_grown) === [
+             'loma xl', 'big rig s class', 'ryder 14', 'loma lite', 'el camino superlite',
+             'ryder lefty', 'storm ryder', 'loma s class', 'loma xl s class',
+             'el camino s class', 'ryder s class',
+         ]);
+pr_check("three-name never-auto-apply list still folds to 3 names",
+         pr_never_auto_apply_names($pr_never_raw) === ['loma xl', 'big rig s class', 'ryder 14']);
 
-$pr_leaves = [6820 => 'North', 6842 => 'North XL', 6767 => 'South', 6800 => 'South 14',
-              6900 => 'Cargo S-Class', 6910 => 'South 15'];
-pr_check("never-auto-apply nodes follow list order and skip misses",
-         pr_never_auto_apply_nodes($pr_leaves, $pr_never_raw) === [6842, 6900, 6800]);
-pr_check("North unique-matches the parent node, not North XL",
-         pr_never_auto_apply_nodes($pr_leaves, "North") === [6820]);
+$pr_family_leaves = [6820 => 'Loma', 6842 => 'Loma XL', 6767 => 'Ryder',
+                     6901 => 'Big Rig', 6911 => 'El Camino', 6912 => 'Loma Lite'];
+pr_check("never-auto-apply Name tokens bind the Family leaf",
+         pr_load_identity_grammar()
+         && pr_never_auto_apply_nodes($pr_family_leaves, $pr_never_raw) === [6842, 6901, 6767]);
+pr_check("Loma unique-matches the parent node, not Loma XL",
+         pr_never_auto_apply_nodes($pr_family_leaves, "Loma") === [6820]);
 pr_check("empty never-auto-apply list matches no nodes",
-         pr_never_auto_apply_nodes($pr_leaves, "") === []);
+         pr_never_auto_apply_nodes($pr_family_leaves, "") === []);
 pr_check("ambiguous folded leaves are skipped",
-         pr_never_auto_apply_nodes([1 => 'North XL', 2 => 'North-XL'], $pr_never_raw) === []);
+         pr_never_auto_apply_nodes([1 => 'Loma XL', 2 => 'Loma-XL'], $pr_never_raw) === []);
 pr_check("unmatched names are the folded misses",
-         pr_never_auto_apply_unmatched($pr_leaves, "North XL, unknown product") === ['unknown product']);
+         pr_never_auto_apply_unmatched($pr_family_leaves, "Loma XL, unknown product") === ['unknown product']);
+pr_check("grown never-auto-apply misses stay visible against family leaves",
+         in_array('ryder 16', pr_never_auto_apply_unmatched(
+             $pr_family_leaves,
+             $pr_never_grown . ', Ryder 16'
+         ), true));
+pr_check("grown never-auto-apply list binds Family leaves and dedupes variants",
+         pr_never_auto_apply_nodes($pr_family_leaves, $pr_never_grown) === [
+             6842, 6901, 6767, 6912, 6911, 6820,
+         ]);
+
+pr_check("auto-apply setup flag stays false",
+         (bool)$GLOBALS['product_recognition_auto_apply'] === false);
+$pr_ok_threshold = ['status' => 'ok', 'min_confidence' => 0.8, 'never_auto_apply' => 0];
+pr_check("100% match does not auto-apply while the flag is off",
+         pr_classify_should_auto_apply(false, 1.0, 1.0, $pr_ok_threshold, false, false) === false);
+pr_check("100% match auto-applies when the flag is on",
+         pr_classify_should_auto_apply(true, 1.0, 1.0, null, false, false) === true);
+pr_check("100% match still refuses never-auto-apply",
+         pr_classify_should_auto_apply(true, 1.0, 1.0, $pr_ok_threshold, false, true) === false);
+pr_check("flag on still needs threshold when similarity is not 100%",
+         pr_classify_should_auto_apply(true, 0.9, 0.85, $pr_ok_threshold, false, false) === true
+         && pr_classify_should_auto_apply(true, 0.9, 0.7, $pr_ok_threshold, false, false) === false);
+pr_check("prior rejection never auto-applies",
+         pr_classify_should_auto_apply(true, 1.0, 1.0, $pr_ok_threshold, true, false) === false);
 
 # --- the reference decision, every branch ------------------------------------------------
 # Pure and DB-free, and the reason it was extracted: this decision is where a dry run and a live
@@ -383,12 +538,32 @@ pr_check("a derived row under a new model is relabelled",
 pr_check("a derived row under the same model is left alone",
          pr_reference_action(['model_node' => 5, 'status' => 'derived'], 5) === 'keep');
 
+pr_check("pin with no row adds",
+         pr_pin_action(null, 5) === 'add');
+pr_check("pin leaves excluded alone",
+         pr_pin_action(['model_node' => 5, 'status' => 'excluded'], 9) === 'defer');
+pr_check("pin keeps a same-model pin",
+         pr_pin_action(['model_node' => 5, 'status' => 'pinned'], 5) === 'keep');
+pr_check("pin does not retarget a different-model pin",
+         pr_pin_action(['model_node' => 5, 'status' => 'pinned'], 9) === 'defer');
+pr_check("pin upgrades derived to the named model",
+         pr_pin_action(['model_node' => 5, 'status' => 'derived'], 9) === 'upgrade');
+pr_check("pin upgrades orphaned to the named model",
+         pr_pin_action(['model_node' => 5, 'status' => 'orphaned'], 9) === 'upgrade');
+pr_check("cron backs off 20 hours after a successful pass",
+         pr_cron_interval_seconds() === 20 * 3600);
+
+$pr_review_src = (string)file_get_contents(dirname(__DIR__) . '/pages/review.php');
+pr_check("review picker ships the leaf list once as JSON",
+         str_contains($pr_review_src, 'id="pr-leaf-json"')
+         && str_contains($pr_review_src, 'select.pr-review-leaf'));
+
 # --- disagreement outcome, every kind (no DB, no /identify) ------------------------------
 # pr_classify() never sees a tagged resource, so this comparison has to be its own function
 # and these checks cannot go through the service. The report counts outcome['kind']
 # directly; do not re-test a second if-chain.
 
-$pr_leaves = [10 => 'North', 20 => 'South'];
+$pr_leaves = [10 => 'Loma', 20 => 'Ryder'];
 $pr_thresholds = [20 => ['wilson_lower' => 0.95]];
 $pr_min = 0.5;
 $pr_agree = [
@@ -410,7 +585,7 @@ $pr_row = $pr_ok_diff['row'];
 pr_check("disagreement kind", $pr_ok_diff['kind'] === 'disagreed');
 pr_check("disagreement names both models",
          $pr_row !== null && $pr_row['tagged_node'] === 10 && $pr_row['recognised_node'] === 20
-         && $pr_row['tagged_name'] === 'North' && $pr_row['recognised_name'] === 'South'
+         && $pr_row['tagged_name'] === 'Loma' && $pr_row['recognised_name'] === 'Ryder'
          && $pr_row['resource'] === 1);
 pr_check("disagreement carries wilson from the recognised model's threshold",
          $pr_row !== null && $pr_row['wilson_lower'] === 0.95);
@@ -468,16 +643,17 @@ $pr_nullref = pr_disagreement_outcome(
 pr_check("TSV prints - for null top_reference",
          $pr_nullref !== null && pr_disagreement_tsv_fields($pr_nullref)[8] === '-');
 
-pr_check("tagged leaf CTE has two placeholders",
-         substr_count(pr_tagged_leaf_cte(), '?') === 2);
+$pr_cte_ph = pr_product_field_is_flat() ? 1 : 2;
+pr_check("tagged leaf CTE has $pr_cte_ph field placeholder(s)",
+         substr_count(pr_tagged_leaf_cte(), '?') === $pr_cte_ph);
 
 $GLOBALS['product_recognition_field'] = $GLOBALS['product_recognition_field'] ?? 88;
 [$pr_sql0] = pr_tagged_leaf_with_vector_sql(0);
 pr_check("limit 0 does not emit LIMIT",
-         substr_count($pr_sql0, '?') === 2 && stripos($pr_sql0, 'LIMIT') === false);
+         substr_count($pr_sql0, '?') === $pr_cte_ph && stripos($pr_sql0, 'LIMIT') === false);
 [$pr_sql5, $pr_p5] = pr_tagged_leaf_with_vector_sql(5);
 pr_check("limit 5 binds LIMIT ?",
-         substr_count($pr_sql5, '?') === 3 && end($pr_p5) === 5);
+         substr_count($pr_sql5, '?') === $pr_cte_ph + 1 && end($pr_p5) === 5);
 
 # --- studio trim for the view-page crop (no DB) ------------------------------------------
 # The faces-style panel must not render the whole frame. A white canvas with a coloured
@@ -520,6 +696,50 @@ if (function_exists('imagecreatetruecolor')) {
     @unlink($pair);
     pr_check('two products on white become two boxes', count($two) === 2);
 
+    $split = $tmp . '/pr_bbox_split.jpg';
+    $im = imagecreatetruecolor(200, 200);
+    imagefilledrectangle($im, 0, 0, 199, 199, imagecolorallocate($im, 255, 255, 255));
+    imagefilledrectangle($im, 40, 30, 90, 150, imagecolorallocate($im, 200, 20, 20));
+    imagefilledrectangle($im, 95, 50, 120, 90, imagecolorallocate($im, 200, 20, 20));
+    imagejpeg($im, $split, 95);
+    $joined = pr_bboxes_from_image($split);
+    @unlink($split);
+    pr_check('nearby fragments of one product become one box', count($joined) === 1);
+
+    pr_check('overlapping padded boxes coalesce',
+             count(pr_coalesce_boxes([[0.2, 0.2, 0.6, 0.8], [0.45, 0.3, 0.7, 0.7]])) === 1);
+    pr_check('far-apart boxes stay two products',
+             count(pr_coalesce_boxes([[0.05, 0.15, 0.3, 0.7], [0.7, 0.15, 0.95, 0.7]])) === 2);
+    pr_check('resource 350 lifestyle fragments coalesce to one product',
+             count(pr_coalesce_boxes([[0.5583, 0.6722, 0.7111, 0.8667], [0.6556, 0.6167, 0.8306, 0.8481]])) === 1);
+    $padded = pr_expand_boxes([[0.5583, 0.6167, 0.8306, 0.8667]], 0.08);
+    pr_check('expand pads a tight lifestyle box',
+             $padded[0][0] < 0.5583 && $padded[0][2] > 0.8306
+             && ($padded[0][2] - $padded[0][0]) * ($padded[0][3] - $padded[0][1]) > 0.15);
+    pr_check('bare checksum is the same file as a stamped region',
+             pr_region_is_current_file('abc', 'abc')
+             && pr_region_is_current_file('abc:cw4', 'abc')
+             && !pr_region_is_current_file('def:cw4', 'abc'));
+    pr_check('three overlapping segment fragments become two products after coalesce',
+             count(pr_coalesce_boxes([
+                 [0.3272, 0.4389, 0.4951, 0.663],
+                 [0.5877, 0.3296, 0.7407, 0.8204],
+                 [0.6617, 0.3407, 0.821, 0.8204],
+             ])) === 2);
+    # 35062: four /segment fragments of two adjacent bags — pad-touch used to glue all four.
+    pr_check('adjacent bag fragment pairs stay two products',
+             count(pr_coalesce_boxes([
+                 [0.2296, 0.2352, 0.4481, 0.8796],
+                 [0.3537, 0.2296, 0.5333, 0.8204],
+                 [0.5148, 0.2278, 0.6685, 0.8167],
+                 [0.6056, 0.25, 0.7833, 0.8685],
+             ])) === 2);
+    pr_check('resource 356 two-bag lifestyle stays two products',
+             count(pr_coalesce_boxes([
+                 [0.5077, 0.2496, 0.901, 0.9004],
+                 [0.2472, 0.3589, 0.5751, 0.743],
+             ])) === 2);
+
     $two_json = '[[0.3,0.1852,0.6167,0.8148],[0.525,0.1981,0.7917,0.8222]]';
     $decoded_two = pr_decode_bboxes($two_json);
     pr_check('two lifestyle boxes decode from JSON', count($decoded_two) === 2);
@@ -535,19 +755,21 @@ if (function_exists('imagecreatetruecolor')) {
             'top_reference' => 57,
         ]],
         'top_reference' => 99,
-    ], [42 => 'West']);
-    pr_check('identify result carries winning model name', $ident['model_name'] === 'West');
-    pr_check('colorway lookup uses the winning model\'s nearest reference',
+    ], [42 => 'El Camino']);
+    pr_check('identify result carries winning model name', $ident['model_name'] === 'El Camino');
+    pr_check('identify result keeps the winning model\'s nearest reference id',
              $ident['top_reference'] === 57);
+    pr_check('identify result does not copy a colour from the nearest reference',
+             $ident['colorway'] === '');
     $tagged = pr_identity_from_identify_result([
         'candidates' => [
             ['model_node' => 1, 'confidence' => 0.50, 'top_reference' => 10],
             ['model_node' => 42, 'confidence' => 0.30, 'top_reference' => 57],
         ],
         'top_reference' => 10,
-    ], [1 => 'East', 42 => 'West'], ['West']);
+    ], [1 => 'Cruiser', 42 => 'El Camino'], ['El Camino']);
     pr_check('tagged model beats a higher-vote rival for colorway',
-             $tagged['model_name'] === 'West' && $tagged['top_reference'] === 57);
+             $tagged['model_name'] === 'El Camino' && $tagged['top_reference'] === 57);
     pr_check('tagged model absent from the vote stays empty',
              pr_identity_from_identify_result([
                  'candidates' => [[
@@ -555,11 +777,14 @@ if (function_exists('imagecreatetruecolor')) {
                      'confidence' => 0.81,
                      'top_reference' => 57,
                  ]],
-             ], [42 => 'West'], ['South'])['model_name'] === '');
+             ], [42 => 'El Camino'], ['Ryder'])['model_name'] === '');
     pr_check('null identify is an empty identity',
              pr_identity_from_identify_result(null)['top_reference'] === null);
     pr_check('identify cache sits next to the mask PNG',
              str_ends_with(pr_identify_cache_file(3022, 'abc', 1), '3022_abc_1.identify.json'));
+
+    # Fallback picker row shape (no DB): region 0 + fallback flag when boxes are absent.
+    # Live path is pr_view_product_rows; here we only assert the expand helper still pads.
 
     $cut = $tmp . '/pr_bbox_mask.png';
     $studio2 = $tmp . '/pr_bbox_studio2.jpg';
@@ -582,11 +807,26 @@ if (function_exists('imagecreatetruecolor')) {
         pr_check('mask centre is opaque product pixels',
                  (($mid >> 24) & 0x7F) === 0);
     }
+    $bleed_crop = $tmp . '/pr_bbox_crop.png';
+    $bleed2 = $tmp . '/pr_bbox_bleed2.jpg';
+    $im = imagecreatetruecolor(200, 200);
+    imagefilledrectangle($im, 0, 0, 99, 99, imagecolorallocate($im, 200, 20, 20));
+    imagefilledrectangle($im, 100, 0, 199, 99, imagecolorallocate($im, 20, 200, 20));
+    imagefilledrectangle($im, 0, 100, 99, 199, imagecolorallocate($im, 20, 20, 200));
+    imagefilledrectangle($im, 100, 100, 199, 199, imagecolorallocate($im, 200, 200, 20));
+    imagejpeg($im, $bleed2, 95);
+    pr_check('lifestyle frame has no studio box', pr_bbox_from_image($bleed2) === null);
+    $cropped = pr_write_product_mask($bleed2, [0.1, 0.1, 0.4, 0.4], $bleed_crop);
+    pr_check('lifestyle crop still writes a PNG', $cropped && is_file($bleed_crop));
+    @unlink($bleed2);
+    @unlink($bleed_crop);
     @unlink($studio2);
     @unlink($cut);
 } else {
     printf("%-4s %s\n", 'skip', 'bbox trim (GD not loaded)');
 }
+
+require __DIR__ . '/product_recognition_selfcheck_identity.php';
 
 # --- no live row points at a deleted product node -----------------------------------------
 # The failure this guards is silent by construction: pr_open_suggestions() INNER JOINs `node`,
