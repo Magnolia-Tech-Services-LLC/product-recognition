@@ -589,7 +589,9 @@ function pr_cached_regions(int $ref): array
 }
 
 /**
- * View path: use cache, or re-run studio trim when nothing is stored yet.
+ * Use cache, or re-run studio trim when nothing is stored yet.
+ * The resource view does not call this. pr_preview_path waits on a cold
+ * Backblaze file. Studio trim stays on pr_ensure_regions (preview hook and CLI).
  * Never POST /segment here (that stays on after-preview / ensure).
  *
  * Prefer same-file stored /segment boxes over studio trim: a lifestyle frame can
@@ -1007,10 +1009,12 @@ function pr_view_product_rows(int $resource): array
     }
     $checksum = (string)$data['file_checksum'];
 
-    $boxes = pr_cached_or_studio_regions($resource);
+    # Cache only. Studio trim stays on the preview hook and the CLI. Statting
+    # or decoding the preview here waits on a cold Backblaze file.
+    $boxes = pr_cached_regions($resource);
     $fallback = false;
     if ($boxes === []) {
-        if (pr_preview_path($resource) === null) {
+        if ((int) ($data['has_image'] ?? 0) === 0) {
             return [];
         }
         # Not written to product_region — pickers only until segment/studio succeeds.

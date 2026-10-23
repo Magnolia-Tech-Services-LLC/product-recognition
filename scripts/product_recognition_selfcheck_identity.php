@@ -312,6 +312,15 @@ pr_check("PDF catalog ingest still calls pr_parse_sku_sheet",
          && str_contains($pr_cat_src, 'function pr_sync_catalog'));
 $pr_sheet_src = (string)file_get_contents(dirname(__DIR__) . '/include/product_recognition_sheet.php');
 $pr_view_src = (string)file_get_contents(dirname(__DIR__) . '/hooks/view.php');
+$pr_view_rows_src = (string)file_get_contents(dirname(__DIR__) . '/include/product_recognition_view.php');
+$pr_rows_fn = strstr($pr_view_rows_src, 'function pr_view_product_rows');
+$pr_rows_fn = $pr_rows_fn === false ? '' : $pr_rows_fn;
+pr_check("resource view reads cached regions and does not stat the preview",
+         str_contains($pr_rows_fn, 'pr_cached_regions(')
+         && !str_contains($pr_rows_fn, 'pr_preview_path(')
+         && !str_contains($pr_rows_fn, 'pr_cached_or_studio_regions(')
+         && str_contains($pr_view_rows_src, 'function pr_ensure_regions')
+         && str_contains($pr_view_rows_src, 'pr_preview_path($ref)'));
 pr_check("sheet loader reads the Master Product List and the resource view does not",
          str_contains($pr_sheet_src, '1tqzCrB3sQ-bhSdnggF9nrvLv6V3N0uWfhli7jRQFv3M')
          && str_contains($pr_sheet_src, 'sheets.googleapis.com')
