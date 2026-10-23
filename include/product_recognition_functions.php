@@ -2745,7 +2745,6 @@ function pr_sheet_collab_vocab(): array
         'Bob Marley' => ['bob marley', 'bobmarley'],
         'Whataburger' => ['whataburger', 'whata burger'],
         '7-Eleven' => ['7 eleven', '7-eleven', '7eleven', '711'],
-        'Costco' => ['costco'],
         'Masters' => ['masters', 'masters camo'],
         'Long Drink' => ['long drink', 'longdrink'],
         'Pins & Aces' => ['pins and aces', 'pins aces'],
@@ -2769,6 +2768,7 @@ function pr_sheet_colorway_is_junk(string $colorway): bool
     foreach ([
         'cooler pack', 'universal backpack straps', 'premium backpack straps',
         'universal', 'magnum', 'blank', 'blank black', 'blank tan', 'blank navy',
+        'costco', # Retail channel. Not a partner and not a color.
     ] as $junk) {
         if ($fold === $junk || str_starts_with($fold, 'blank ')) {
             return true;

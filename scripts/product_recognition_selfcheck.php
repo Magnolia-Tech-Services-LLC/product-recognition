@@ -356,6 +356,12 @@ pr_check("DSG ONLY stripped from colorway display",
 $pr_class_masters = pr_classify_sheet_color('Camo Green/Yellow', 'Masters Camo - Camo Green/Yellow');
 pr_check("Masters Camo product yields Masters collab; slash color skipped",
          $pr_class_masters['collab'] === 'Masters' && $pr_class_masters['colorway'] === '');
+$pr_class_costco = pr_classify_sheet_color('Costco', 'LOMA Costco');
+pr_check("Costco sheet color is a channel, not collab or colorway",
+         $pr_class_costco['collab'] === '' && $pr_class_costco['colorway'] === '' && $pr_class_costco['junk'] === true);
+$pr_class_costco_color = pr_classify_sheet_color('Toasted Almond', 'Pacific Stand Bag Costco');
+pr_check("Costco in the product name keeps the colorway and sets no collab",
+         $pr_class_costco_color['colorway'] === 'Toasted Almond' && $pr_class_costco_color['collab'] === '');
 
 pr_check("!list token is colon-separated",
          pr_other_match_search_token([1334, 1335, 1336]) === '!list1334:1335:1336');
