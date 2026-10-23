@@ -589,56 +589,6 @@ function pr_cached_regions(int $ref): array
 }
 
 /**
- * Use cache, or re-run studio trim when nothing is stored yet.
- * The resource view does not call this. pr_preview_path waits on a cold
- * Backblaze file. Studio trim stays on pr_ensure_regions (preview hook and CLI).
- * Never POST /segment here (that stays on after-preview / ensure).
- *
- * Prefer same-file stored /segment boxes over studio trim: a lifestyle frame can
- * still yield a fake studio CC that would overwrite two real product boxes.
- *
- * @return list<array{0:float,1:float,2:float,3:float}>
- */
-function pr_cached_or_studio_regions(int $ref): array
-{
-    $resource = get_resource_data($ref);
-    if ($resource === false) {
-        return [];
-    }
-    $checksum = (string)$resource['file_checksum'];
-    $row = ps_query('SELECT bbox, checksum FROM product_region WHERE resource = ?', ['i', $ref]);
-    $path = pr_preview_path($ref);
-    if ($row !== [] && (string)$row[0]['checksum'] === pr_region_stamp($checksum)) {
-        $cached = pr_cached_regions($ref);
-        if ($cached !== []) {
-            return $cached;
-        }
-        $stored = pr_decode_bboxes((string)$row[0]['bbox']);
-        if ($stored !== []) {
-            # Stamp current but masks missing — rewrite masks, do not re-expand.
-            pr_commit_regions($ref, $checksum, $stored, [], $path);
-            return $stored;
-        }
-    }
-    $boxes = [];
-    if ($row !== [] && pr_region_is_current_file((string)$row[0]['checksum'], $checksum)) {
-        $stored = pr_decode_bboxes((string)$row[0]['bbox']);
-        if ($stored !== []) {
-            # Older stamp: re-coalesce (pad-touch fix) then rewrite under :cw4.
-            $boxes = pr_coalesce_boxes($stored);
-        }
-    }
-    if ($boxes === [] && $path !== null) {
-        $boxes = pr_bboxes_from_image($path);
-    }
-    if ($boxes === []) {
-        return [];
-    }
-    pr_commit_regions($ref, $checksum, $boxes, [], $path);
-    return $boxes;
-}
-
-/**
  * @param list<array{0:float,1:float,2:float,3:float}> $boxes
  * @param list<string> $pngs
  */
