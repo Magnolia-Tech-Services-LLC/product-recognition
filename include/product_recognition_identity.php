@@ -1012,14 +1012,74 @@ function pr_ensure_named_node(int $field, string $name): int
 }
 
 /**
- * Identity writes after a product accept. Add-only unless $replace is set.
- * $replace is the panel Apply path: the chosen product replaces Family, Name,
- * and the other identity fields the grammar names.
+ * Write mode for pr_write_accept_identity. Replace is a single-product Apply
+ * over a different Name; add is any write on a photo with more than one stored
+ * region, where each bag contributes its own identity.
+ */
+function pr_identity_mode(bool $replace, int $stored_region_count): string
+{
+    if ($replace) {
+        return 'replace';
+    }
+    return $stored_region_count > 1 ? 'add' : 'keep';
+}
+
+/**
+ * Whether a field holds several values, by its RS type. Read at runtime so a
+ * field whose type changes in Admin is picked up without a code change.
+ */
+function pr_identity_field_is_multi(int $field): bool
+{
+    if ($field <= 0) {
+        return false;
+    }
+    $rows = ps_query("SELECT type FROM resource_type_field WHERE ref = ?", ["i", $field]);
+    if ($rows === []) {
+        return false;
+    }
+    return pr_identity_type_is_multi((int)$rows[0]['type']);
+}
+
+function pr_identity_type_is_multi(int $type): bool
+{
+    foreach (['FIELD_TYPE_DYNAMIC_KEYWORDS_LIST', 'FIELD_TYPE_CHECK_BOX_LIST', 'FIELD_TYPE_CATEGORY_TREE'] as $const) {
+        if (defined($const) && $type === (int)constant($const)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * What one identity field write does. Pure.
+ *
+ * @return 'replace'|'add'|'keep'
+ */
+function pr_identity_write_action(string $mode, bool $field_is_multi, bool $has_existing): string
+{
+    if ($mode === 'replace') {
+        return 'replace';
+    }
+    if (!$has_existing || ($mode === 'add' && $field_is_multi)) {
+        return 'add';
+    }
+    return 'keep';
+}
+
+/**
+ * Identity writes after a product accept. $mode:
+ *  - keep (default): add only where the field is empty.
+ *  - replace: the panel Apply path; the chosen product replaces Family, Name,
+ *    and the other identity fields the grammar names, and clears stale
+ *    name-derived ones.
+ *  - add: multi-bag photo. Multi-value fields (by RS type) gain the node beside
+ *    the existing ones; single-value fields keep what they have. Nothing is cleared.
  *
  * @return array<string,string> field => 'wrote'|'kept'|'skipped'
  */
-function pr_write_accept_identity(int $resource, int $family_node, string $label_override = '', bool $replace = false): array
+function pr_write_accept_identity(int $resource, int $family_node, string $label_override = '', string $mode = 'keep'): array
 {
+    $replace = $mode === 'replace';
     $out = [
         'family' => 'skipped',
         'productcategory' => 'skipped',
@@ -1088,12 +1148,17 @@ function pr_write_accept_identity(int $resource, int $family_node, string $label
             continue;
         }
         $existing = pr_resource_field_nodes($resource, $field);
-        if (!$replace && $existing !== []) {
+        $action = pr_identity_write_action($mode, pr_identity_field_is_multi($field), $existing !== []);
+        if ($action === 'keep') {
             $out[$key] = 'kept';
             continue;
         }
         $node = pr_ensure_named_node($field, $value);
         if ($node <= 0) {
+            continue;
+        }
+        if ($action === 'add' && in_array($node, $existing, true)) {
+            $out[$key] = 'kept';
             continue;
         }
         if ($replace) {

@@ -1925,7 +1925,7 @@ function pr_model_nodes_with_ancestors(int $node): array
  * cannot be reconstructed cannot be corrected.
  */
 function pr_apply_model(int $resource, int $node, float $confidence, int $top_reference,
-                        float $threshold): void
+                        float $threshold, string $identity_mode = 'keep'): void
 {
     $product_recognition_field = pr_product_field();
 
@@ -1936,7 +1936,7 @@ function pr_apply_model(int $resource, int $node, float $confidence, int $top_re
         sprintf("Product recognition: node %d at confidence %.3f (threshold %.3f), "
                 . "nearest reference resource %d", $node, $confidence, $threshold, $top_reference)
     );
-    pr_write_accept_identity($resource, $node);
+    pr_write_accept_identity($resource, $node, '', $identity_mode);
 }
 
 /**
@@ -2108,7 +2108,8 @@ function pr_accept_suggestion(int $suggestion, int $user): string
 
     $existing = pr_resource_model_nodes($resource);
     $existing_leaves = pr_resource_model_leaves($resource);
-    $plan = pr_review_pick_plan($suggestion, $existing_leaves, $node);
+    $multi = pr_stored_region_count($resource) > 1;
+    $plan = pr_review_pick_plan($suggestion, $existing_leaves, $node, $multi);
     if ($plan === 'keep') {
         return 'keep';
     }
@@ -2126,14 +2127,26 @@ function pr_accept_suggestion(int $suggestion, int $user): string
     if (sql_affected_rows() !== 1) {
         return 'gone';
     }
-    ps_query(
-        "UPDATE product_suggestion SET state = 'superseded', decided_by = ?, decided_at = NOW()
-          WHERE resource = ? AND state = 'open'",
-        array("i", $user, "i", $resource)
-    );
+    # Suggestions are whole-image candidates with no crop column, so on a multi-bag
+    # photo the siblings cannot be told apart from the other bag's candidates. Leave
+    # them open there; a per-crop supersede needs a region column on product_suggestion.
+    if (!$multi) {
+        ps_query(
+            "UPDATE product_suggestion SET state = 'superseded', decided_by = ?, decided_at = NOW()
+              WHERE resource = ? AND state = 'open'",
+            array("i", $user, "i", $resource)
+        );
+    }
 
-    if ($existing_leaves === []) {
-        pr_apply_model($resource, $node, (float)$row['confidence'], (int)$row['top_reference'], 0.0);
+    if (!in_array($node, $existing_leaves, true)) {
+        pr_apply_model(
+            $resource,
+            $node,
+            (float)$row['confidence'],
+            (int)$row['top_reference'],
+            0.0,
+            $multi ? 'add' : 'keep'
+        );
     } else {
         # Same leaf already present (tagged while the suggestion was open): pin only.
         # Tree fields still fill missing ancestors; Family is flat so this is a no-op.
@@ -2141,7 +2154,7 @@ function pr_accept_suggestion(int $suggestion, int $user): string
         if ($missing !== []) {
             add_resource_nodes($resource, $missing, false, false);
         }
-        pr_write_accept_identity($resource, $node);
+        pr_write_accept_identity($resource, $node, '', $multi ? 'add' : 'keep');
     }
 
     $pin = pr_operator_pin($resource, $node, $user);
@@ -2225,18 +2238,20 @@ function pr_suggestions_at_or_above(array $rows, float $min): array
 
 /**
  * How a review-page product pick should write. Pure so the selfcheck can cover
- * the dual-tag / accept-existing / tag-new split without the DB.
+ * the dual-tag / accept-existing / tag-new split without the DB. $multi (more than
+ * one stored region) lets a second Name through instead of 'keep'.
  *
  * @param list<int> $existing_leaves
  * @return 'none'|'keep'|'accept'|'tag'
  */
-function pr_review_pick_plan(?int $matching_open_suggestion, array $existing_leaves, int $model_node): string
+function pr_review_pick_plan(?int $matching_open_suggestion, array $existing_leaves, int $model_node, bool $multi = false): string
 {
     if ($model_node <= 0) {
         return 'none';
     }
     $others = array_values(array_diff($existing_leaves, [$model_node]));
-    if ($others !== []) {
+    # A multi-bag photo takes one Name per bag, so another leaf is no reason to refuse.
+    if ($others !== [] && !$multi) {
         return 'keep';
     }
     if ($matching_open_suggestion !== null && $matching_open_suggestion > 0) {
@@ -2276,7 +2291,8 @@ function pr_apply_review_pick(int $resource, int $model_node, int $user): string
         array("i", $resource, "i", $model_node)
     );
     $matching = $match_rows === [] ? null : (int)$match_rows[0]['ref'];
-    $plan = pr_review_pick_plan($matching, $existing_leaves, $model_node);
+    $multi = pr_stored_region_count($resource) > 1;
+    $plan = pr_review_pick_plan($matching, $existing_leaves, $model_node, $multi);
     if ($plan === 'accept') {
         return pr_accept_suggestion((int)$matching, $user);
     }
@@ -2284,11 +2300,14 @@ function pr_apply_review_pick(int $resource, int $model_node, int $user): string
         return $plan;
     }
 
-    ps_query(
-        "UPDATE product_suggestion SET state = 'superseded', decided_by = ?, decided_at = NOW()
-          WHERE resource = ? AND state = 'open'",
-        array("i", $user, "i", $resource)
-    );
+    # Multi-bag: leave other open candidates alone (see pr_accept_suggestion).
+    if (!$multi) {
+        ps_query(
+            "UPDATE product_suggestion SET state = 'superseded', decided_by = ?, decided_at = NOW()
+              WHERE resource = ? AND state = 'open'",
+            array("i", $user, "i", $resource)
+        );
+    }
 
     $missing = array_values(array_diff(pr_nodes_to_apply($model_node), $existing));
     if ($missing !== []) {
@@ -2302,7 +2321,7 @@ function pr_apply_review_pick(int $resource, int $model_node, int $user): string
             );
         }
     }
-    pr_write_accept_identity($resource, $model_node);
+    pr_write_accept_identity($resource, $model_node, '', $multi ? 'add' : 'keep');
 
     $pin = pr_operator_pin($resource, $model_node, $user);
     return in_array($pin, ['pinned', 'kept'], true) ? 'accepted' : 'tagged';
@@ -3142,9 +3161,11 @@ function pr_catalog_picker_rows(): array
 }
 
 /**
- * Decide catalog writes without touching the DB. An explicit Apply replaces a
- * different Name. Colorway and Collaboration replace when the field already has
- * a value. Pinning stays a separate button.
+ * Decide catalog writes without touching the DB. On a single-product frame an
+ * explicit Apply replaces a different Name, and Colorway and Collaboration replace
+ * when the field already has a value. With more than one stored region (a
+ * multi-bag photo) Apply only adds: Name, Colorway and Collaboration are lists,
+ * and each bag contributes its own. Pinning stays a separate button.
  *
  * @param list<int> $existing_leaves
  * @param list<int> $existing_colorway
@@ -3163,7 +3184,8 @@ function pr_catalog_apply_plan(
     $others = $model_node === null
         ? $existing_leaves
         : array_values(array_diff($existing_leaves, [$model_node]));
-    $replace_model = $model_node !== null && $others !== [];
+    $multi = $stored_region_count > 1;
+    $replace_model = !$multi && $model_node !== null && $others !== [];
     $same_colorway = $colorway_node !== null
         && in_array($colorway_node, $existing_colorway, true);
     $same_collab = $collab_node !== null
@@ -3174,10 +3196,12 @@ function pr_catalog_apply_plan(
         'replace_model' => $replace_model,
         'skip_model' => $model_node === null,
         'pin' => false,
-        'add_colorway' => $colorway_node !== null && $existing_colorway === [],
-        'replace_colorway' => $colorway_node !== null && $existing_colorway !== [] && !$same_colorway,
-        'add_collab' => $collab_node !== null && $existing_collab === [],
-        'replace_collab' => $collab_node !== null && $existing_collab !== [] && !$same_collab,
+        'add_colorway' => $colorway_node !== null
+            && ($multi ? !$same_colorway : $existing_colorway === []),
+        'replace_colorway' => !$multi && $colorway_node !== null && $existing_colorway !== [] && !$same_colorway,
+        'add_collab' => $collab_node !== null
+            && ($multi ? !$same_collab : $existing_collab === []),
+        'replace_collab' => !$multi && $collab_node !== null && $existing_collab !== [] && !$same_collab,
     ];
 }
 
@@ -3248,9 +3272,11 @@ function pr_apply_collab(int $resource, int $node): void
 }
 
 /**
- * Apply a Name + Colorway + Collaboration pick from the panel. Replaces a different
- * Name and the identity fields that belong to it. SKU is an audit string.
- * A pinned example follows the new Name. Nightly sync still does not move a pin.
+ * Apply a Name + Colorway + Collaboration pick from the panel. On a single-product
+ * frame it replaces a different Name and the identity fields that belong to it; on a
+ * multi-bag photo it adds beside them. SKU is an audit string.
+ * A pinned example follows a replaced Name (never an added one: a pin needs one cutout).
+ * Nightly sync still does not move a pin.
  *
  * @param list<array{sku:string,model_text:string,colorway_text:string}> $catalog
  * @return array{sku:string,add_model:bool,replace_model:bool,skip_model:bool,pin:bool,add_colorway:bool,replace_colorway:bool,add_collab:bool,replace_collab:bool}
@@ -3325,7 +3351,12 @@ function pr_apply_catalog_pick(
                 sprintf("Product recognition: catalog SKU %s → node %d", $sku, $model_node)
             );
         }
-        pr_write_accept_identity($resource, $model_node, $model_text, $plan['replace_model']);
+        pr_write_accept_identity(
+            $resource,
+            $model_node,
+            $model_text,
+            pr_identity_mode($plan['replace_model'], $stored_regions)
+        );
         if ($plan['replace_model']) {
             pr_follow_reference($resource, $model_node);
         }

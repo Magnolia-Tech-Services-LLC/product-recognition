@@ -330,6 +330,37 @@ $pr_multi = pr_catalog_apply_plan([], 6820, 1, [], null, [], 2);
 pr_check("two stored regions tag model without pin",
          $pr_multi['add_model'] === true && $pr_multi['pin'] === false);
 
+$pr_bag2 = pr_catalog_apply_plan([6767], 6820, 2, [1], 77, [76], 2);
+pr_check("multi-bag apply adds the second Name, colorway and collab beside the first",
+         $pr_bag2 === ['add_model' => true, 'replace_model' => false, 'skip_model' => false,
+             'pin' => false, 'add_colorway' => true, 'replace_colorway' => false,
+             'add_collab' => true, 'replace_collab' => false]);
+
+$pr_bag2_same = pr_catalog_apply_plan([6820, 6767], 6820, 1, [1], 76, [76], 2);
+pr_check("multi-bag apply of values already present adds no colorway or collab",
+         $pr_bag2_same['replace_model'] === false && $pr_bag2_same['add_colorway'] === false
+         && $pr_bag2_same['add_collab'] === false && $pr_bag2_same['replace_colorway'] === false
+         && $pr_bag2_same['replace_collab'] === false);
+
+pr_check("one stored region still replaces a different Name",
+         pr_catalog_apply_plan([6767], 6820, 1, [], null, [], 1)['replace_model'] === true);
+pr_check("identity mode: replace wins, two regions add, else keep",
+         pr_identity_mode(true, 1) === 'replace' && pr_identity_mode(false, 2) === 'add'
+         && pr_identity_mode(false, 1) === 'keep' && pr_identity_mode(false, 0) === 'keep');
+pr_check("add mode stacks a multi-value field, keeps a single-value one",
+         pr_identity_write_action('add', true, true) === 'add'
+         && pr_identity_write_action('add', false, true) === 'keep'
+         && pr_identity_write_action('add', false, false) === 'add');
+pr_check("keep mode never stacks; replace always replaces",
+         pr_identity_write_action('keep', true, true) === 'keep'
+         && pr_identity_write_action('keep', true, false) === 'add'
+         && pr_identity_write_action('replace', false, true) === 'replace');
+pr_check("multi-value types come from the RS field type",
+         pr_identity_type_is_multi((int)FIELD_TYPE_DYNAMIC_KEYWORDS_LIST)
+         && pr_identity_type_is_multi((int)FIELD_TYPE_CHECK_BOX_LIST)
+         && pr_identity_type_is_multi((int)FIELD_TYPE_CATEGORY_TREE)
+         && !pr_identity_type_is_multi((int)FIELD_TYPE_DROP_DOWN_LIST));
+
 $pr_fallback_plan = pr_catalog_apply_plan([], 6820, 1, [], null, [], 0);
 pr_check("fallback with no stored region tags without pin",
          $pr_fallback_plan['add_model'] === true && $pr_fallback_plan['pin'] === false);
@@ -453,6 +484,9 @@ pr_check("path-derived other model is kept",
          pr_review_pick_plan(null, [6767], 6820) === 'keep');
 pr_check("same leaf already present still tags (pin path)",
          pr_review_pick_plan(null, [6820], 6820) === 'tag');
+pr_check("multi-bag pick of a second Name is not kept",
+         pr_review_pick_plan(null, [6767], 6820, true) === 'tag'
+         && pr_review_pick_plan(12, [6767], 6820, true) === 'accept');
 pr_check("blank model pick writes nothing",
          pr_review_pick_plan(null, [], 0) === 'none');
 
