@@ -1026,7 +1026,7 @@ function pr_identity_mode(bool $replace, int $stored_region_count): string
 
 /**
  * Whether a field holds several values, by its RS type. Read at runtime so a
- * field converted to a dynamic keyword list (Edition) is picked up without a code change.
+ * field whose type changes in Admin is picked up without a code change.
  */
 function pr_identity_field_is_multi(int $field): bool
 {
