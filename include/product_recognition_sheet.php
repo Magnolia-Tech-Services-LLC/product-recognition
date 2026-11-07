@@ -785,36 +785,57 @@ function pr_path_file_skipped(string $file): bool
     return !in_array($ext, ['jpg', 'jpeg', 'png', 'tif', 'tiff', 'webp'], true);
 }
 
-/**
- * @param array{names:list<array>,families:list<array>} $index
- * @return array{name:string,family:string,category:string,edition:string,colorway:string,collaboration:string,clubtype:string,retailchannel:string,reference:bool}|null
- */
-function pr_path_resolve(string $path, array $index): ?array
+/** Whole word or phrase. "recommendation" does not contain the word "ecomm". */
+function pr_path_has_term(string $fold, string $term): bool
 {
-    $path = str_replace('\\', '/', $path);
-    $segs = array_values(array_filter(explode('/', $path), static fn(string $s): bool => $s !== ''));
-    if ($segs === []) {
-        return null;
+    return str_contains(' ' . $fold . ' ', ' ' . $term . ' ');
+}
+
+/** The Master Ecomm archive root. It is not a shoot folder and not a product token. */
+function pr_path_archive_root(string $fold): bool
+{
+    return pr_path_has_term($fold, 'master ecomm');
+}
+
+/**
+ * A real ecomm shoot folder, not the Master Ecomm archive root.
+ * "260910 SG Ecomm" counts. "Sunday Golf Master Ecomm Folder" and "recommendation" do not.
+ */
+function pr_path_ecomm_marker(string $fold): bool
+{
+    if (pr_path_archive_root($fold)) {
+        return false;
     }
-    $file = (string)array_pop($segs);
-    if (pr_path_file_skipped($file)) {
-        return null;
-    }
+    return pr_path_has_term($fold, 'ecomm');
+}
+
+/**
+ * Folder tokens for a path. The Master Ecomm archive root is not tokenized.
+ * A dated ecomm folder sets $clean and is not tokenized.
+ *
+ * @param list<string> $segs
+ * @return array{clean:bool,tokens:list<string>}|null
+ */
+function pr_path_read_segments(array $segs): ?array
+{
     $clean = false;
     $tokens = [];
     $aliases = ['loma bag' => 'Loma', 'kids golf bags' => 'Recess'];
     foreach ($segs as $seg) {
         $display = pr_path_segment_display($seg);
         $fold = pr_fold_label($display);
+        if (pr_path_archive_root($fold)) {
+            continue;
+        }
         if ($fold === 'lifestyle' || str_contains($fold, 'sell sheet')
             || in_array($fold, ['docs', 'wip', 'fonts', 'font', 'logo'], true)) {
             return null;
         }
-        if ($fold === 'studio' || $fold === 'ecomm' || $fold === 'jpeg hr' || $fold === 'png hr'
-            || str_contains($fold, 'ecomm')) {
+        if ($fold === 'studio' || $fold === 'jpeg hr' || $fold === 'png hr'
+            || pr_path_ecomm_marker($fold)) {
             $clean = true;
         }
-        if (str_contains($fold, 'ecomm')) {
+        if (pr_path_ecomm_marker($fold)) {
             continue;
         }
         if (isset($aliases[$fold])) {
@@ -830,6 +851,30 @@ function pr_path_resolve(string $path, array $index): ?array
             }
         }
     }
+    return ['clean' => $clean, 'tokens' => $tokens];
+}
+
+/**
+ * @param array{names:list<array>,families:list<array>} $index
+ * @return array{name:string,family:string,category:string,edition:string,colorway:string,collaboration:string,clubtype:string,retailchannel:string,reference:bool}|null
+ */
+function pr_path_resolve(string $path, array $index): ?array
+{
+    $path = str_replace('\\', '/', $path);
+    $segs = array_values(array_filter(explode('/', $path), static fn(string $s): bool => $s !== ''));
+    if ($segs === []) {
+        return null;
+    }
+    $file = (string)array_pop($segs);
+    if (pr_path_file_skipped($file)) {
+        return null;
+    }
+    $read = pr_path_read_segments($segs);
+    if ($read === null) {
+        return null;
+    }
+    $clean = $read['clean'];
+    $tokens = $read['tokens'];
     foreach (pr_path_text_tokens(pathinfo($file, PATHINFO_FILENAME)) as $token) {
         if (!preg_match('/^a\d+$/', $token) && $token !== 'hr' && $token !== 'web') {
             $tokens[] = $token;
@@ -926,7 +971,7 @@ function pr_path_colorway(array $segments, array $name_tokens, array $family_tok
     foreach ($segments as $seg) {
         $display = pr_path_segment_display($seg);
         $fold = pr_fold_label($display);
-        if (pr_path_skip_segment($fold) || str_contains($fold, 'ecomm')
+        if (pr_path_skip_segment($fold) || pr_path_ecomm_marker($fold) || pr_path_archive_root($fold)
             || ($collab_fold !== '' && $fold === $collab_fold)) {
             continue;
         }
@@ -1284,6 +1329,7 @@ function pr_sheet_fixture_failure(): string
         ['Sunday Golf DAM/13) Golf Accessories/Photography/Studio/Koozie/Loma_Koozie_a1_HR.jpg', 'Loma Koozie', '', true],
         ['Sunday Golf DAM/14) Brand Collab/Whataburger/JPEG_HR/Loma_Bag_Whataburger_a2_HR.jpg', 'Loma', '', true],
         ['Sunday_Golf_Master_Ecomm_Folder/Pacific/Blue/JPEG_HR/Pacific_Blue_a1_HR.jpg', '', 'Blue', false],
+        ['Sunday Golf DAM/4) Ryder/260910 SG Ecomm/Ryder 14/Black/Ryder_14_Black.jpg', 'Ryder 14', 'Black', true],
     ];
     foreach ($cases as [$path, $name, $color, $reference]) {
         $plan = pr_path_resolve($path, $index);
@@ -1302,10 +1348,27 @@ function pr_sheet_fixture_failure(): string
     if ($pacific === null || $pacific['family'] !== 'Pacific' || $pacific['name'] !== '') {
         return 'Pacific path guessed a sub-class';
     }
+    if (pr_path_ecomm_marker('recommendation')
+        || pr_path_ecomm_marker('sunday golf master ecomm folder')
+        || !pr_path_ecomm_marker('260910 sg ecomm')
+        || !pr_path_ecomm_marker('ecomm')) {
+        return 'ecomm marker matched the wrong folder';
+    }
+    $master = pr_path_read_segments([
+        'Sunday_Golf_Master_Ecomm_Folder', '4) Ryder', 'Ryder 14', 'Black', 'JPEG_HR',
+    ]);
+    if ($master === null || !$master['clean']
+        || in_array('master', $master['tokens'], true)
+        || in_array('ecomm', $master['tokens'], true)
+        || in_array('folder', $master['tokens'], true)) {
+        return 'master ecomm root leaked into tokens';
+    }
     foreach ([
         'Sunday Golf DAM/4) Ryder/Photography/Lifestyle/SG_2024_c01_7259_HR.jpg',
         'Sunday Golf DAM/4) Ryder/Photography/Studio/Augusta/foo.lrprev',
         'Sunday Golf DAM/3) El Camino/Docs/Sell Sheets/out/El Camino Superlite_Sell Sheet_v3.jpg',
+        'Sunday_Golf_Master_Ecomm_Folder/4) Ryder/Black/Ryder_Black_a1.jpg',
+        'Sunday Golf DAM/4) Ryder/recommendation/Ryder 14/Black/Ryder_14_Black.jpg',
     ] as $path) {
         if (pr_path_resolve($path, $index) !== null) {
             return 'path should have been skipped: ' . $path;
