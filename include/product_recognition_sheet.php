@@ -774,7 +774,7 @@ function pr_path_skip_segment(string $fold): bool
         'archive' => true, 'color graded' => true, 'docs' => true, 'sell sheets' => true,
         'sell sheet' => true, 'video' => true, 'videos' => true, 'fonts' => true, 'font' => true,
         'logo' => true, 'brand guideline' => true, 'brand collab' => true,
-        'marketing materials' => true, 'retail marketing' => true,
+        'marketing materials' => true, 'retail marketing' => true, 'recommendation' => true,
     ];
     return isset($skip[$fold]) || str_contains($fold, 'sell sheet');
 }
@@ -1330,6 +1330,8 @@ function pr_sheet_fixture_failure(): string
         ['Sunday Golf DAM/14) Brand Collab/Whataburger/JPEG_HR/Loma_Bag_Whataburger_a2_HR.jpg', 'Loma', '', true],
         ['Sunday_Golf_Master_Ecomm_Folder/Pacific/Blue/JPEG_HR/Pacific_Blue_a1_HR.jpg', '', 'Blue', false],
         ['Sunday Golf DAM/4) Ryder/260910 SG Ecomm/Ryder 14/Black/Ryder_14_Black.jpg', 'Ryder 14', 'Black', true],
+        ['Sunday Golf DAM/4) Ryder/Photography/Studio/Ryder 14/recommendation/Black/Ryder_14_Black.jpg', 'Ryder 14', 'Black', true],
+        ['Sunday_Golf_Master_Ecomm_Folder/4) Ryder/Ryder 14/recommendation/Black/JPEG_HR/Ryder_14_Black.jpg', 'Ryder 14', 'Black', true],
     ];
     foreach ($cases as [$path, $name, $color, $reference]) {
         $plan = pr_path_resolve($path, $index);
