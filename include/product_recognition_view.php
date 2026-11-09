@@ -30,7 +30,10 @@ function pr_studio_bg($im, float $fuzz = 0.12): ?array
 {
     $w = imagesx($im);
     $h = imagesy($im);
-    $bs = max(2, (int)(min($w, $h) * 0.04));
+    if ($w < 2 || $h < 2) {
+        return null;
+    }
+    $bs = min(max(2, (int)(min($w, $h) * 0.04)), $w, $h);
     $corners = [
         pr_block_mean($im, 0, 0, $bs, $bs),
         pr_block_mean($im, $w - $bs, 0, $w, $bs),
@@ -394,6 +397,10 @@ function pr_block_mean($im, int $x0, int $y0, int $x1, int $y1): array
     $g = 0;
     $b = 0;
     $n = 0;
+    $x0 = max(0, $x0);
+    $y0 = max(0, $y0);
+    $x1 = min(imagesx($im), $x1);
+    $y1 = min(imagesy($im), $y1);
     for ($y = $y0; $y < $y1; $y++) {
         for ($x = $x0; $x < $x1; $x++) {
             $rgb = imagecolorat($im, $x, $y);
