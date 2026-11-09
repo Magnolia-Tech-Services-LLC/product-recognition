@@ -927,6 +927,26 @@ if (function_exists('imagecreatetruecolor')) {
     @unlink($bleed_crop);
     @unlink($studio2);
     @unlink($cut);
+    # Degenerate frames (1px wide/tall, 2x2): corner blocks must not read past the edge.
+    # RS turns the imagecolorat() warning into a fatal page, which aborted create_previews.
+    set_error_handler(function ($no, $str) {
+        throw new ErrorException($str, 0, $no);
+    });
+    foreach ([[1, 40], [40, 1], [2, 2]] as [$dw, $dh]) {
+        $deg = tempnam(sys_get_temp_dir(), 'pr_deg') . '.png';
+        $dim = imagecreatetruecolor($dw, $dh);
+        imagefill($dim, 0, 0, imagecolorallocate($dim, 255, 255, 255));
+        imagepng($dim, $deg);
+        try {
+            $dboxes = pr_bboxes_from_image($deg);
+            pr_check("degenerate {$dw}x{$dh} frame yields no boxes, no warning", $dboxes === []);
+        } catch (ErrorException $e) {
+            pr_check("degenerate {$dw}x{$dh} frame: " . $e->getMessage(), false);
+        } finally {
+            @unlink($deg);
+        }
+    }
+    restore_error_handler();
 } else {
     printf("%-4s %s\n", 'skip', 'bbox trim (GD not loaded)');
 }
