@@ -11,6 +11,8 @@
  *   php product_recognition_cli.php --calibrate [--dry-run]
  *   php product_recognition_cli.php --classify [--limit=N] [--dry-run]
  *   php product_recognition_cli.php --disagreement [--limit=N]  # default classify_batch; N=0 unlimited
+ *   php product_recognition_cli.php --colorway-accuracy [--limit=N]    # default 500; N=0 all
+ *   php product_recognition_cli.php --colorway-projection [--limit=N]  # untagged lifestyle
  *   php product_recognition_cli.php --regions --resource=N [--resource=M ...]
  *   php product_recognition_cli.php --migrate-family [--dry-run]
  *   php product_recognition_cli.php --accept-certain [--dry-run]
@@ -327,6 +329,54 @@ switch ($mode) {
         }
         break;
 
+    case '--colorway-accuracy':
+    case '--colorway-projection':
+        # Read-only, so no process lock (classify may hold it). One /identify per photo,
+        # so the default is a bounded sample; --limit=0 is every photo.
+        $limit = 500;
+        $k = (int)$GLOBALS['product_recognition_k'];
+        foreach ($modes as $m) {
+            if (strpos($m, '--limit=') === 0) {
+                if (!preg_match('/^--limit=(\d+)$/', $m, $lm)) {
+                    fwrite(STDERR, "Invalid --limit: use --limit=N (digits), --limit=0 for all\n");
+                    exit(1);
+                }
+                $limit = (int)$lm[1];
+            }
+        }
+        if ($k <= 0) {
+            fwrite(STDERR, "product_recognition_k must be > 0\n");
+            exit(1);
+        }
+        if ($mode === '--colorway-accuracy') {
+            fputcsv(STDOUT, pr_colorway_report_header(), "\t");
+            # Wide enough that k neighbours survive dropping a whole shoot folder.
+            $stats = pr_colorway_accuracy_report($limit, $k, max(50, 5 * $k), function (array $row) {
+                fputcsv(STDOUT, pr_colorway_report_fields($row), "\t");
+            });
+            fwrite(STDERR, sprintf("Limit %s, k %d\n", $limit === 0 ? 'all' : (string)$limit, $k));
+            foreach (pr_colorway_report_summary($stats) as $line) {
+                fwrite(STDERR, $line . "\n");
+            }
+            fwrite(STDERR, "Test set is lifestyle photos already tagged, mostly from folder and file names;\n"
+                . "read precision as an upper bound for untagged lifestyle photos.\n");
+        } else {
+            fputcsv(STDOUT, ['resource', 'path', 'product', 'voted_colorway', 'share', 'top_similarity'], "\t");
+            $stats = pr_colorway_projection($limit, $k, function (array $fields) {
+                fputcsv(STDOUT, $fields, "\t");
+            });
+            fwrite(STDERR, sprintf("Limit %s, k %d\n", $limit === 0 ? 'all' : (string)$limit, $k));
+            fwrite(STDERR, sprintf("Untagged lifestyle photos  %d (no vector %d)\n",
+                $stats['considered'], $stats['no_vector']));
+            fwrite(STDERR, sprintf("  would get a colorway     %d\n", $stats['voted']));
+            fwrite(STDERR, sprintf("  blank vote               %d\n", $stats['blank']));
+            foreach (array_slice($stats['by_colorway'], 0, 30, true) as $name => $n) {
+                fwrite(STDERR, sprintf("  %-28s %d\n", $name, $n));
+            }
+        }
+        fwrite(STDERR, "Nothing written (read-only).\n");
+        break;
+
     case '--regions':
         $refs = [];
         foreach ($modes as $arg) {
@@ -380,7 +430,7 @@ switch ($mode) {
 
     case '--help':
     case '-h':
-        fwrite(STDOUT, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
+        fwrite(STDOUT, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
         break;
 
     case '--sheet':
@@ -438,6 +488,6 @@ switch ($mode) {
 
     default:
         fwrite(STDERR, "Unknown mode: $mode\n");
-        fwrite(STDERR, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
+        fwrite(STDERR, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
         exit(1);
 }
