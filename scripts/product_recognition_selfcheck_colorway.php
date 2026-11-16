@@ -191,7 +191,7 @@ pr_colorway_crop_tally($cw_crop, [
     'named' => true, 'stored_names' => ['Loma'], 'e2e_names' => ['Ryder'],
     'e2e_name' => ['colorway' => 'Ryder', 'conflict' => false],
     'e2e' => ['colorway' => '', 'conflict' => false], 'e2e_name_share' => 0.0, 'e2e_share' => 0.0,
-    'e2e_support' => 0, 'any_e2e' => false,
+    'e2e_support' => 0, 'any_e2e' => false, 'category' => 'Lifestyle',
 ]);
 pr_colorway_crop_tally($cw_crop, [
     'truth' => 'Black', 'regions' => 1, 'named' => false, 'stored_names' => [], 'e2e_names' => ['Ryder'],
@@ -209,6 +209,10 @@ pr_check("crop tally: end to end scores every photo, unnamed separately; product
          && pr_colorway_crop_product_outcome(['Loma', 'Ryder'], ['Loma', 'Ryder']) === 'correct'
          && pr_colorway_crop_product_outcome(['Loma'], ['Loma', 'Ryder']) === 'wrong'
          && pr_colorway_crop_product_outcome(['Loma'], ['', '']) === 'blank');
+pr_check("crop tally: split by photo category, rows without one under (none)",
+         $cw_crop['by_category']['match'] === ['(none)' => ['blank' => 1], 'Lifestyle' => ['wrong' => 1]]
+         && $cw_crop['by_category']['pixel'] === ['(none)' => ['correct' => 1], 'Lifestyle' => ['blank' => 1]]
+         && $cw_crop['by_category']['e2e_unnamed'] === ['(none)' => ['correct' => 1]]);
 pr_check("crop tally: per method, conflicts, any-region, bands from match votes only",
          $cw_crop['considered'] === 3 && $cw_crop['regions'] === 4 && $cw_crop['multi_region'] === 1
          && $cw_crop['methods']['match'] === ['correct' => 0, 'wrong' => 1, 'blank' => 1]
