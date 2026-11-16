@@ -165,3 +165,33 @@ pr_check("colorway tally: tagged set counted only when full, with its own bands 
          && $cw_stats['bands']['bt_share'] === ['<0.9' => ['wrong' => 1]]
          && $cw_stats['confusion_tagged'] === ["b\tNavy\tBlack" => 1]
          && $cw_stats['by_color_tagged'] === ['navy' => ['label' => 'Navy', 'correct' => 1]]);
+
+# --- cutout report ---------------------------------------------------------------------------
+pr_check("crop photo vote: regions that agree win, disagreement and silence are blank",
+         pr_colorway_crop_photo_vote(['Navy', '', 'navy']) === ['colorway' => 'Navy', 'conflict' => false]
+         && pr_colorway_crop_photo_vote(['Navy', 'Black']) === ['colorway' => '', 'conflict' => true]
+         && pr_colorway_crop_photo_vote(['', '']) === ['colorway' => '', 'conflict' => false]);
+pr_check("crop any-region match",
+         pr_colorway_crop_any_match('Navy', ['Black', 'navy'])
+         && !pr_colorway_crop_any_match('Navy', ['Black', '']));
+$cw_crop = pr_colorway_crop_new_stats();
+pr_colorway_crop_tally($cw_crop, [
+    'truth' => 'Navy', 'regions' => 2,
+    'match' => ['colorway' => '', 'conflict' => true], 'pixel' => ['colorway' => 'Navy', 'conflict' => false],
+    'match_share' => 0.0, 'match_support' => 0, 'any_match' => true, 'any_pixel' => true,
+]);
+pr_colorway_crop_tally($cw_crop, [
+    'truth' => 'Navy', 'regions' => 1,
+    'match' => ['colorway' => 'Black', 'conflict' => false], 'pixel' => ['colorway' => '', 'conflict' => false],
+    'match_share' => 0.92, 'match_support' => 4, 'any_match' => false, 'any_pixel' => false,
+]);
+pr_check("crop tally: per method, conflicts, any-region, bands from match votes only",
+         $cw_crop['considered'] === 2 && $cw_crop['regions'] === 3 && $cw_crop['multi_region'] === 1
+         && $cw_crop['methods']['match'] === ['correct' => 0, 'wrong' => 1, 'blank' => 1]
+         && $cw_crop['methods']['pixel'] === ['correct' => 1, 'wrong' => 0, 'blank' => 1]
+         && $cw_crop['conflict'] === ['match' => 1, 'pixel' => 0]
+         && $cw_crop['any'] === ['match' => 1, 'pixel' => 1]
+         && $cw_crop['bands']['share'] === ['<=1.0' => ['wrong' => 1]]
+         && $cw_crop['bands']['support'] === ['3-4' => ['wrong' => 1]]
+         && $cw_crop['confusion'] === ["match\tNavy\tBlack" => 1]
+         && count(pr_colorway_crop_summary($cw_crop)) > 10);

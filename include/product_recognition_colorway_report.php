@@ -776,3 +776,325 @@ function pr_colorway_projection_header(): array
         'product_tagged', 'voted_tagged', 'share_tagged', 'support_tagged', 'top_similarity_tagged',
     ];
 }
+
+/*
+ * Cutout (crop) accuracy: colorway from the product in the frame, not the whole image.
+ *
+ * Test set: tagged lifestyle photos (one colorway leaf) with a stored Name and cached
+ * product regions. Each region's cutout is scored two ways:
+ *   match  /identify on the cutout image; vote over the tagged set (k nearest references
+ *          with a countable colorway, same shoot and near-copies excluded), restricted to
+ *          the photo's stored Name (pr_colorway_report_votes path a)
+ *   pixel  median cutout colour against that Name's catalog swatches (pr_colorway_from_mask)
+ * A photo's vote per method is the colorway its regions agree on; regions that disagree
+ * leave it blank (a resource has one Colorway field). No stored Name, no vote: the
+ * colorway is never chosen without the product.
+ */
+
+/**
+ * One photo-level vote from per-region votes: the shared non-blank colorway, or blank
+ * when none voted or the regions disagree.
+ *
+ * @param list<string> $votes
+ * @return array{colorway:string, conflict:bool}
+ */
+function pr_colorway_crop_photo_vote(array $votes): array
+{
+    $seen = [];
+    foreach ($votes as $vote) {
+        $vote = (string)$vote;
+        if (trim($vote) === '') {
+            continue;
+        }
+        $seen[pr_fold_label($vote)] ??= $vote;
+    }
+    if (count($seen) === 1) {
+        return ['colorway' => (string)array_values($seen)[0], 'conflict' => false];
+    }
+    return ['colorway' => '', 'conflict' => count($seen) > 1];
+}
+
+/**
+ * True when any region voted the stored colorway (a multi-bag photo may show it on one bag).
+ *
+ * @param list<string> $votes
+ */
+function pr_colorway_crop_any_match(string $truth, array $votes): bool
+{
+    foreach ($votes as $vote) {
+        if (pr_colorway_report_outcome($truth, (string)$vote) === 'correct') {
+            return true;
+        }
+    }
+    return false;
+}
+
+function pr_colorway_crop_new_stats(): array
+{
+    $cell = ['correct' => 0, 'wrong' => 0, 'blank' => 0];
+    return [
+        'considered' => 0, 'truth_not_a_color' => 0, 'no_product' => 0, 'no_cutout' => 0,
+        'regions' => 0, 'multi_region' => 0,
+        'methods' => ['match' => $cell, 'pixel' => $cell],
+        'conflict' => ['match' => 0, 'pixel' => 0],
+        'any' => ['match' => 0, 'pixel' => 0],
+        'bands' => ['share' => [], 'support' => []],
+        'by_color' => ['match' => [], 'pixel' => []],
+        'confusion' => [],
+    ];
+}
+
+/**
+ * @param array{truth:string, regions:int, match:array{colorway:string,conflict:bool},
+ *              pixel:array{colorway:string,conflict:bool}, match_share:float,
+ *              match_support:int, any_match:bool, any_pixel:bool} $row
+ */
+function pr_colorway_crop_tally(array &$stats, array $row): void
+{
+    $stats['considered']++;
+    $stats['regions'] += (int)$row['regions'];
+    if ((int)$row['regions'] > 1) {
+        $stats['multi_region']++;
+    }
+    foreach (['match', 'pixel'] as $method) {
+        $vote = $row[$method];
+        $outcome = pr_colorway_report_outcome($row['truth'], $vote['colorway']);
+        $stats['methods'][$method][$outcome]++;
+        if ($vote['conflict']) {
+            $stats['conflict'][$method]++;
+        }
+        if ($row['any_' . $method]) {
+            $stats['any'][$method]++;
+        }
+        $fold = pr_fold_label($row['truth']);
+        $stats['by_color'][$method][$fold]['label'] ??= $row['truth'];
+        $stats['by_color'][$method][$fold][$outcome] = ($stats['by_color'][$method][$fold][$outcome] ?? 0) + 1;
+        if ($outcome === 'wrong') {
+            $pair = $method . "\t" . $row['truth'] . "\t" . $vote['colorway'];
+            $stats['confusion'][$pair] = ($stats['confusion'][$pair] ?? 0) + 1;
+        }
+        if ($method === 'match' && $outcome !== 'blank') {
+            $share = pr_colorway_report_band((float)$row['match_share'], PR_COLORWAY_REPORT_SHARE_BANDS);
+            $stats['bands']['share'][$share][$outcome] = ($stats['bands']['share'][$share][$outcome] ?? 0) + 1;
+            $support = pr_colorway_report_support_band((int)$row['match_support']);
+            $stats['bands']['support'][$support][$outcome] = ($stats['bands']['support'][$support][$outcome] ?? 0) + 1;
+        }
+    }
+}
+
+/** @return list<string> */
+function pr_colorway_crop_summary(array $stats): array
+{
+    $pct = static fn(int $n, int $d): string => $d > 0 ? sprintf('%5.1f%%', 100 * $n / $d) : '    -';
+    $lines = [];
+    $lines[] = sprintf('Considered              %d', $stats['considered']);
+    $lines[] = sprintf('  stored label not a color (skipped)  %d', $stats['truth_not_a_color']);
+    $lines[] = sprintf('  no stored product (skipped)         %d', $stats['no_product']);
+    $lines[] = sprintf('  no usable cutout (skipped)          %d', $stats['no_cutout']);
+    $lines[] = sprintf('  cutouts scored %d; photos with more than one %d', $stats['regions'], $stats['multi_region']);
+    $lines[] = '';
+    $lines[] = 'method  voted  correct  wrong  blank  conflict  precision  coverage  any-region-right';
+    foreach ($stats['methods'] as $method => $cell) {
+        $voted = $cell['correct'] + $cell['wrong'];
+        $all = $voted + $cell['blank'];
+        $lines[] = sprintf('%-6s  %5d  %7d  %5d  %5d  %8d  %9s  %8s  %d',
+            $method, $voted, $cell['correct'], $cell['wrong'], $cell['blank'],
+            $stats['conflict'][$method], $pct($cell['correct'], $voted), $pct($voted, $all),
+            $stats['any'][$method]);
+    }
+    foreach (['share' => 'match, by colorway vote share', 'support' => 'match, by neighbours carrying the winner'] as $key => $title) {
+        $lines[] = '';
+        $lines[] = "$title: band  correct  wrong  precision";
+        $bands = $stats['bands'][$key];
+        ksort($bands);
+        foreach ($bands as $label => $cell) {
+            $c = (int)($cell['correct'] ?? 0);
+            $w = (int)($cell['wrong'] ?? 0);
+            $lines[] = sprintf('  %-6s %7d  %5d  %9s', $label, $c, $w, $pct($c, $c + $w));
+        }
+    }
+    $total = static fn(array $cell): int
+        => (int)($cell['correct'] ?? 0) + (int)($cell['wrong'] ?? 0) + (int)($cell['blank'] ?? 0);
+    foreach (['match', 'pixel'] as $method) {
+        $lines[] = '';
+        $lines[] = "$method, by stored colorway (top 15): correct  wrong  blank  precision";
+        $by_color = $stats['by_color'][$method];
+        uasort($by_color, static fn($x, $y) => $total($y) <=> $total($x));
+        foreach (array_slice($by_color, 0, 15, true) as $cell) {
+            $c = (int)($cell['correct'] ?? 0);
+            $w = (int)($cell['wrong'] ?? 0);
+            $lines[] = sprintf('  %-22s %7d  %5d  %5d  %9s', $cell['label'], $c, $w, (int)($cell['blank'] ?? 0), $pct($c, $c + $w));
+        }
+    }
+    $lines[] = '';
+    $lines[] = 'Most common wrong votes (method, stored, voted, count):';
+    $confusion = $stats['confusion'];
+    arsort($confusion);
+    foreach (array_slice($confusion, 0, 15, true) as $pair => $n) {
+        $lines[] = '  ' . $pair . "\t" . $n;
+    }
+    return $lines;
+}
+
+/**
+ * Tagged lifestyle photos with a non-empty product_region row, CRC32-ordered.
+ *
+ * @return list<array{resource:int, colorway:string}>
+ */
+function pr_colorway_crop_photos(int $limit): array
+{
+    $photocat = pr_field_ref_by_name('photocategory');
+    $colorway = pr_sheet_field('colorway');
+    if ($photocat <= 0 || $colorway <= 0) {
+        throw new RuntimeException('colorway crop report: Photo Category or Colorway field not found');
+    }
+    $sql = "SELECT r.ref AS resource, MIN(cn.name) AS colorway
+              FROM resource r
+              JOIN product_region pr ON pr.resource = r.ref AND pr.bbox IS NOT NULL AND pr.bbox NOT IN ('', '[]')
+              JOIN resource_node pc ON pc.resource = r.ref
+              JOIN node pcn ON pcn.ref = pc.node AND pcn.resource_type_field = ? AND pcn.name = 'Lifestyle'
+              JOIN resource_node c ON c.resource = r.ref
+              JOIN node cn ON cn.ref = c.node AND cn.resource_type_field = ?
+                   AND NOT EXISTS (SELECT 1 FROM node ch WHERE ch.parent = cn.ref)
+             WHERE r.ref > 0 AND r.archive >= 0
+             GROUP BY r.ref
+            HAVING COUNT(DISTINCT cn.ref) = 1
+             ORDER BY CRC32(r.ref), r.ref";
+    $params = ['i', $photocat, 'i', $colorway];
+    if ($limit > 0) {
+        $sql .= ' LIMIT ?';
+        $params[] = 'i';
+        $params[] = $limit;
+    }
+    $out = [];
+    foreach (ps_query($sql, $params) as $row) {
+        $out[] = ['resource' => (int)$row['resource'], 'colorway' => (string)$row['colorway']];
+    }
+    return $out;
+}
+
+/**
+ * /identify on a cutout image. Throws when the service does not answer.
+ */
+function pr_colorway_crop_identify(string $mask, int $wide): array
+{
+    global $product_recognition_space;
+    $result = pr_service_post('/identify', [
+        'db' => $GLOBALS['mysql_db'],
+        'space' => $product_recognition_space,
+        'k' => $wide,
+        'top_n' => 3,
+    ], $mask, 600, 10);
+    if ($result === null) {
+        throw new RuntimeException('colorway crop report: vector service did not answer');
+    }
+    return $result;
+}
+
+/**
+ * Read-only cutout accuracy. Reads cached regions and mask files; never segments, and
+ * never writes the identify cache (calls /identify directly).
+ *
+ * @param callable(array):void $on_row
+ */
+function pr_colorway_crop_report(int $limit, int $k, int $wide, callable $on_row): array
+{
+    $leaf_models = pr_leaf_models();
+    $product_field = pr_product_field();
+    $catalog = pr_catalog_picker_rows();
+    $stats = pr_colorway_crop_new_stats();
+    $facts = ['colorway' => [], 'folders' => [], 'paths' => []];
+
+    foreach (pr_colorway_crop_photos($limit) as $photo) {
+        $resource = $photo['resource'];
+        $truth = $photo['colorway'];
+        if (!pr_colorway_label_counts($truth)) {
+            $stats['truth_not_a_color']++;
+            continue;
+        }
+        $names = pr_field_leaf_names($resource, $product_field);
+        if ($names === []) {
+            $stats['no_product']++;
+            continue;
+        }
+        $data = get_resource_data($resource);
+        $checksum = $data === false ? '' : (string)$data['file_checksum'];
+        $masks = [];
+        foreach (pr_cached_regions($resource) as $i => $_bbox) {
+            $mask = pr_mask_file($resource, $checksum, $i);
+            if (is_file($mask)) {
+                $masks[] = $mask;
+            }
+        }
+        if ($masks === []) {
+            $stats['no_cutout']++;
+            continue;
+        }
+        $match_votes = [];
+        $pixel_votes = [];
+        $best_share = 0.0;
+        $best_support = 0;
+        foreach ($masks as $mask) {
+            $result = pr_colorway_crop_identify($mask, $wide);
+            $neighbors = is_array($result['neighbors'] ?? null) ? $result['neighbors'] : [];
+            # An uploaded image has no resource to exclude; drop the photo's own vector.
+            $neighbors = array_values(array_filter(
+                $neighbors, static fn($n) => (int)($n['resource'] ?? 0) !== $resource
+            ));
+            $refs = array_map(static fn($n) => (int)($n['resource'] ?? 0), $neighbors);
+            $refs[] = $resource;
+            $missing = array_filter($refs, static fn(int $r): bool => !isset($facts['colorway'][$r]));
+            if ($missing !== []) {
+                $new = pr_colorway_report_facts($missing);
+                $facts['colorway'] += $new['colorway'];
+                $facts['folders'] += $new['folders'];
+                $facts['paths'] += $new['paths'];
+            }
+            $neighbors = pr_colorway_report_with_colorways($neighbors, $facts['colorway']);
+            $sets = pr_colorway_report_split_neighbors(
+                $neighbors, $facts['folders'][$resource] ?? [], $facts['paths'], $k
+            );
+            $votes = pr_colorway_report_votes($sets['tagged'], $leaf_models, $names);
+            $match_votes[] = (string)$votes['a'];
+            if ((string)$votes['a'] !== '' && $votes['a_share'] >= $best_share) {
+                $best_share = $votes['a_share'];
+                $best_support = $votes['a_support'];
+            }
+            $pixel_votes[] = pr_colorway_from_mask($mask, $names[0], $catalog);
+        }
+        $row = [
+            'resource' => $resource,
+            'truth' => $truth,
+            'product' => implode('|', $names),
+            'regions' => count($masks),
+            'match' => pr_colorway_crop_photo_vote($match_votes),
+            'pixel' => pr_colorway_crop_photo_vote($pixel_votes),
+            'match_share' => $best_share,
+            'match_support' => $best_support,
+            'any_match' => pr_colorway_crop_any_match($truth, $match_votes),
+            'any_pixel' => pr_colorway_crop_any_match($truth, $pixel_votes),
+            'match_votes' => $match_votes,
+            'pixel_votes' => $pixel_votes,
+        ];
+        pr_colorway_crop_tally($stats, $row);
+        $on_row($row);
+    }
+    return $stats;
+}
+
+/** @return list<string> */
+function pr_colorway_crop_header(): array
+{
+    return ['resource', 'stored_colorway', 'stored_product', 'regions', 'match', 'match_share',
+            'match_support', 'pixel', 'match_by_region', 'pixel_by_region'];
+}
+
+/** @return list<string> */
+function pr_colorway_crop_fields(array $row): array
+{
+    return [
+        (string)$row['resource'], $row['truth'], $row['product'], (string)$row['regions'],
+        $row['match']['colorway'], sprintf('%.3f', $row['match_share']), (string)$row['match_support'],
+        $row['pixel']['colorway'], implode('|', $row['match_votes']), implode('|', $row['pixel_votes']),
+    ];
+}
