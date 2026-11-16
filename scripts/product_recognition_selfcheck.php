@@ -824,6 +824,40 @@ if (function_exists('imagecreatetruecolor')) {
                  [0.5148, 0.2278, 0.6685, 0.8167],
                  [0.6056, 0.25, 0.7833, 0.8685],
              ])) === 2);
+    $groups = pr_coalesce_box_groups([
+        [0.3272, 0.4389, 0.4951, 0.663],
+        [0.5877, 0.3296, 0.7407, 0.8204],
+        [0.6617, 0.3407, 0.821, 0.8204],
+    ]);
+    pr_check('coalesce groups keep which fragments went into each product',
+             count($groups) === 2 && $groups[0]['members'] === [1, 2] && $groups[1]['members'] === [0]
+             && array_column($groups, 'box') === pr_coalesce_boxes([
+                 [0.3272, 0.4389, 0.4951, 0.663],
+                 [0.5877, 0.3296, 0.7407, 0.8204],
+                 [0.6617, 0.3407, 0.821, 0.8204],
+             ]));
+    # Two fragment cutouts (transparent outside the mask, 4 px service pad) on a 200x100 frame.
+    $frag = static function (int $w, int $h, array $rgb): string {
+        $im = imagecreatetruecolor($w, $h);
+        imagealphablending($im, false);
+        imagesavealpha($im, true);
+        imagefill($im, 0, 0, imagecolorallocatealpha($im, 0, 0, 0, 127));
+        imagefilledrectangle($im, 4, 4, $w - 5, $h - 5, imagecolorallocatealpha($im, $rgb[0], $rgb[1], $rgb[2], 0));
+        ob_start();
+        imagepng($im);
+        return (string)ob_get_clean();
+    };
+    $png = pr_compose_cutout([0.1, 0.1, 0.9, 0.9], [
+        ['box' => [0.2, 0.2, 0.4, 0.8], 'png' => $frag(48, 68, [20, 120, 60])],
+        ['box' => [0.5, 0.2, 0.7, 0.8], 'png' => ''],
+    ], 200, 100);
+    $cut = $png === '' ? false : imagecreatefromstring($png);
+    pr_check('merged cutout keeps the mask: fragment color inside, transparent outside',
+             $cut !== false && imagesx($cut) === 160 && imagesy($cut) === 80
+             && ((imagecolorat($cut, 30, 30) >> 8) & 255) === 120
+             && ((imagecolorat($cut, 2, 2) & 0x7F000000) >> 24) === 127
+             && ((imagecolorat($cut, 100, 30) & 0x7F000000) >> 24) === 127
+             && pr_compose_cutout([0.1, 0.1, 0.9, 0.9], [['box' => [0.2, 0.2, 0.4, 0.8], 'png' => '']], 200, 100) === '');
     pr_check('resource 356 two-bag lifestyle stays two products',
              count(pr_coalesce_boxes([
                  [0.5077, 0.2496, 0.901, 0.9004],

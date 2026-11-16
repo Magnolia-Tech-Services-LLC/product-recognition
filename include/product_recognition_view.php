@@ -235,32 +235,102 @@ function pr_boxes_should_merge(array $a, array $b): bool
  */
 function pr_coalesce_boxes(array $boxes): array
 {
-    $boxes = array_values($boxes);
+    return array_column(pr_coalesce_box_groups($boxes), 'box');
+}
+
+/**
+ * Merge overlapping boxes, keeping which input boxes went into each merged one so
+ * their cutouts can be combined. Largest first; boxes padded after the merge.
+ *
+ * @param list<array{0:float,1:float,2:float,3:float}> $boxes
+ * @return list<array{box:array{0:float,1:float,2:float,3:float}, members:list<int>}>
+ */
+function pr_coalesce_box_groups(array $boxes): array
+{
+    $groups = [];
+    foreach (array_values($boxes) as $i => $box) {
+        $groups[] = ['box' => $box, 'members' => [$i]];
+    }
     $changed = true;
     while ($changed) {
         $changed = false;
-        $n = count($boxes);
+        $n = count($groups);
         for ($i = 0; $i < $n; $i++) {
             for ($j = $i + 1; $j < $n; $j++) {
-                if (!pr_boxes_should_merge($boxes[$i], $boxes[$j])) {
+                $a = $groups[$i]['box'];
+                $b = $groups[$j]['box'];
+                if (!pr_boxes_should_merge($a, $b)) {
                     continue;
                 }
-                $boxes[$i] = [
-                    round(min($boxes[$i][0], $boxes[$j][0]), 4),
-                    round(min($boxes[$i][1], $boxes[$j][1]), 4),
-                    round(max($boxes[$i][2], $boxes[$j][2]), 4),
-                    round(max($boxes[$i][3], $boxes[$j][3]), 4),
+                $groups[$i] = [
+                    'box' => [
+                        round(min($a[0], $b[0]), 4),
+                        round(min($a[1], $b[1]), 4),
+                        round(max($a[2], $b[2]), 4),
+                        round(max($a[3], $b[3]), 4),
+                    ],
+                    'members' => array_merge($groups[$i]['members'], $groups[$j]['members']),
                 ];
-                array_splice($boxes, $j, 1);
+                array_splice($groups, $j, 1);
                 $changed = true;
                 break 2;
             }
         }
     }
-    usort($boxes, function ($a, $b) {
-        return pr_box_area($b) <=> pr_box_area($a);
+    usort($groups, function ($a, $b) {
+        return pr_box_area($b['box']) <=> pr_box_area($a['box']);
     });
-    return pr_expand_boxes($boxes);
+    $expanded = pr_expand_boxes(array_column($groups, 'box'));
+    foreach ($groups as $i => $group) {
+        $groups[$i]['box'] = $expanded[$i];
+    }
+    return $groups;
+}
+
+/**
+ * One merged region's cutout from its members' /segment cutouts. Each member PNG is
+ * transparent outside its mask and cropped to its mask bounds plus the service's
+ * 4 px pad; it is placed by its box on a transparent canvas the size of the merged
+ * box. Empty string when no member has a usable PNG.
+ *
+ * @param array{0:float,1:float,2:float,3:float} $box merged (padded) box, fractions
+ * @param list<array{box:array{0:float,1:float,2:float,3:float}, png:string}> $members
+ */
+function pr_compose_cutout(array $box, array $members, int $width, int $height): string
+{
+    $pad = 4; # segment_products._cutout_png
+    $x0 = (int)floor($box[0] * $width);
+    $y0 = (int)floor($box[1] * $height);
+    $cw = (int)ceil($box[2] * $width) - $x0;
+    $ch = (int)ceil($box[3] * $height) - $y0;
+    if ($cw < 1 || $ch < 1) {
+        return '';
+    }
+    $canvas = imagecreatetruecolor($cw, $ch);
+    imagealphablending($canvas, false);
+    imagesavealpha($canvas, true);
+    imagefill($canvas, 0, 0, imagecolorallocatealpha($canvas, 0, 0, 0, 127));
+    imagealphablending($canvas, true);
+    $placed = 0;
+    foreach ($members as $member) {
+        if ($member['png'] === '') {
+            continue;
+        }
+        $im = @imagecreatefromstring($member['png']);
+        if ($im === false) {
+            continue;
+        }
+        $dx = max(0, (int)round($member['box'][0] * $width) - $pad) - $x0;
+        $dy = max(0, (int)round($member['box'][1] * $height) - $pad) - $y0;
+        imagecopy($canvas, $im, $dx, $dy, 0, 0, imagesx($im), imagesy($im));
+        $placed++;
+    }
+    if ($placed === 0) {
+        return '';
+    }
+    ob_start();
+    imagepng($canvas);
+    return (string)ob_get_clean();
 }
 
 /**
@@ -671,10 +741,25 @@ function pr_ensure_regions(int $ref): array
             # Service down: do not cache a negative so the next compute can retry.
             return [];
         }
-        # /segment often splits one bag into overlapping parts; coalesce before store.
-        # Drop service PNGs — indices no longer match after merge; rewrite from preview.
-        $boxes = pr_coalesce_boxes($seg['boxes']);
+        # /segment often splits one bag into overlapping parts; coalesce before store,
+        # and combine the parts' masked cutouts. A rewrite from the preview would be a
+        # plain rectangle of the scene (no studio background to trim), not the bag.
+        $groups = pr_coalesce_box_groups($seg['boxes']);
+        $size = @getimagesize($path);
+        $boxes = [];
         $pngs = [];
+        foreach ($groups as $group) {
+            $boxes[] = $group['box'];
+            $members = [];
+            foreach ($group['members'] as $m) {
+                $members[] = ['box' => $seg['boxes'][$m], 'png' => (string)($seg['pngs'][$m] ?? '')];
+            }
+            $png = $size === false ? '' : pr_compose_cutout($group['box'], $members, (int)$size[0], (int)$size[1]);
+            if ($png === '') {
+                logScript("product_recognition: no /segment cutout for resource $ref region " . count($pngs) . "; falling back to a preview crop");
+            }
+            $pngs[] = $png;
+        }
     }
     pr_commit_regions($ref, $checksum, $boxes, $pngs, $path);
     return $boxes;
