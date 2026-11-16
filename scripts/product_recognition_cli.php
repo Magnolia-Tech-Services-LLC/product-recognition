@@ -362,17 +362,20 @@ switch ($mode) {
             fwrite(STDERR, "Test set is lifestyle photos already tagged, mostly from folder and file names;\n"
                 . "read precision as an upper bound for untagged lifestyle photos.\n");
         } else {
-            fputcsv(STDOUT, ['resource', 'path', 'product', 'voted_colorway', 'share', 'top_similarity'], "\t");
-            $stats = pr_colorway_projection($limit, $k, function (array $fields) {
+            fputcsv(STDOUT, pr_colorway_projection_header(), "\t");
+            # Wide, so k colorway-tagged neighbours can be found past untagged ones.
+            $stats = pr_colorway_projection($limit, $k, max(2000, 5 * $k), function (array $fields) {
                 fputcsv(STDOUT, $fields, "\t");
             });
             fwrite(STDERR, sprintf("Limit %s, k %d\n", $limit === 0 ? 'all' : (string)$limit, $k));
             fwrite(STDERR, sprintf("Untagged lifestyle photos  %d (no vector %d)\n",
                 $stats['considered'], $stats['no_vector']));
-            fwrite(STDERR, sprintf("  would get a colorway     %d\n", $stats['voted']));
-            fwrite(STDERR, sprintf("  blank vote               %d\n", $stats['blank']));
-            foreach (array_slice($stats['by_colorway'], 0, 30, true) as $name => $n) {
-                fwrite(STDERR, sprintf("  %-28s %d\n", $name, $n));
+            foreach (['' => 'k nearest (today)', '_tagged' => 'k nearest tagged'] as $suffix => $title) {
+                fwrite(STDERR, sprintf("%s: would get a colorway %d, blank %d\n",
+                    $title, $stats['voted' . $suffix], $stats['blank' . $suffix]));
+                foreach (array_slice($stats['by_colorway' . $suffix], 0, 40, true) as $name => $n) {
+                    fwrite(STDERR, sprintf("  %-28s %d\n", $name, $n));
+                }
             }
         }
         fwrite(STDERR, "Nothing written (read-only).\n");
