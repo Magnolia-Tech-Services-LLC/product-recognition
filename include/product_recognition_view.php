@@ -754,7 +754,11 @@ function pr_ensure_regions(int $ref): array
             foreach ($group['members'] as $m) {
                 $members[] = ['box' => $seg['boxes'][$m], 'png' => (string)($seg['pngs'][$m] ?? '')];
             }
-            $pngs[] = $size === false ? '' : pr_compose_cutout($group['box'], $members, (int)$size[0], (int)$size[1]);
+            $png = $size === false ? '' : pr_compose_cutout($group['box'], $members, (int)$size[0], (int)$size[1]);
+            if ($png === '') {
+                logScript("product_recognition: no /segment cutout for resource $ref region " . count($pngs) . "; falling back to a preview crop");
+            }
+            $pngs[] = $png;
         }
     }
     pr_commit_regions($ref, $checksum, $boxes, $pngs, $path);
