@@ -29,6 +29,12 @@ pr_check("colorway split: self keeps the k nearest, folder set skips same-folder
          && array_column($cw_split['folder'], 'resource') === [12, 14]
          && $cw_split['dropped'] === 2);
 $cw_split = pr_colorway_report_split_neighbors($cw_neighbors, [], [11 => [500 => true]], 3);
+# Query keys {Raw 4, Navy 3}; a neighbour in Navy/Selects/Final carries Navy on its path.
+$cw_deep = pr_colorway_report_split_neighbors(
+    $cw_neighbors, [4 => true, 3 => true], [11 => [1 => true, 2 => true, 3 => true, 6 => true, 7 => true]], 3
+);
+pr_check("colorway split: a neighbour deeper in the same shoot is dropped",
+         array_column($cw_deep['folder'], 'resource') === [12, 13, 14]);
 pr_check("colorway split: a photo with no folder drops nothing",
          array_column($cw_split['folder'], 'resource') === [11, 12, 13]
          && $cw_split['dropped'] === 0);
@@ -115,7 +121,7 @@ pr_check("colorway tally: near-duplicate rows leave the <.95 figure only",
          && $cw_stats['paths']['b_folder_nodup'] === ['correct' => 1, 'wrong' => 0, 'blank' => 1]);
 pr_check("colorway tally: bands, per-colour and confusion from counted folder rows",
          $cw_stats['confusion'] === ["a\tNavy\tBlack" => 1]
-         && $cw_stats['by_color'] === ['Navy' => ['wrong' => 1, 'correct' => 1]]
+         && $cw_stats['by_color'] === ['navy' => ['label' => 'Navy', 'wrong' => 1, 'correct' => 1]]
          && $cw_stats['bands']['a_share'] === ['<0.8' => ['wrong' => 1, 'correct' => 1]]
          && $cw_stats['bands']['a_support'] === ['3-4' => ['wrong' => 1, 'correct' => 1]]
          && $cw_stats['bands']['a_similarity'] === ['<0.7' => ['wrong' => 1], '<=1.0' => ['correct' => 1]]

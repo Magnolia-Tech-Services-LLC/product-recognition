@@ -10,10 +10,11 @@
  * Two neighbour sets per photo, because self-exclusion alone overstated model accuracy
  * before (97% leave-one-out against 43% agreement on lifestyle shots):
  *   self    the k nearest references other than the photo itself (what production sees)
- *   folder  the k nearest references that share no folder key with the photo (its deepest
- *           Folder Path folder or that folder's parent, see pr_colorway_report_folder_keys),
- *           so a sibling from the same shoot (Navy/Raw next to Navy/Selects), tagged from
- *           the same folder name, cannot vote. A shoot can hold hundreds of references, so
+ *   folder  the k nearest references that do not sit under one of the photo's folder keys
+ *           (its deepest Folder Path folder or that folder's parent, see
+ *           pr_colorway_report_folder_keys), so a sibling from the same shoot (Navy/Raw next
+ *           to Navy/Selects, or deeper in Navy/Selects/Final), tagged from the same folder
+ *           name, cannot vote. It errs toward dropping too much. A shoot can hold hundreds of references, so
  *           the CLI asks /identify for a wide list; a photo left with fewer than k folder
  *           neighbours, or with no folder key, is counted apart and kept out of the folder
  *           figures and bands
@@ -53,7 +54,7 @@ function pr_colorway_report_band(float $value, array $edges): string
 {
     foreach ($edges as $edge) {
         if ($value < $edge) {
-            return $edge > 1.0 ? '<=1.0' : '<' . rtrim(sprintf('%.2f', $edge), '0');
+            return $edge > 1.0 ? '<=1.0' : '<' . $edge;
         }
     }
     return '<=1.0';
@@ -101,13 +102,15 @@ function pr_colorway_report_folder_keys(array $nodes): array
 
 /**
  * Split /identify neighbours (already self-excluded, nearest first) into the two sets.
- * A neighbour is dropped from the folder set when it shares any folder key
- * (pr_colorway_report_folder_keys) with the query photo. A query with no key drops
- * nothing; the caller keeps such a photo out of the folder figures.
+ * A neighbour is dropped from the folder set when any folder on its path (it carries every
+ * ancestor) is one of the query photo's keys (pr_colorway_report_folder_keys), so a
+ * neighbour deeper in the same shoot is dropped too. A query with no key drops nothing;
+ * the caller keeps such a photo out of the folder figures. Counting stops once both sets
+ * are full, so 'dropped' is the same-shoot neighbours passed over, not all of them.
  *
  * @param list<array{resource?:int}> $neighbors
  * @param array<int,true> $query_folders folder key node => true
- * @param array<int,array<int,true>> $folders_by_resource
+ * @param array<int,array<int,true>> $folders_by_resource every Folder Path node per resource
  * @return array{self:list<array>, folder:list<array>, dropped:int}
  */
 function pr_colorway_report_split_neighbors(array $neighbors, array $query_folders,
@@ -246,8 +249,10 @@ function pr_colorway_report_tally(array &$stats, array $row): void
             $stats['confusion'][$pair] = ($stats['confusion'][$pair] ?? 0) + 1;
         }
         if ($path === 'a') {
-            $color = $row['truth'];
-            $stats['by_color'][$color][$outcome] = ($stats['by_color'][$color][$outcome] ?? 0) + 1;
+            # Folded, as outcomes are: "Navy" and "navy" are one row, shown by the first spelling.
+            $fold = pr_fold_label($row['truth']);
+            $stats['by_color'][$fold]['label'] ??= $row['truth'];
+            $stats['by_color'][$fold][$outcome] = ($stats['by_color'][$fold][$outcome] ?? 0) + 1;
         }
         if ($outcome === 'blank') {
             continue;
@@ -277,10 +282,10 @@ function pr_colorway_report_summary(array $stats): array
     $lines[] = sprintf('  no stored product (path a n/a)        %d', $stats['no_model']);
     $lines[] = sprintf('  no folder key (self figures only)     %d', $stats['no_folder_key']);
     $lines[] = sprintf('  fewer than k folder neighbours (same) %d', $stats['folder_underfilled']);
-    $lines[] = sprintf('  same-folder neighbours dropped        %d', $stats['dropped_same_folder']);
+    $lines[] = sprintf('  same-shoot neighbours passed over     %d', $stats['dropped_same_folder']);
     $lines[] = '';
     $lines[] = 'path     set         voted  correct  wrong  blank  precision  coverage';
-    $sets = ['self' => 'self', 'folder' => 'folder', 'folder_nodup' => 'folder<.95'];
+    $sets = ['self' => 'self', 'folder' => 'folder', 'folder_nodup' => 'folder<' . PR_COLORWAY_REPORT_NEAR_DUPLICATE];
     foreach ($stats['paths'] as $key => $cell) {
         $voted = $cell['correct'] + $cell['wrong'];
         $all = $voted + $cell['blank'];
@@ -313,11 +318,13 @@ function pr_colorway_report_summary(array $stats): array
     $lines[] = '';
     $lines[] = 'Path a, folder set, by stored colorway (top 15): correct  wrong  blank  precision';
     $by_color = $stats['by_color'];
-    uasort($by_color, static fn($x, $y) => array_sum($y) <=> array_sum($x));
-    foreach (array_slice($by_color, 0, 15, true) as $color => $cell) {
+    $total = static fn(array $cell): int
+        => (int)($cell['correct'] ?? 0) + (int)($cell['wrong'] ?? 0) + (int)($cell['blank'] ?? 0);
+    uasort($by_color, static fn($x, $y) => $total($y) <=> $total($x));
+    foreach (array_slice($by_color, 0, 15, true) as $cell) {
         $c = (int)($cell['correct'] ?? 0);
         $w = (int)($cell['wrong'] ?? 0);
-        $lines[] = sprintf('  %-22s %7d  %5d  %5d  %9s', $color, $c, $w, (int)($cell['blank'] ?? 0), $pct($c, $c + $w));
+        $lines[] = sprintf('  %-22s %7d  %5d  %5d  %9s', $cell['label'], $c, $w, (int)($cell['blank'] ?? 0), $pct($c, $c + $w));
     }
     $lines[] = '';
     $lines[] = 'Most common wrong votes, folder set (path, stored, voted, count):';
@@ -381,16 +388,17 @@ function pr_colorway_report_photos(bool $tagged, int $limit): array
 }
 
 /**
- * Single colorway leaf (blank for none or several) and folder keys
- * (pr_colorway_report_folder_keys), for a batch of resources in two queries.
+ * Single colorway leaf (blank for none or several), folder keys
+ * (pr_colorway_report_folder_keys) and every Folder Path node, for a batch of resources in
+ * two queries.
  *
  * @param list<int> $resources
- * @return array{colorway:array<int,string>, folders:array<int,array<int,true>>}
+ * @return array{colorway:array<int,string>, folders:array<int,array<int,true>>, paths:array<int,array<int,true>>}
  */
 function pr_colorway_report_facts(array $resources): array
 {
     $resources = array_values(array_unique(array_filter(array_map('intval', $resources))));
-    $out = ['colorway' => [], 'folders' => []];
+    $out = ['colorway' => [], 'folders' => [], 'paths' => []];
     if ($resources === []) {
         return $out;
     }
@@ -419,6 +427,7 @@ function pr_colorway_report_facts(array $resources): array
             array_merge(['i', $folderpath], ps_param_fill($resources, 'i'))
         ) as $row) {
             $nodes[(int)$row['resource']][] = ['ref' => (int)$row['ref'], 'parent' => (int)$row['parent']];
+            $out['paths'][(int)$row['resource']][(int)$row['ref']] = true;
         }
         foreach ($nodes as $resource => $list) {
             $keys = pr_colorway_report_folder_keys($list);
@@ -485,6 +494,10 @@ function pr_colorway_accuracy_report(int $limit, int $k, int $wide, callable $on
     $leaf_models = pr_leaf_models();
     $product_field = pr_product_field();
     $stats = pr_colorway_report_new_stats();
+    # Facts per resource, kept across photos: each photo pulls up to $wide neighbours from
+    # the same reference set, so most lookups repeat. colorway has an entry per looked-up
+    # resource; folders only for a resource with a key.
+    $facts = ['colorway' => [], 'folders' => [], 'paths' => []];
 
     foreach (pr_colorway_report_photos(true, $limit) as $photo) {
         $resource = $photo['resource'];
@@ -501,10 +514,16 @@ function pr_colorway_accuracy_report(int $limit, int $k, int $wide, callable $on
         $neighbors = is_array($result['neighbors'] ?? null) ? $result['neighbors'] : [];
         $refs = array_map(static fn($n) => (int)($n['resource'] ?? 0), $neighbors);
         $refs[] = $resource;
-        $facts = pr_colorway_report_facts($refs);
+        $missing = array_filter($refs, static fn(int $r): bool => !isset($facts['colorway'][$r]));
+        if ($missing !== []) {
+            $new = pr_colorway_report_facts($missing);
+            $facts['colorway'] += $new['colorway'];
+            $facts['folders'] += $new['folders'];
+            $facts['paths'] += $new['paths'];
+        }
         $neighbors = pr_colorway_report_with_colorways($neighbors, $facts['colorway']);
         $query_keys = $facts['folders'][$resource] ?? [];
-        $sets = pr_colorway_report_split_neighbors($neighbors, $query_keys, $facts['folders'], $k);
+        $sets = pr_colorway_report_split_neighbors($neighbors, $query_keys, $facts['paths'], $k);
         $names = pr_field_leaf_names($resource, $product_field);
         $self = pr_colorway_report_votes($sets['self'], $leaf_models, $names);
         $folder = pr_colorway_report_votes($sets['folder'], $leaf_models, $names);
