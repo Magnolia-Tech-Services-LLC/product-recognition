@@ -631,6 +631,18 @@ function pr_colorway_label_counts(string $raw): bool
  */
 function pr_vote_colorway(array $neighbors): string
 {
+    return pr_vote_colorway_detail($neighbors)['colorway'];
+}
+
+/**
+ * pr_vote_colorway plus the winner's share of the total weight, so a report can band
+ * by it. A blank vote reports the leading label's share (0.0 when nothing was tagged).
+ *
+ * @param list<array{similarity?:float|int, colorway?:string}> $neighbors
+ * @return array{colorway:string, share:float}
+ */
+function pr_vote_colorway_detail(array $neighbors): array
+{
     $total = 0.0;
     $weight = [];
     $label = [];
@@ -656,14 +668,15 @@ function pr_vote_colorway(array $neighbors): string
         }
     }
     if ($total <= 0.0 || $weight === []) {
-        return '';
+        return ['colorway' => '', 'share' => 0.0];
     }
     arsort($weight);
     $fold = (string)array_key_first($weight);
-    if (($weight[$fold] / $total) <= 0.5) {
-        return '';
+    $share = $weight[$fold] / $total;
+    if ($share <= 0.5) {
+        return ['colorway' => '', 'share' => $share];
     }
-    return $label[$fold] ?? '';
+    return ['colorway' => $label[$fold] ?? '', 'share' => $share];
 }
 
 /**
@@ -856,7 +869,9 @@ function pr_named_service_neighbors(array $neighbors, array $leaf_models): array
         }
         $colorway = trim((string)($neighbor['colorway'] ?? ''));
         $resource = (int)($neighbor['resource'] ?? 0);
-        if ($colorway === '' && $resource > 0) {
+        # A caller that already looked colorways up (the accuracy report, in one batch)
+        # passes the key, blank included, and is not queried again per neighbor.
+        if (!array_key_exists('colorway', $neighbor) && $resource > 0) {
             $colorway = pr_neighbor_stored_colorway($resource);
         }
         $named[] = [
@@ -890,6 +905,19 @@ function pr_aggregate_service_neighbors(array $neighbors, array $leaf_models): a
  */
 function pr_voted_colorway_for_names(array $neighbors, array $leaf_models, array $names): string
 {
+    return pr_voted_colorway_detail_for_names($neighbors, $leaf_models, $names)['colorway'];
+}
+
+/**
+ * pr_voted_colorway_for_names with the winner's weight share.
+ *
+ * @param list<array{model_node?:int, similarity?:float, resource?:int, colorway?:string}> $neighbors
+ * @param array<int,string> $leaf_models
+ * @param list<string> $names
+ * @return array{colorway:string, share:float}
+ */
+function pr_voted_colorway_detail_for_names(array $neighbors, array $leaf_models, array $names): array
+{
     $want = [];
     foreach ($names as $name) {
         $fold = pr_fold_label((string)$name);
@@ -898,7 +926,7 @@ function pr_voted_colorway_for_names(array $neighbors, array $leaf_models, array
         }
     }
     if ($want === []) {
-        return '';
+        return ['colorway' => '', 'share' => 0.0];
     }
     $rows = [];
     foreach (pr_named_service_neighbors($neighbors, $leaf_models) as $row) {
@@ -906,7 +934,7 @@ function pr_voted_colorway_for_names(array $neighbors, array $leaf_models, array
             $rows[] = $row;
         }
     }
-    return pr_vote_colorway($rows);
+    return pr_vote_colorway_detail($rows);
 }
 
 function pr_nodes_to_apply(int $node): array
