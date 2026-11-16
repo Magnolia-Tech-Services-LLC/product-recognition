@@ -110,8 +110,8 @@ function pr_colorway_report_folder_keys(array $nodes): array
  * A neighbour is dropped from the folder set when any folder on its path (it carries every
  * ancestor) is one of the query photo's keys (pr_colorway_report_folder_keys), so a
  * neighbour deeper in the same shoot is dropped too. A query with no key drops nothing;
- * the caller keeps such a photo out of the folder figures. Counting stops once both sets
- * are full, so 'dropped' is the same-shoot neighbours passed over, not all of them.
+ * the caller keeps such a photo out of the folder figures. 'dropped' is the same-shoot
+ * neighbours passed over before the folder set filled, not all of them.
  *
  * @param list<array{resource?:int}> $neighbors
  * @param array<int,true> $query_folders folder key node => true
@@ -136,7 +136,11 @@ function pr_colorway_report_split_neighbors(array $neighbors, array $query_folde
         $shared = $query_folders !== []
             && array_intersect_key($folders_by_resource[$resource] ?? [], $query_folders) !== [];
         if ($shared) {
-            $dropped++;
+            # Counted only while the folder set fills, so the figure does not depend on how
+            # far the tagged set had to look.
+            if (count($folder) < $k) {
+                $dropped++;
+            }
             continue;
         }
         if (count($folder) < $k) {
@@ -159,7 +163,7 @@ function pr_colorway_report_split_neighbors(array $neighbors, array $query_folde
  */
 function pr_colorway_report_is_tagged(array $neighbor): bool
 {
-    return pr_colorway_label_counts(trim((string)($neighbor['colorway'] ?? '')));
+    return pr_colorway_label_counts((string)($neighbor['colorway'] ?? ''));
 }
 
 /**
@@ -473,20 +477,7 @@ function pr_colorway_report_facts(array $resources): array
         return $out;
     }
     $in = ps_param_insert(count($resources));
-    $leaf = "NOT EXISTS (SELECT 1 FROM node ch WHERE ch.parent = n.ref)";
-    $names = [];
-    foreach (ps_query(
-        "SELECT rn.resource, n.name FROM resource_node rn
-           JOIN node n ON n.ref = rn.node AND n.resource_type_field = ? AND $leaf
-          WHERE rn.resource IN ($in)",
-        array_merge(['i', pr_sheet_field('colorway')], ps_param_fill($resources, 'i'))
-    ) as $row) {
-        $names[(int)$row['resource']][] = (string)$row['name'];
-    }
-    foreach ($resources as $resource) {
-        $list = $names[$resource] ?? [];
-        $out['colorway'][$resource] = count($list) === 1 ? $list[0] : '';
-    }
+    $out['colorway'] = pr_colorway_report_colorways($resources);
     $folderpath = pr_field_ref_by_name('folderpath');
     if ($folderpath > 0) {
         $nodes = [];
@@ -505,6 +496,36 @@ function pr_colorway_report_facts(array $resources): array
                 $out['folders'][$resource] = $keys;
             }
         }
+    }
+    return $out;
+}
+
+/**
+ * Single colorway leaf per resource (blank for none or several), in one query.
+ *
+ * @param list<int> $resources
+ * @return array<int,string>
+ */
+function pr_colorway_report_colorways(array $resources): array
+{
+    $resources = array_values(array_unique(array_filter(array_map('intval', $resources))));
+    if ($resources === []) {
+        return [];
+    }
+    $leaf = "NOT EXISTS (SELECT 1 FROM node ch WHERE ch.parent = n.ref)";
+    $names = [];
+    foreach (ps_query(
+        "SELECT rn.resource, n.name FROM resource_node rn
+           JOIN node n ON n.ref = rn.node AND n.resource_type_field = ? AND $leaf
+          WHERE rn.resource IN (" . ps_param_insert(count($resources)) . ")",
+        array_merge(['i', pr_sheet_field('colorway')], ps_param_fill($resources, 'i'))
+    ) as $row) {
+        $names[(int)$row['resource']][] = (string)$row['name'];
+    }
+    $out = [];
+    foreach ($resources as $resource) {
+        $list = $names[$resource] ?? [];
+        $out[$resource] = count($list) === 1 ? $list[0] : '';
     }
     return $out;
 }
@@ -695,6 +716,7 @@ function pr_colorway_projection(int $limit, int $k, int $wide, callable $on_row)
         'voted_tagged' => 0, 'blank_tagged' => 0, 'by_colorway' => [], 'by_colorway_tagged' => [],
     ];
     $colorways = [];
+    $labels = [];
 
     foreach (pr_colorway_report_photos(false, $limit) as $photo) {
         $resource = $photo['resource'];
@@ -708,13 +730,12 @@ function pr_colorway_projection(int $limit, int $k, int $wide, callable $on_row)
         $refs = array_map(static fn($n) => (int)($n['resource'] ?? 0), $neighbors);
         $missing = array_filter($refs, static fn(int $r): bool => !isset($colorways[$r]));
         if ($missing !== []) {
-            $colorways += pr_colorway_report_facts($missing)['colorway'];
+            $colorways += pr_colorway_report_colorways($missing);
         }
         $neighbors = pr_colorway_report_with_colorways($neighbors, $colorways);
         $names = pr_field_leaf_names($resource, $product_field);
         $path = $names !== [] ? 'a' : 'b';
         $out = [(string)$resource, $path];
-        $product = '';
         foreach (['' => array_slice($neighbors, 0, $k),
                   '_tagged' => pr_colorway_report_tagged_neighbors($neighbors, $k)] as $suffix => $set) {
             $votes = pr_colorway_report_votes($set, $leaf_models, $names);
@@ -723,18 +744,22 @@ function pr_colorway_projection(int $limit, int $k, int $wide, callable $on_row)
                 $stats['blank' . $suffix]++;
             } else {
                 $stats['voted' . $suffix]++;
-                $stats['by_colorway' . $suffix][$voted] = ($stats['by_colorway' . $suffix][$voted] ?? 0) + 1;
+                # Folded, as the accuracy tables are; shown by the first spelling seen.
+                $fold = pr_fold_label($voted);
+                $labels[$fold] ??= $voted;
+                $key = $labels[$fold];
+                $stats['by_colorway' . $suffix][$key] = ($stats['by_colorway' . $suffix][$key] ?? 0) + 1;
             }
-            $product = $product !== '' ? $product : ($names !== [] ? implode('|', $names) : $votes['b_name']);
+            # Path b's Name is won per set, so each vote carries the product it was won under.
             array_push(
                 $out,
+                $names !== [] ? implode('|', $names) : $votes['b_name'],
                 $voted,
                 sprintf('%.3f', $path === 'a' ? $votes['a_share'] : $votes['b_share']),
                 $path === 'a' ? (string)$votes['a_support'] : '',
                 sprintf('%.3f', (float)($set[0]['similarity'] ?? 0.0))
             );
         }
-        array_splice($out, 2, 0, [$product]);
         $on_row($out);
     }
     arsort($stats['by_colorway']);
@@ -746,8 +771,8 @@ function pr_colorway_projection(int $limit, int $k, int $wide, callable $on_row)
 function pr_colorway_projection_header(): array
 {
     return [
-        'resource', 'path', 'product',
-        'voted', 'share', 'support', 'top_similarity',
-        'voted_tagged', 'share_tagged', 'support_tagged', 'top_similarity_tagged',
+        'resource', 'path',
+        'product', 'voted', 'share', 'support', 'top_similarity',
+        'product_tagged', 'voted_tagged', 'share_tagged', 'support_tagged', 'top_similarity_tagged',
     ];
 }

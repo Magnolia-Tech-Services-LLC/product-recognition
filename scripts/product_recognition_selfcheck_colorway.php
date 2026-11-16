@@ -140,7 +140,9 @@ $cw_tagged = pr_colorway_report_split_neighbors([
     ['resource' => 26, 'similarity' => 0.5, 'colorway' => 'Navy', 'colorway_resolved' => true],
 ], [9 => true], [24 => [9 => true]], 2);
 pr_check("tagged set: skips near-copies, untagged, junk labels and the same shoot",
-         array_column($cw_tagged['tagged'], 'resource') === [25, 26]);
+         array_column($cw_tagged['tagged'], 'resource') === [25, 26]
+         # 24 shares the shoot but comes after the folder set filled, so it is not counted.
+         && $cw_tagged['dropped'] === 0);
 pr_check("tagged neighbours (projection): k nearest with a countable colorway, copies kept",
          array_column(pr_colorway_report_tagged_neighbors([
              ['resource' => 21, 'similarity' => 0.97, 'colorway' => 'Navy'],
