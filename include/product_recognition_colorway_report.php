@@ -848,7 +848,7 @@ function pr_colorway_crop_new_stats(): array
         'product' => $cell,
         'bands' => ['share' => [], 'support' => [], 'e2e_name' => [], 'e2e_share' => [], 'e2e_support' => []],
         'by_color' => ['match' => [], 'pixel' => [], 'e2e_named' => [], 'e2e_unnamed' => []],
-        'by_category' => ['match' => [], 'e2e_named' => [], 'e2e_unnamed' => []],
+        'by_category' => ['match' => [], 'pixel' => [], 'e2e_named' => [], 'e2e_unnamed' => []],
         'confusion' => [],
     ];
 }
@@ -859,7 +859,7 @@ function pr_colorway_crop_new_stats(): array
  *              match_support:int, any_match:bool, any_pixel:bool, named:bool,
  *              stored_names:list<string>, e2e_names:list<string>,
  *              e2e:array{colorway:string,conflict:bool}, e2e_name_share:float,
- *              e2e_share:float, e2e_support:int, any_e2e:bool} $row
+ *              e2e_share:float, e2e_support:int, any_e2e:bool, category?:string} $row
  */
 function pr_colorway_crop_tally(array &$stats, array $row): void
 {
@@ -887,10 +887,8 @@ function pr_colorway_crop_tally(array &$stats, array $row): void
         if ($row[$any_key]) {
             $stats['any'][$method]++;
         }
-        if (isset($stats['by_category'][$method])) {
-            $category = ($row['category'] ?? '') === '' ? '(none)' : (string)$row['category'];
-            $stats['by_category'][$method][$category][$outcome] = ($stats['by_category'][$method][$category][$outcome] ?? 0) + 1;
-        }
+        $category = ($row['category'] ?? '') === '' ? '(none)' : (string)$row['category'];
+        $stats['by_category'][$method][$category][$outcome] = ($stats['by_category'][$method][$category][$outcome] ?? 0) + 1;
         $fold = pr_fold_label($row['truth']);
         $stats['by_color'][$method][$fold]['label'] ??= $row['truth'];
         $stats['by_color'][$method][$fold][$outcome] = ($stats['by_color'][$method][$fold][$outcome] ?? 0) + 1;
@@ -998,7 +996,7 @@ function pr_colorway_crop_summary(array $stats): array
             $c = (int)($cell['correct'] ?? 0);
             $w = (int)($cell['wrong'] ?? 0);
             $b = (int)($cell['blank'] ?? 0);
-            $lines[] = sprintf('  %-10s %7d  %5d  %5d  %9s  %8s', $label, $c, $w, $b, $pct($c, $c + $w), $pct($c + $w, $c + $w + $b));
+            $lines[] = sprintf('  %-22s %7d  %5d  %5d  %9s  %8s', $label, $c, $w, $b, $pct($c, $c + $w), $pct($c + $w, $c + $w + $b));
         }
     }
     foreach (['match', 'pixel', 'e2e_named', 'e2e_unnamed'] as $method) {
@@ -1035,9 +1033,11 @@ function pr_colorway_crop_photos(int $limit): array
         throw new RuntimeException('colorway crop report: Photo Category or Colorway field not found');
     }
     # Every photo category: recognition cares whether a photo shows the product, not
-    # how it was shot. The category is reported so the scores can be split by it.
+    # how it was shot. The category is reported so the scores can be split by it; a
+    # photo with several categories reports them all ('Ecomm|Lifestyle'), not just one.
     $sql = "SELECT r.ref AS resource, MIN(cn.name) AS colorway,
-                   COALESCE((SELECT MIN(pcn.name) FROM resource_node pc
+                   COALESCE((SELECT GROUP_CONCAT(DISTINCT pcn.name ORDER BY pcn.name SEPARATOR '|')
+                               FROM resource_node pc
                                JOIN node pcn ON pcn.ref = pc.node AND pcn.resource_type_field = ?
                               WHERE pc.resource = r.ref), '') AS category
               FROM resource r
