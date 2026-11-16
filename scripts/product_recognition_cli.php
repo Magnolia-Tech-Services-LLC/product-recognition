@@ -13,6 +13,7 @@
  *   php product_recognition_cli.php --disagreement [--limit=N]  # default classify_batch; N=0 unlimited
  *   php product_recognition_cli.php --colorway-accuracy [--limit=N]    # default 500; N=0 all
  *   php product_recognition_cli.php --colorway-projection [--limit=N]  # untagged lifestyle
+ *   php product_recognition_cli.php --colorway-crops [--limit=N]       # cutouts, cached regions only
  *   php product_recognition_cli.php --regions --resource=N [--resource=M ...]
  *   php product_recognition_cli.php --migrate-family [--dry-run]
  *   php product_recognition_cli.php --accept-certain [--dry-run]
@@ -331,8 +332,10 @@ switch ($mode) {
 
     case '--colorway-accuracy':
     case '--colorway-projection':
-        # Read-only, so no process lock (classify may hold it). One /identify per photo,
-        # so the default is a bounded sample; --limit=0 is every photo.
+    case '--colorway-crops':
+        # Read-only, so no process lock (classify may hold it). One /identify per photo
+        # (per cutout for --colorway-crops), so the default is a bounded sample; --limit=0
+        # is every photo.
         $limit = 500;
         $k = (int)$GLOBALS['product_recognition_k'];
         foreach ($modes as $m) {
@@ -348,7 +351,16 @@ switch ($mode) {
             fwrite(STDERR, "product_recognition_k must be > 0\n");
             exit(1);
         }
-        if ($mode === '--colorway-accuracy') {
+        if ($mode === '--colorway-crops') {
+            fputcsv(STDOUT, pr_colorway_crop_header(), "\t");
+            $stats = pr_colorway_crop_report($limit, $k, max(2000, 5 * $k), function (array $row) {
+                fputcsv(STDOUT, pr_colorway_crop_fields($row), "\t");
+            });
+            fwrite(STDERR, sprintf("Limit %s, k %d\n", $limit === 0 ? 'all' : (string)$limit, $k));
+            foreach (pr_colorway_crop_summary($stats) as $line) {
+                fwrite(STDERR, $line . "\n");
+            }
+        } elseif ($mode === '--colorway-accuracy') {
             fputcsv(STDOUT, pr_colorway_report_header(), "\t");
             # Wide enough that k neighbours survive dropping a whole shoot: live, a test photo
             # shares its shoot with 821 references on average and up to 1,835.
@@ -434,7 +446,7 @@ switch ($mode) {
 
     case '--help':
     case '-h':
-        fwrite(STDOUT, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
+        fwrite(STDOUT, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
         break;
 
     case '--sheet':
@@ -492,6 +504,6 @@ switch ($mode) {
 
     default:
         fwrite(STDERR, "Unknown mode: $mode\n");
-        fwrite(STDERR, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
+        fwrite(STDERR, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
         exit(1);
 }
