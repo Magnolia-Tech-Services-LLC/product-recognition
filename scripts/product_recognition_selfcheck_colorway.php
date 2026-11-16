@@ -256,20 +256,22 @@ $cw_one = static function (int $bin) use ($cw_bins): array {
     return $h;
 };
 $cw_lib = [
-    ['resource' => 1, 'names' => ['Loma'], 'colorway' => 'Evergreen', 'hists' => [$cw_one(10)], 'keys' => [100]],
-    ['resource' => 2, 'names' => ['Loma'], 'colorway' => 'Evergreen', 'hists' => [$cw_one(10)], 'keys' => [200]],
-    ['resource' => 3, 'names' => ['Loma'], 'colorway' => 'Lavender', 'hists' => [$cw_one(30)], 'keys' => [300]],
-    ['resource' => 4, 'names' => ['Ryder'], 'colorway' => 'Black', 'hists' => [$cw_one(0)], 'keys' => [400]],
-    ['resource' => 5, 'names' => ['Loma'], 'colorway' => 'Black', 'hists' => [$cw_one(0), $cw_one(0)], 'keys' => [500]],
+    ['resource' => 1, 'names' => ['Loma'], 'colorway' => 'Evergreen', 'hists' => [$cw_one(10)], 'paths' => [100]],
+    ['resource' => 2, 'names' => ['Loma'], 'colorway' => 'Evergreen', 'hists' => [$cw_one(10)], 'paths' => [200]],
+    ['resource' => 3, 'names' => ['Loma'], 'colorway' => 'Lavender', 'hists' => [$cw_one(30)], 'paths' => [300]],
+    ['resource' => 4, 'names' => ['Ryder'], 'colorway' => 'Black', 'hists' => [$cw_one(0)], 'paths' => [400]],
+    ['resource' => 5, 'names' => ['Loma'], 'colorway' => 'Black', 'hists' => [$cw_one(0), $cw_one(0)], 'paths' => [500]],
+    # Deeper in shoot 600: its path carries the ancestor the query keys on.
+    ['resource' => 6, 'names' => ['Loma'], 'colorway' => 'Sand', 'hists' => [$cw_one(20)], 'paths' => [600, 601, 602]],
 ];
-$cw_prof = pr_color_profiles($cw_lib, ['Loma'], [200], 1);
-pr_check("profiles: same product only, other shoots only, single-cutout photos only, not itself",
+$cw_prof = pr_color_profiles($cw_lib, ['Loma'], [200, 600], 1);
+pr_check("profiles: same product only, other shoots only (any ancestor), single-cutout photos only, not itself",
          array_keys($cw_prof) === ['lavender'] && $cw_prof['lavender']['n'] === 1);
 $cw_prof = pr_color_profiles($cw_lib, ['loma'], [999], 0);
 $cw_pick = pr_color_pick($cw_one(10), $cw_prof);
 pr_check("pick: closest profile wins with its margin and support",
-         array_keys($cw_prof) === ['evergreen', 'lavender'] && $cw_pick['colorway'] === 'Evergreen'
-         && abs($cw_pick['margin'] - 1.0) < 1e-9 && $cw_pick['support'] === 2 && $cw_pick['candidates'] === 2
+         array_keys($cw_prof) === ['evergreen', 'lavender', 'sand'] && $cw_pick['colorway'] === 'Evergreen'
+         && abs($cw_pick['margin'] - 1.0) < 1e-9 && $cw_pick['support'] === 2 && $cw_pick['candidates'] === 3
          && pr_color_pick($cw_one(10), [])['colorway'] === '');
 $cw_cs = pr_color_new_stats();
 pr_color_tally($cw_cs, ['truth' => 'Evergreen', 'category' => 'Lifestyle', 'vote' => ['colorway' => 'Evergreen', 'conflict' => false], 'margin' => 0.3, 'candidates' => 2]);

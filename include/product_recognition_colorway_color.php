@@ -144,32 +144,38 @@ function pr_color_pick(array $hist, array $profiles): array
 
 /**
  * Profiles for one query photo: per colorway of the given product names, summed
- * histograms of single-cutout library photos, skipping any photo that shares a folder
- * key with the query.
+ * histograms of single-cutout library photos, skipping any photo with a folder on its
+ * path (every Folder Path node, ancestors included) that is one of the query's folder
+ * keys, as pr_colorway_report_split_neighbors does.
  *
- * @param list<array{resource:int, names:list<string>, colorway:string, hists:list<list<float>>, keys:list<int>}> $library
+ * @param list<array{resource:int, names:list<string>, colorway:string, hists:list<list<float>>, paths:list<int>}> $library
  * @param list<string> $names
  * @param list<int> $query_keys
  * @return array<string, array{label:string, sum:list<float>, n:int}>
  */
 function pr_color_profiles(array $library, array $names, array $query_keys, int $exclude): array
 {
-    $want = array_flip(array_map('pr_fold_label', $names));
+    # Called once per library photo over the whole library: fold each label once.
+    static $folded = [];
+    $fold_of = static function (string $s) use (&$folded): string {
+        return $folded[$s] ??= pr_fold_label($s);
+    };
+    $want = array_flip(array_map($fold_of, $names));
     $skip = array_flip($query_keys);
     $profiles = [];
     foreach ($library as $item) {
         if ($item['resource'] === $exclude || count($item['hists']) !== 1 || count($item['names']) !== 1) {
             continue;
         }
-        if (!isset($want[pr_fold_label($item['names'][0])])) {
+        if (!isset($want[$fold_of($item['names'][0])])) {
             continue;
         }
-        foreach ($item['keys'] as $key) {
-            if (isset($skip[$key])) {
+        foreach ($item['paths'] as $node) {
+            if (isset($skip[$node])) {
                 continue 2;
             }
         }
-        $fold = pr_fold_label($item['colorway']);
+        $fold = $fold_of($item['colorway']);
         if (!isset($profiles[$fold])) {
             $profiles[$fold] = ['label' => $item['colorway'], 'sum' => array_fill(0, pr_color_bins(), 0.0), 'n' => 0];
         }
@@ -184,7 +190,8 @@ function pr_color_profiles(array $library, array $names, array $query_keys, int 
 function pr_color_new_stats(): array
 {
     return [
-        'photos' => 0, 'not_a_color' => 0, 'no_name' => 0, 'no_alpha_cutout' => 0, 'no_folder_key' => 0,
+        'photos' => 0, 'not_a_color' => 0, 'no_name' => 0, 'no_regions' => 0, 'no_alpha_cutout' => 0,
+        'no_folder_key' => 0,
         'no_profile' => 0, 'scored' => 0, 'single_candidate' => 0,
         'cell' => ['correct' => 0, 'wrong' => 0, 'blank' => 0], 'conflict' => 0,
         'margin' => [], 'category' => [], 'by_color' => [], 'confusion' => [],
@@ -237,6 +244,7 @@ function pr_color_summary(array $stats): array
     $lines[] = sprintf('Tagged photos with cutouts  %d', $stats['photos']);
     $lines[] = sprintf('  stored label not a color (skipped)        %d', $stats['not_a_color']);
     $lines[] = sprintf('  no stored product (skipped)               %d', $stats['no_name']);
+    $lines[] = sprintf('  no current regions or masks (skipped)     %d', $stats['no_regions']);
     $lines[] = sprintf('  no masked cutout, rectangle only (skipped) %d', $stats['no_alpha_cutout']);
     $lines[] = sprintf('  no folder key (skipped)                   %d', $stats['no_folder_key']);
     $lines[] = sprintf('  no profile for the product (skipped)      %d', $stats['no_profile']);
@@ -289,9 +297,11 @@ function pr_colorway_color_report(callable $on_row): array
     $product_field = pr_product_field();
     $photos = pr_colorway_crop_photos(0);
     $stats['photos'] = count($photos);
-    $facts = ['folders' => []];
+    $facts = ['folders' => [], 'paths' => []];
     foreach (array_chunk(array_column($photos, 'resource'), 500) as $chunk) {
-        $facts['folders'] += pr_colorway_report_facts($chunk)['folders'];
+        $new = pr_colorway_report_facts($chunk);
+        $facts['folders'] += $new['folders'];
+        $facts['paths'] += $new['paths'];
     }
 
     $library = [];
@@ -306,7 +316,8 @@ function pr_colorway_color_report(callable $on_row): array
             $stats['no_name']++;
             continue;
         }
-        $keys = $facts['folders'][$resource] ?? [];
+        # Facts map node => true; the profiles take node lists.
+        $keys = array_keys($facts['folders'][$resource] ?? []);
         if ($keys === []) {
             $stats['no_folder_key']++;
             continue;
@@ -315,6 +326,11 @@ function pr_colorway_color_report(callable $on_row): array
         $checksum = $data === false ? '' : (string)$data['file_checksum'];
         $hists = [];
         $boxes = pr_cached_regions($resource);
+        # Stale regions or a mask still pending: not a rectangle-only cutout, count apart.
+        if ($boxes === []) {
+            $stats['no_regions']++;
+            continue;
+        }
         foreach ($boxes as $i => $_bbox) {
             $hist = pr_cutout_color_histogram(pr_mask_file($resource, $checksum, $i));
             if ($hist !== null) {
@@ -333,6 +349,7 @@ function pr_colorway_color_report(callable $on_row): array
             'category' => $photo['category'],
             'hists' => $hists,
             'keys' => $keys,
+            'paths' => array_keys($facts['paths'][$resource] ?? []),
         ];
     }
 
