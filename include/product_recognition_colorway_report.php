@@ -780,8 +780,8 @@ function pr_colorway_projection_header(): array
 /*
  * Cutout (crop) accuracy: colorway from the product in the frame, not the whole image.
  *
- * Test set: tagged lifestyle photos (one colorway leaf) with a stored Name and cached
- * product regions. Each region's cutout is scored two ways:
+ * Test set: tagged lifestyle photos (one colorway leaf) with cached product regions.
+ * Each region's cutout is scored up to three ways (match and pixel need a stored Name):
  *   match  /identify on the cutout image; vote over the tagged set (k nearest references
  *          with a countable colorway, same shoot and near-copies excluded), restricted to
  *          the photo's stored Name (pr_voted_colorway_detail_for_names, path a). A photo
@@ -841,12 +841,12 @@ function pr_colorway_crop_new_stats(): array
         'considered' => 0, 'truth_not_a_color' => 0, 'no_product' => 0, 'no_folder_key' => 0,
         'no_cutout' => 0, 'regions' => 0, 'multi_region' => 0, 'tagged_underfilled' => 0,
         'mask_missing' => 0, 'identify_failed' => 0,
-        'methods' => ['match' => $cell, 'pixel' => $cell, 'e2e' => $cell, 'e2e_unnamed' => $cell],
-        'conflict' => ['match' => 0, 'pixel' => 0, 'e2e' => 0, 'e2e_unnamed' => 0],
-        'any' => ['match' => 0, 'pixel' => 0, 'e2e' => 0, 'e2e_unnamed' => 0],
+        'methods' => ['match' => $cell, 'pixel' => $cell, 'e2e_named' => $cell, 'e2e_unnamed' => $cell],
+        'conflict' => ['match' => 0, 'pixel' => 0, 'e2e_named' => 0, 'e2e_unnamed' => 0],
+        'any' => ['match' => 0, 'pixel' => 0, 'e2e_named' => 0, 'e2e_unnamed' => 0],
         'product' => $cell,
         'bands' => ['share' => [], 'support' => [], 'e2e_name' => [], 'e2e_share' => [], 'e2e_support' => []],
-        'by_color' => ['match' => [], 'pixel' => [], 'e2e' => [], 'e2e_unnamed' => []],
+        'by_color' => ['match' => [], 'pixel' => [], 'e2e_named' => [], 'e2e_unnamed' => []],
         'confusion' => [],
     ];
 }
@@ -854,7 +854,10 @@ function pr_colorway_crop_new_stats(): array
 /**
  * @param array{truth:string, regions:int, match:array{colorway:string,conflict:bool},
  *              pixel:array{colorway:string,conflict:bool}, match_share:float,
- *              match_support:int, any_match:bool, any_pixel:bool} $row
+ *              match_support:int, any_match:bool, any_pixel:bool, named:bool,
+ *              stored_names:list<string>, e2e_names:list<string>,
+ *              e2e:array{colorway:string,conflict:bool}, e2e_name_share:float,
+ *              e2e_share:float, e2e_support:int, any_e2e:bool} $row
  */
 function pr_colorway_crop_tally(array &$stats, array $row): void
 {
@@ -864,14 +867,16 @@ function pr_colorway_crop_tally(array &$stats, array $row): void
         $stats['multi_region']++;
     }
     $named = (bool)$row['named'];
-    $methods = $named ? ['match', 'pixel', 'e2e'] : ['e2e', 'e2e_unnamed'];
+    # match and pixel need a stored Name; e2e is split so it compares like for like with them.
+    $methods = $named ? ['match', 'pixel', 'e2e_named'] : ['e2e_unnamed'];
     if ($named) {
-        $product = pr_colorway_crop_product_outcome($row['stored_names'], $row['e2e_name']['colorway']);
+        $product = pr_colorway_crop_product_outcome($row['stored_names'], $row['e2e_names']);
         $stats['product'][$product]++;
     }
     foreach ($methods as $method) {
-        $vote = $row[$method === 'e2e_unnamed' ? 'e2e' : $method];
-        $any_key = 'any_' . ($method === 'e2e_unnamed' ? 'e2e' : $method);
+        $source = str_starts_with($method, 'e2e') ? 'e2e' : $method;
+        $vote = $row[$source];
+        $any_key = 'any_' . $source;
         $outcome = pr_colorway_report_outcome($row['truth'], $vote['colorway']);
         $stats['methods'][$method][$outcome]++;
         if ($vote['conflict']) {
@@ -893,7 +898,7 @@ function pr_colorway_crop_tally(array &$stats, array $row): void
             $support = pr_colorway_report_support_band((int)$row['match_support']);
             $stats['bands']['support'][$support][$outcome] = ($stats['bands']['support'][$support][$outcome] ?? 0) + 1;
         }
-        if ($method === 'e2e' && $outcome !== 'blank') {
+        if ($source === 'e2e' && $outcome !== 'blank') {
             foreach ([
                 'e2e_name' => pr_colorway_report_band((float)$row['e2e_name_share'], PR_COLORWAY_REPORT_SHARE_BANDS),
                 'e2e_share' => pr_colorway_report_band((float)$row['e2e_share'], PR_COLORWAY_REPORT_SHARE_BANDS),
@@ -906,21 +911,31 @@ function pr_colorway_crop_tally(array &$stats, array $row): void
 }
 
 /**
- * Product from the cutout against the stored Name(s): correct when it is one of them.
+ * Product from the cutouts against the stored Name(s), per region: correct when every
+ * region that voted a Name voted one of the stored ones (a two-bag photo may carry two
+ * Names), wrong when any voted another, blank when no region voted.
  *
  * @param list<string> $stored
+ * @param list<string> $voted per-region Names
  */
-function pr_colorway_crop_product_outcome(array $stored, string $voted): string
+function pr_colorway_crop_product_outcome(array $stored, array $voted): string
 {
-    if (trim($voted) === '') {
-        return 'blank';
-    }
+    $want = [];
     foreach ($stored as $name) {
-        if (pr_fold_label((string)$name) === pr_fold_label($voted)) {
-            return 'correct';
-        }
+        $want[pr_fold_label((string)$name)] = true;
     }
-    return 'wrong';
+    $outcome = 'blank';
+    foreach ($voted as $name) {
+        $name = (string)$name;
+        if (trim($name) === '') {
+            continue;
+        }
+        if (!isset($want[pr_fold_label($name)])) {
+            return 'wrong';
+        }
+        $outcome = 'correct';
+    }
+    return $outcome;
 }
 
 /** @return list<string> */
@@ -969,7 +984,7 @@ function pr_colorway_crop_summary(array $stats): array
     }
     $total = static fn(array $cell): int
         => (int)($cell['correct'] ?? 0) + (int)($cell['wrong'] ?? 0) + (int)($cell['blank'] ?? 0);
-    foreach (['match', 'pixel', 'e2e', 'e2e_unnamed'] as $method) {
+    foreach (['match', 'pixel', 'e2e_named', 'e2e_unnamed'] as $method) {
         $lines[] = '';
         $lines[] = "$method, by stored colorway (top 15): correct  wrong  blank  precision";
         $by_color = $stats['by_color'][$method];
@@ -1176,6 +1191,7 @@ function pr_colorway_crop_report(int $limit, int $k, int $wide, callable $on_row
             'pixel_votes' => $pixel_votes,
             'named' => $named,
             'stored_names' => $names,
+            'e2e_names' => $e2e_names,
             'e2e_name' => pr_colorway_crop_photo_vote($e2e_names),
             'e2e' => pr_colorway_crop_photo_vote($e2e_votes),
             'e2e_name_share' => $e2e_best['name_share'],
