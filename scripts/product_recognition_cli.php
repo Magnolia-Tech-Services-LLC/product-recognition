@@ -333,8 +333,9 @@ switch ($mode) {
     case '--colorway-accuracy':
     case '--colorway-projection':
     case '--colorway-crops':
-        # Read-only, so no process lock (classify may hold it). One /identify per photo,
-        # so the default is a bounded sample; --limit=0 is every photo.
+        # Read-only, so no process lock (classify may hold it). One /identify per photo
+        # (per cutout for --colorway-crops), so the default is a bounded sample; --limit=0
+        # is every photo.
         $limit = 500;
         $k = (int)$GLOBALS['product_recognition_k'];
         foreach ($modes as $m) {
