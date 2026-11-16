@@ -392,7 +392,7 @@ function pr_colorway_color_report(callable $on_row): array
 function pr_color_header(): array
 {
     return ['resource', 'stored_colorway', 'stored_product', 'category', 'regions', 'voted',
-            'margin', 'candidates', 'support', 'by_region'];
+            'margin', 'candidates', 'support', 'by_region', 'truth_present'];
 }
 
 /** @return list<string> */
@@ -401,6 +401,6 @@ function pr_color_fields(array $row): array
     return [
         (string)$row['resource'], $row['truth'], $row['product'], $row['category'], (string)$row['regions'],
         $row['vote']['colorway'], sprintf('%.3f', $row['margin']), (string)$row['candidates'],
-        (string)$row['support'], implode('|', $row['picks']),
+        (string)$row['support'], implode('|', $row['picks']), $row['truth_present'] ? '1' : '0',
     ];
 }

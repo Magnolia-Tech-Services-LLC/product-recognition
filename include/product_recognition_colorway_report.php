@@ -875,6 +875,9 @@ function pr_colorway_crop_tally(array &$stats, array $row): void
         $stats['multi_region']++;
     }
     $named = (bool)$row['named'];
+    if (!$named) {
+        $stats['no_product']++;
+    }
     # match and pixel need a stored Name; e2e is split so it compares like for like with them.
     $methods = $named ? ['match', 'pixel', 'e2e_named'] : ['e2e_unnamed'];
     if ($named) {
@@ -1143,14 +1146,12 @@ function pr_colorway_crop_report(int $limit, int $k, int $wide, callable $on_row
             $stats['no_cutout']++;
             continue;
         }
-        if (!$named) {
-            $stats['no_product']++;
-        }
         $pixel_model = $named ? pr_primary_tagged_model($names, $catalog) : '';
         $e2e_names = [];
         $e2e_votes = [];
         $e2e_best = ['name_share' => 0.0, 'share' => 0.0, 'support' => 0];
         $truth_present = false;
+        $answered = false;
         $match_votes = [];
         $pixel_votes = [];
         $best_share = 0.0;
@@ -1166,6 +1167,7 @@ function pr_colorway_crop_report(int $limit, int $k, int $wide, callable $on_row
                 continue;
             }
             $failures_in_a_row = 0;
+            $answered = true;
             $neighbors = is_array($result['neighbors'] ?? null) ? $result['neighbors'] : [];
             # An uploaded image has no resource to exclude; drop the photo's own vector.
             $neighbors = array_values(array_filter(
@@ -1185,12 +1187,8 @@ function pr_colorway_crop_report(int $limit, int $k, int $wide, callable $on_row
             if (count($sets['tagged']) < $k) {
                 $stats['tagged_underfilled']++;
             }
-            foreach ($sets['tagged'] as $n) {
-                if (pr_fold_label((string)($n['colorway'] ?? '')) === pr_fold_label($truth)) {
-                    $truth_present = true;
-                    break;
-                }
-            }
+            $truth_present = $truth_present
+                || pr_colorway_crop_any_match($truth, array_column($sets['tagged'], 'colorway'));
             # End to end: the product from this cutout first, then the colorway among that
             # product's references. No product, no colorway.
             $agg = pr_aggregate_service_neighbors($sets['tagged'], $leaf_models);
@@ -1237,7 +1235,8 @@ function pr_colorway_crop_report(int $limit, int $k, int $wide, callable $on_row
             'e2e_share' => $e2e_best['share'],
             'e2e_support' => $e2e_best['support'],
             'any_e2e' => pr_colorway_crop_any_match($truth, $e2e_votes),
-            'truth_present' => $truth_present,
+            # No region answered: a service failure, not a missing reference; keep it scored blank.
+            'truth_present' => $truth_present || !$answered,
             'e2e_votes' => $e2e_votes,
         ];
         pr_colorway_crop_tally($stats, $row);
@@ -1251,7 +1250,7 @@ function pr_colorway_crop_header(): array
 {
     return ['resource', 'stored_colorway', 'stored_product', 'regions', 'match', 'match_share',
             'match_support', 'pixel', 'match_by_region', 'pixel_by_region',
-            'e2e_product', 'e2e', 'e2e_name_share', 'e2e_share', 'e2e_support', 'e2e_by_region', 'category'];
+            'e2e_product', 'e2e', 'e2e_name_share', 'e2e_share', 'e2e_support', 'e2e_by_region', 'category', 'truth_present'];
 }
 
 /** @return list<string> */
@@ -1263,6 +1262,6 @@ function pr_colorway_crop_fields(array $row): array
         $row['pixel']['colorway'], implode('|', $row['match_votes']), implode('|', $row['pixel_votes']),
         $row['e2e_name']['colorway'], $row['e2e']['colorway'], sprintf('%.3f', $row['e2e_name_share']),
         sprintf('%.3f', $row['e2e_share']), (string)$row['e2e_support'], implode('|', $row['e2e_votes']),
-        (string)$row['category'],
+        (string)$row['category'], $row['truth_present'] ? '1' : '0',
     ];
 }
