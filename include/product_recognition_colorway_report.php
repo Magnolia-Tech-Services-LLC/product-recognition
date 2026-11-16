@@ -10,8 +10,10 @@
  * Two neighbour sets per photo, because self-exclusion alone overstated model accuracy
  * before (97% leave-one-out against 43% agreement on lifestyle shots):
  *   self    the k nearest references other than the photo itself (what production sees)
- *   folder  the k nearest references not in the same Folder Path leaf as the photo, so a
- *           sibling from the same shoot, tagged from the same folder name, cannot vote
+ *   folder  the k nearest references that share neither the photo's Folder Path leaf nor
+ *           that leaf's parent, so a sibling from the same shoot (Navy/Raw next to
+ *           Navy/Selects), tagged from the same folder name, cannot vote. This errs toward
+ *           dropping too much, which makes the folder figure conservative
  *
  * Two vote paths, because they would write different photos:
  *   a  Name known: pr_voted_colorway_for_names with the photo's stored product leaf
@@ -53,8 +55,8 @@ function pr_colorway_report_band(float $value, array $edges): string
 
 /**
  * Split /identify neighbours (already self-excluded, nearest first) into the two sets.
- * A neighbour is dropped from the folder set when it shares any Folder Path leaf with
- * the query photo. A query with no folder leaf drops nothing.
+ * A neighbour is dropped from the folder set when it shares any folder key (a Folder Path
+ * leaf or its parent, see pr_colorway_report_facts) with the query photo. A query with no folder leaf drops nothing.
  *
  * @param list<array{resource?:int}> $neighbors
  * @param array<int,true> $query_folders folder leaf node => true
@@ -108,13 +110,13 @@ function pr_colorway_report_votes(array $neighbors, array $leaf_models, array $n
         $a = $detail['colorway'];
         $a_share = $detail['share'];
     }
+    # pr_aggregate_neighbors leaves name and colorway blank unless a Name won.
     $agg = pr_aggregate_service_neighbors($neighbors, $leaf_models);
-    $b_name = $agg['suggest'] ? (string)$agg['name'] : '';
     return [
         'a' => $a,
         'a_share' => $a_share,
-        'b' => $b_name !== '' ? (string)$agg['colorway'] : '',
-        'b_name' => $b_name,
+        'b' => (string)$agg['colorway'],
+        'b_name' => (string)$agg['name'],
     ];
 }
 
@@ -154,19 +156,21 @@ function pr_colorway_report_tally(array &$stats, array $row): void
     if ($row['a_self'] === null) {
         $stats['no_model']++;
     }
+    $outcomes = [];
     foreach (['a_self', 'a_folder', 'b_self', 'b_folder'] as $key) {
         if ($row[$key] === null) {
             continue;
         }
         $outcome = pr_colorway_report_outcome($row['truth'], (string)$row[$key]);
+        $outcomes[$key] = $outcome;
         $stats['paths'][$key][$outcome]++;
         if ($outcome === 'wrong' && ($key === 'a_folder' || $key === 'b_folder')) {
             $pair = $key[0] . "\t" . $row['truth'] . "\t" . $row[$key];
             $stats['confusion'][$pair] = ($stats['confusion'][$pair] ?? 0) + 1;
         }
     }
-    if ($row['a_folder'] !== null) {
-        $outcome = pr_colorway_report_outcome($row['truth'], (string)$row['a_folder']);
+    if (isset($outcomes['a_folder'])) {
+        $outcome = $outcomes['a_folder'];
         if ($outcome !== 'blank') {
             $band = pr_colorway_report_band((float)$row['a_folder_share'], PR_COLORWAY_REPORT_SHARE_BANDS);
             $stats['share_bands'][$band][$outcome] = ($stats['share_bands'][$band][$outcome] ?? 0) + 1;
@@ -309,12 +313,16 @@ function pr_colorway_report_facts(array $resources): array
     $folderpath = pr_field_ref_by_name('folderpath');
     if ($folderpath > 0) {
         foreach (ps_query(
-            "SELECT rn.resource, n.ref FROM resource_node rn
+            "SELECT rn.resource, n.ref, n.parent FROM resource_node rn
                JOIN node n ON n.ref = rn.node AND n.resource_type_field = ? AND $leaf
               WHERE rn.resource IN ($in)",
             array_merge(['i', $folderpath], ps_param_fill($resources, 'i'))
         ) as $row) {
+            # Leaf and its parent: Shoot/Navy/Raw and Shoot/Navy/Selects are one shoot.
             $out['folders'][(int)$row['resource']][(int)$row['ref']] = true;
+            if ((int)$row['parent'] > 0) {
+                $out['folders'][(int)$row['resource']][(int)$row['parent']] = true;
+            }
         }
     }
     return $out;
@@ -451,8 +459,11 @@ function pr_colorway_report_header(): array
 }
 
 /**
- * What the vote would write on untagged lifestyle photos, as production would run it
- * (self set, path a when the photo has a product, else path b). Nothing is written.
+ * What the neighbour vote alone would give untagged lifestyle photos (self set, path a
+ * when the photo has a product, else path b). Nothing is written. It does not model the
+ * view's fallbacks: a blank vote there falls through to the one-colour catalog
+ * (pr_identity_colorway), and path a there needs the stored Name among the top_n
+ * candidates. Read "blank vote" as an upper bound on what the view leaves blank.
  *
  * @param callable(array):void $on_row
  * @return array{considered:int, no_vector:int, voted:int, blank:int, by_colorway:array<string,int>}
