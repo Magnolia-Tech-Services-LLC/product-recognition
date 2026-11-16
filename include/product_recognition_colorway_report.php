@@ -840,7 +840,7 @@ function pr_colorway_crop_new_stats(): array
     $cell = ['correct' => 0, 'wrong' => 0, 'blank' => 0];
     return [
         'considered' => 0, 'truth_not_a_color' => 0, 'no_product' => 0, 'no_folder_key' => 0,
-        'no_cutout' => 0, 'regions' => 0, 'multi_region' => 0, 'tagged_underfilled' => 0,
+        'no_cutout' => 0, 'regions' => 0, 'multi_region' => 0, 'tagged_underfilled' => 0, 'truth_absent' => 0,
         'mask_missing' => 0, 'identify_failed' => 0,
         'methods' => ['match' => $cell, 'pixel' => $cell, 'e2e_named' => $cell, 'e2e_unnamed' => $cell],
         'conflict' => ['match' => 0, 'pixel' => 0, 'e2e_named' => 0, 'e2e_unnamed' => 0],
@@ -863,6 +863,12 @@ function pr_colorway_crop_new_stats(): array
  */
 function pr_colorway_crop_tally(array &$stats, array $row): void
 {
+    # No tagged neighbour carries the true colorway (the shoot exclusion can remove them
+    # all): no method could be right, so the photo is counted apart.
+    if (!($row['truth_present'] ?? true)) {
+        $stats['truth_absent']++;
+        return;
+    }
     $stats['considered']++;
     $stats['regions'] += (int)$row['regions'];
     if ((int)$row['regions'] > 1) {
@@ -947,6 +953,7 @@ function pr_colorway_crop_summary(array $stats): array
 {
     $pct = static fn(int $n, int $d): string => $d > 0 ? sprintf('%5.1f%%', 100 * $n / $d) : '    -';
     $lines = [];
+    $lines[] = sprintf('True colorway on no tagged neighbour outside the shoot (not scored) %d', $stats['truth_absent']);
     $lines[] = sprintf('Considered              %d', $stats['considered']);
     $lines[] = sprintf('  stored label not a color (skipped)  %d', $stats['truth_not_a_color']);
     $lines[] = sprintf('  no stored product (end to end only) %d', $stats['no_product']);
@@ -1143,6 +1150,7 @@ function pr_colorway_crop_report(int $limit, int $k, int $wide, callable $on_row
         $e2e_names = [];
         $e2e_votes = [];
         $e2e_best = ['name_share' => 0.0, 'share' => 0.0, 'support' => 0];
+        $truth_present = false;
         $match_votes = [];
         $pixel_votes = [];
         $best_share = 0.0;
@@ -1176,6 +1184,12 @@ function pr_colorway_crop_report(int $limit, int $k, int $wide, callable $on_row
             $sets = pr_colorway_report_split_neighbors($neighbors, $query_keys, $facts['paths'], $k);
             if (count($sets['tagged']) < $k) {
                 $stats['tagged_underfilled']++;
+            }
+            foreach ($sets['tagged'] as $n) {
+                if (pr_fold_label((string)($n['colorway'] ?? '')) === pr_fold_label($truth)) {
+                    $truth_present = true;
+                    break;
+                }
             }
             # End to end: the product from this cutout first, then the colorway among that
             # product's references. No product, no colorway.
@@ -1223,6 +1237,7 @@ function pr_colorway_crop_report(int $limit, int $k, int $wide, callable $on_row
             'e2e_share' => $e2e_best['share'],
             'e2e_support' => $e2e_best['support'],
             'any_e2e' => pr_colorway_crop_any_match($truth, $e2e_votes),
+            'truth_present' => $truth_present,
             'e2e_votes' => $e2e_votes,
         ];
         pr_colorway_crop_tally($stats, $row);
