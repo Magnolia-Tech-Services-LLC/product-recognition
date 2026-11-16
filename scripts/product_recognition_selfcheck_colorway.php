@@ -209,6 +209,9 @@ pr_check("crop tally: end to end scores every photo, unnamed separately; product
          && pr_colorway_crop_product_outcome(['Loma', 'Ryder'], ['Loma', 'Ryder']) === 'correct'
          && pr_colorway_crop_product_outcome(['Loma'], ['Loma', 'Ryder']) === 'wrong'
          && pr_colorway_crop_product_outcome(['Loma'], ['', '']) === 'blank');
+pr_check("crop tally: split by photo category, rows without one under (none)",
+         $cw_crop['by_category']['match'] === ['(none)' => ['blank' => 1, 'wrong' => 1]]
+         && $cw_crop['by_category']['e2e_unnamed'] === ['(none)' => ['correct' => 1]]);
 pr_check("crop tally: per method, conflicts, any-region, bands from match votes only",
          $cw_crop['considered'] === 3 && $cw_crop['regions'] === 4 && $cw_crop['multi_region'] === 1
          && $cw_crop['methods']['match'] === ['correct' => 0, 'wrong' => 1, 'blank' => 1]
