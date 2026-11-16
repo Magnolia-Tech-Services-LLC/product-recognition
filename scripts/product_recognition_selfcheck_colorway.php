@@ -128,4 +128,38 @@ pr_check("colorway tally: bands, per-colour and confusion from counted folder ro
          && $cw_stats['bands']['b_share'] === ['<0.7' => ['correct' => 2]]);
 pr_check("colorway summary prints every path row",
          count(array_filter(pr_colorway_report_summary($cw_stats),
-             static fn($l) => preg_match('/^(a name|b e2e) /', $l) === 1)) === 6);
+             static fn($l) => preg_match('/^(a name|b e2e) /', $l) === 1)) === 8);
+
+# Tagged set: same shoot and near-copies excluded, untagged and junk-labelled skipped.
+$cw_tagged = pr_colorway_report_split_neighbors([
+    ['resource' => 21, 'similarity' => 0.97, 'colorway' => 'Navy', 'colorway_resolved' => true],
+    ['resource' => 22, 'similarity' => 0.9, 'colorway' => '', 'colorway_resolved' => true],
+    ['resource' => 23, 'similarity' => 0.8, 'colorway' => 'Raw', 'colorway_resolved' => true],
+    ['resource' => 24, 'similarity' => 0.7, 'colorway' => 'Navy', 'colorway_resolved' => true],
+    ['resource' => 25, 'similarity' => 0.6, 'colorway' => 'Black', 'colorway_resolved' => true],
+    ['resource' => 26, 'similarity' => 0.5, 'colorway' => 'Navy', 'colorway_resolved' => true],
+], [9 => true], [24 => [9 => true]], 2);
+pr_check("tagged set: skips near-copies, untagged, junk labels and the same shoot",
+         array_column($cw_tagged['tagged'], 'resource') === [25, 26]);
+pr_check("tagged neighbours (projection): k nearest with a countable colorway, copies kept",
+         array_column(pr_colorway_report_tagged_neighbors([
+             ['resource' => 21, 'similarity' => 0.97, 'colorway' => 'Navy'],
+             ['resource' => 22, 'similarity' => 0.9, 'colorway' => ''],
+             ['resource' => 24, 'similarity' => 0.7, 'colorway' => 'Navy'],
+             ['resource' => 25, 'similarity' => 0.6, 'colorway' => 'Black'],
+         ], 2), 'resource') === [21, 24]);
+
+$cw_stats = pr_colorway_report_new_stats();
+pr_colorway_report_tally($cw_stats, $cw_row(['a_tagged' => 'Navy', 'a_tagged_share' => 0.95,
+    'a_tagged_support' => 6, 'b_tagged' => 'Black', 'b_tagged_share' => 0.85, 'tagged_counted' => true]));
+pr_colorway_report_tally($cw_stats, $cw_row(['a_tagged' => 'Navy', 'b_tagged' => 'Navy',
+    'a_tagged_share' => 0.7, 'a_tagged_support' => 2, 'b_tagged_share' => 0.7, 'tagged_counted' => false]));
+pr_check("colorway tally: tagged set counted only when full, with its own bands and colours",
+         $cw_stats['tagged_underfilled'] === 1
+         && $cw_stats['paths']['a_tagged'] === ['correct' => 1, 'wrong' => 0, 'blank' => 0]
+         && $cw_stats['paths']['b_tagged'] === ['correct' => 0, 'wrong' => 1, 'blank' => 0]
+         && $cw_stats['bands']['at_share'] === ['<=1.0' => ['correct' => 1]]
+         && $cw_stats['bands']['at_support'] === ['5+' => ['correct' => 1]]
+         && $cw_stats['bands']['bt_share'] === ['<0.9' => ['wrong' => 1]]
+         && $cw_stats['confusion_tagged'] === ["b\tNavy\tBlack" => 1]
+         && $cw_stats['by_color_tagged'] === ['navy' => ['label' => 'Navy', 'correct' => 1]]);
