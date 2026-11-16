@@ -179,18 +179,42 @@ pr_colorway_crop_tally($cw_crop, [
     'truth' => 'Navy', 'regions' => 2,
     'match' => ['colorway' => '', 'conflict' => true], 'pixel' => ['colorway' => 'Navy', 'conflict' => false],
     'match_share' => 0.0, 'match_support' => 0, 'any_match' => true, 'any_pixel' => true,
+    'named' => true, 'stored_names' => ['Loma'], 'e2e_names' => ['Loma', ''],
+    'e2e_name' => ['colorway' => 'Loma', 'conflict' => false],
+    'e2e' => ['colorway' => 'Navy', 'conflict' => false], 'e2e_name_share' => 0.8, 'e2e_share' => 0.95,
+    'e2e_support' => 6, 'any_e2e' => true,
 ]);
 pr_colorway_crop_tally($cw_crop, [
     'truth' => 'Navy', 'regions' => 1,
     'match' => ['colorway' => 'Black', 'conflict' => false], 'pixel' => ['colorway' => '', 'conflict' => false],
     'match_share' => 0.92, 'match_support' => 4, 'any_match' => false, 'any_pixel' => false,
+    'named' => true, 'stored_names' => ['Loma'], 'e2e_names' => ['Ryder'],
+    'e2e_name' => ['colorway' => 'Ryder', 'conflict' => false],
+    'e2e' => ['colorway' => '', 'conflict' => false], 'e2e_name_share' => 0.0, 'e2e_share' => 0.0,
+    'e2e_support' => 0, 'any_e2e' => false,
 ]);
+pr_colorway_crop_tally($cw_crop, [
+    'truth' => 'Black', 'regions' => 1, 'named' => false, 'stored_names' => [], 'e2e_names' => ['Ryder'],
+    'match' => ['colorway' => '', 'conflict' => false], 'pixel' => ['colorway' => '', 'conflict' => false],
+    'match_share' => 0.0, 'match_support' => 0, 'any_match' => false, 'any_pixel' => false,
+    'e2e_name' => ['colorway' => 'Ryder', 'conflict' => false], 'e2e' => ['colorway' => 'Black', 'conflict' => false],
+    'e2e_name_share' => 0.7, 'e2e_share' => 1.0, 'e2e_support' => 3, 'any_e2e' => true,
+]);
+pr_check("crop tally: end to end scores every photo, unnamed separately; product vs stored Name",
+         $cw_crop['methods']['e2e_named'] === ['correct' => 1, 'wrong' => 0, 'blank' => 1]
+         && $cw_crop['methods']['e2e_unnamed'] === ['correct' => 1, 'wrong' => 0, 'blank' => 0]
+         && $cw_crop['product'] === ['correct' => 1, 'wrong' => 1, 'blank' => 0]
+         && $cw_crop['bands']['e2e_support'] === ['5+' => ['correct' => 1], '3-4' => ['correct' => 1]]
+         && pr_colorway_crop_product_outcome(['Loma', 'Ryder'], ['ryder']) === 'correct'
+         && pr_colorway_crop_product_outcome(['Loma', 'Ryder'], ['Loma', 'Ryder']) === 'correct'
+         && pr_colorway_crop_product_outcome(['Loma'], ['Loma', 'Ryder']) === 'wrong'
+         && pr_colorway_crop_product_outcome(['Loma'], ['', '']) === 'blank');
 pr_check("crop tally: per method, conflicts, any-region, bands from match votes only",
-         $cw_crop['considered'] === 2 && $cw_crop['regions'] === 3 && $cw_crop['multi_region'] === 1
+         $cw_crop['considered'] === 3 && $cw_crop['regions'] === 4 && $cw_crop['multi_region'] === 1
          && $cw_crop['methods']['match'] === ['correct' => 0, 'wrong' => 1, 'blank' => 1]
          && $cw_crop['methods']['pixel'] === ['correct' => 1, 'wrong' => 0, 'blank' => 1]
-         && $cw_crop['conflict'] === ['match' => 1, 'pixel' => 0]
-         && $cw_crop['any'] === ['match' => 1, 'pixel' => 1]
+         && $cw_crop['conflict'] === ['match' => 1, 'pixel' => 0, 'e2e_named' => 0, 'e2e_unnamed' => 0]
+         && $cw_crop['any'] === ['match' => 1, 'pixel' => 1, 'e2e_named' => 1, 'e2e_unnamed' => 1]
          && $cw_crop['bands']['share'] === ['<=1.0' => ['wrong' => 1]]
          && $cw_crop['bands']['support'] === ['3-4' => ['wrong' => 1]]
          && $cw_crop['confusion'] === ["match\tNavy\tBlack" => 1]
