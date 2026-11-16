@@ -3842,3 +3842,4 @@ function pr_picker_preselect(string $model_name, string $colorway, array $catalo
 
 include_once __DIR__ . '/product_recognition_view.php';
 include_once __DIR__ . '/product_recognition_colorway_report.php';
+include_once __DIR__ . '/product_recognition_colorway_color.php';

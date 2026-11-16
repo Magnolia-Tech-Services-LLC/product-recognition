@@ -14,6 +14,7 @@
  *   php product_recognition_cli.php --colorway-accuracy [--limit=N]    # default 500; N=0 all
  *   php product_recognition_cli.php --colorway-projection [--limit=N]  # untagged lifestyle
  *   php product_recognition_cli.php --colorway-crops [--limit=N]       # cutouts, cached regions only
+ *   php product_recognition_cli.php --colorway-color                   # cutout color vs colorway profiles
  *   php product_recognition_cli.php --regions --resource=N [--resource=M ...]
  *   php product_recognition_cli.php --migrate-family [--dry-run]
  *   php product_recognition_cli.php --accept-certain [--dry-run]
@@ -330,6 +331,18 @@ switch ($mode) {
         }
         break;
 
+    case '--colorway-color':
+        # Read-only: cutout color against same-product colorway profiles from other shoots.
+        fputcsv(STDOUT, pr_color_header(), "\t");
+        $stats = pr_colorway_color_report(function (array $row) {
+            fputcsv(STDOUT, pr_color_fields($row), "\t");
+        });
+        foreach (pr_color_summary($stats) as $line) {
+            fwrite(STDERR, $line . "\n");
+        }
+        fwrite(STDERR, "Nothing written (read-only).\n");
+        break;
+
     case '--colorway-accuracy':
     case '--colorway-projection':
     case '--colorway-crops':
@@ -446,7 +459,7 @@ switch ($mode) {
 
     case '--help':
     case '-h':
-        fwrite(STDOUT, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
+        fwrite(STDOUT, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--colorway-color|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
         break;
 
     case '--sheet':
@@ -504,6 +517,6 @@ switch ($mode) {
 
     default:
         fwrite(STDERR, "Unknown mode: $mode\n");
-        fwrite(STDERR, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
+        fwrite(STDERR, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--colorway-color|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
         exit(1);
 }
