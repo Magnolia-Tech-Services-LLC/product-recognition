@@ -387,18 +387,35 @@ function pr_write_product_mask(string $src, array $bbox, string $dest, float $fu
     $clear = imagecolorallocatealpha($out, 0, 0, 0, 127);
     imagefill($out, 0, 0, $clear);
 
-    for ($y = $y1; $y < $y2; $y++) {
-        for ($x = $x1; $x < $x2; $x++) {
-            $rgb = imagecolorat($im, $x, $y);
+    # Background is what can be reached from the box edge through background-colored
+    # pixels. A white bag inside its own outline stays; a painted checkerboard (two
+    # border colors) goes.
+    $palette = pr_border_palette($im, $bg);
+    $is_bg = str_repeat("\0", $cw * $ch);
+    for ($y = 0; $y < $ch; $y++) {
+        for ($x = 0; $x < $cw; $x++) {
+            $rgb = imagecolorat($im, $x + $x1, $y + $y1);
             $c = [($rgb >> 16) & 255, ($rgb >> 8) & 255, $rgb & 255];
-            if (pr_colour_dist($c, $bg) <= $bg[3]) {
+            foreach ($palette as $p) {
+                if (pr_colour_dist($c, $p) <= $bg[3]) {
+                    $is_bg[$y * $cw + $x] = "\1";
+                    break;
+                }
+            }
+        }
+    }
+    $reached = pr_flood_from_edges($is_bg, $cw, $ch);
+    for ($y = 0; $y < $ch; $y++) {
+        for ($x = 0; $x < $cw; $x++) {
+            if ($reached[$y * $cw + $x] === "\1") {
                 continue;
             }
+            $rgb = imagecolorat($im, $x + $x1, $y + $y1);
             imagesetpixel(
                 $out,
-                $x - $x1,
-                $y - $y1,
-                imagecolorallocatealpha($out, (int)$c[0], (int)$c[1], (int)$c[2], 0)
+                $x,
+                $y,
+                imagecolorallocatealpha($out, ($rgb >> 16) & 255, ($rgb >> 8) & 255, $rgb & 255, 0)
             );
         }
     }
@@ -455,6 +472,93 @@ function pr_write_bbox_crop(string $src, array $bbox, string $dest): bool
 
 /** @param array{0:float,1:float,2:float} $a
  *  @param array{0:float,1:float,2:float} $b */
+/**
+ * Background colors along the frame border: the studio color plus any other neutral
+ * color that covers at least 10% of the border (the gray squares of a painted checkerboard).
+ *
+ * @param array{0:float,1:float,2:float,3:float} $bg
+ * @return list<array{0:float,1:float,2:float}>
+ */
+function pr_border_palette($im, array $bg): array
+{
+    $w = imagesx($im);
+    $h = imagesy($im);
+    $step = max(1, (int)floor(max($w, $h) / 400));
+    $samples = [];
+    for ($x = 0; $x < $w; $x += $step) {
+        $samples[] = imagecolorat($im, $x, 0);
+        $samples[] = imagecolorat($im, $x, $h - 1);
+    }
+    for ($y = 0; $y < $h; $y += $step) {
+        $samples[] = imagecolorat($im, 0, $y);
+        $samples[] = imagecolorat($im, $w - 1, $y);
+    }
+    $clusters = [];
+    foreach ($samples as $rgb) {
+        $c = [($rgb >> 16) & 255, ($rgb >> 8) & 255, $rgb & 255];
+        foreach ($clusters as $i => $cl) {
+            if (pr_colour_dist($c, [$cl[0] / $cl[3], $cl[1] / $cl[3], $cl[2] / $cl[3]]) <= $bg[3] / 2) {
+                $clusters[$i] = [$cl[0] + $c[0], $cl[1] + $c[1], $cl[2] + $c[2], $cl[3] + 1];
+                continue 2;
+            }
+        }
+        $clusters[] = [$c[0], $c[1], $c[2], 1];
+    }
+    $palette = [[$bg[0], $bg[1], $bg[2]]];
+    $total = max(1, count($samples));
+    foreach ($clusters as $cl) {
+        $mean = [$cl[0] / $cl[3], $cl[1] / $cl[3], $cl[2] / $cl[3]];
+        # A painted checkerboard alternates white with a mid gray (156 on 131083): any
+        # neutral color covering a tenth of the border is background too.
+        $neutral = max($mean) - min($mean) <= 12;
+        if ($cl[3] / $total >= 0.1 && $neutral && ($mean[0] + $mean[1] + $mean[2]) / 3 >= 120) {
+            $palette[] = $mean;
+        }
+    }
+    return $palette;
+}
+
+/**
+ * 4-connected flood over background pixels ("\1" in $mask), seeded from every
+ * background pixel on the edge of the w x h grid. Returns the reached pixels.
+ */
+function pr_flood_from_edges(string $mask, int $w, int $h): string
+{
+    $reached = str_repeat("\0", $w * $h);
+    $stack = [];
+    $seed = static function (int $i) use ($mask, &$reached, &$stack): void {
+        if ($mask[$i] === "\1" && $reached[$i] === "\0") {
+            $reached[$i] = "\1";
+            $stack[] = $i;
+        }
+    };
+    for ($x = 0; $x < $w; $x++) {
+        $seed($x);
+        $seed(($h - 1) * $w + $x);
+    }
+    for ($y = 0; $y < $h; $y++) {
+        $seed($y * $w);
+        $seed($y * $w + $w - 1);
+    }
+    while ($stack !== []) {
+        $i = array_pop($stack);
+        $x = $i % $w;
+        if ($x > 0) {
+            $seed($i - 1);
+        }
+        if ($x < $w - 1) {
+            $seed($i + 1);
+        }
+        if ($i >= $w) {
+            $seed($i - $w);
+        }
+        if ($i < ($h - 1) * $w) {
+            $seed($i + $w);
+        }
+    }
+    return $reached;
+}
+
 function pr_colour_dist(array $a, array $b): float
 {
     return max(abs($a[0] - $b[0]), abs($a[1] - $b[1]), abs($a[2] - $b[2]));
