@@ -283,3 +283,13 @@ pr_check("color tally: margin bands, one-colorway products apart, category, conf
          && $cw_cs['category']['(none)'] === ['correct' => 1]
          && $cw_cs['confusion'] === ["Lavender\tEvergreen" => 1]
          && count(pr_color_summary($cw_cs)) > 10);
+
+# --- photos whose true colorway has no reference outside the shoot ---------------------------
+$cw_ta = pr_color_new_stats();
+pr_color_tally($cw_ta, ['truth' => 'Black', 'category' => '', 'vote' => ['colorway' => 'White', 'conflict' => false],
+                        'margin' => 0.5, 'candidates' => 1, 'truth_present' => false]);
+$cw_tb = pr_colorway_crop_new_stats();
+pr_colorway_crop_tally($cw_tb, ['truth' => 'Black', 'regions' => 1, 'named' => true, 'truth_present' => false]);
+pr_check("truth-absent photos are counted apart, not scored",
+         $cw_ta['truth_absent'] === 1 && $cw_ta['scored'] === 0 && $cw_ta['cell']['wrong'] === 0
+         && $cw_tb['truth_absent'] === 1 && $cw_tb['considered'] === 0);

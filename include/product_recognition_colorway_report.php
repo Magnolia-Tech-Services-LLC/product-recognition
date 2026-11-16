@@ -840,7 +840,7 @@ function pr_colorway_crop_new_stats(): array
     $cell = ['correct' => 0, 'wrong' => 0, 'blank' => 0];
     return [
         'considered' => 0, 'truth_not_a_color' => 0, 'no_product' => 0, 'no_folder_key' => 0,
-        'no_cutout' => 0, 'regions' => 0, 'multi_region' => 0, 'tagged_underfilled' => 0,
+        'no_cutout' => 0, 'regions' => 0, 'multi_region' => 0, 'tagged_underfilled' => 0, 'truth_absent' => 0,
         'mask_missing' => 0, 'identify_failed' => 0,
         'methods' => ['match' => $cell, 'pixel' => $cell, 'e2e_named' => $cell, 'e2e_unnamed' => $cell],
         'conflict' => ['match' => 0, 'pixel' => 0, 'e2e_named' => 0, 'e2e_unnamed' => 0],
@@ -863,12 +863,21 @@ function pr_colorway_crop_new_stats(): array
  */
 function pr_colorway_crop_tally(array &$stats, array $row): void
 {
+    # No tagged neighbour carries the true colorway (the shoot exclusion can remove them
+    # all): no method could be right, so the photo is counted apart.
+    if (!($row['truth_present'] ?? true)) {
+        $stats['truth_absent']++;
+        return;
+    }
     $stats['considered']++;
     $stats['regions'] += (int)$row['regions'];
     if ((int)$row['regions'] > 1) {
         $stats['multi_region']++;
     }
     $named = (bool)$row['named'];
+    if (!$named) {
+        $stats['no_product']++;
+    }
     # match and pixel need a stored Name; e2e is split so it compares like for like with them.
     $methods = $named ? ['match', 'pixel', 'e2e_named'] : ['e2e_unnamed'];
     if ($named) {
@@ -947,6 +956,7 @@ function pr_colorway_crop_summary(array $stats): array
 {
     $pct = static fn(int $n, int $d): string => $d > 0 ? sprintf('%5.1f%%', 100 * $n / $d) : '    -';
     $lines = [];
+    $lines[] = sprintf('True colorway on no tagged neighbour outside the shoot (not scored) %d', $stats['truth_absent']);
     $lines[] = sprintf('Considered              %d', $stats['considered']);
     $lines[] = sprintf('  stored label not a color (skipped)  %d', $stats['truth_not_a_color']);
     $lines[] = sprintf('  no stored product (end to end only) %d', $stats['no_product']);
@@ -1136,13 +1146,12 @@ function pr_colorway_crop_report(int $limit, int $k, int $wide, callable $on_row
             $stats['no_cutout']++;
             continue;
         }
-        if (!$named) {
-            $stats['no_product']++;
-        }
         $pixel_model = $named ? pr_primary_tagged_model($names, $catalog) : '';
         $e2e_names = [];
         $e2e_votes = [];
         $e2e_best = ['name_share' => 0.0, 'share' => 0.0, 'support' => 0];
+        $truth_present = false;
+        $answered = false;
         $match_votes = [];
         $pixel_votes = [];
         $best_share = 0.0;
@@ -1158,6 +1167,7 @@ function pr_colorway_crop_report(int $limit, int $k, int $wide, callable $on_row
                 continue;
             }
             $failures_in_a_row = 0;
+            $answered = true;
             $neighbors = is_array($result['neighbors'] ?? null) ? $result['neighbors'] : [];
             # An uploaded image has no resource to exclude; drop the photo's own vector.
             $neighbors = array_values(array_filter(
@@ -1177,6 +1187,8 @@ function pr_colorway_crop_report(int $limit, int $k, int $wide, callable $on_row
             if (count($sets['tagged']) < $k) {
                 $stats['tagged_underfilled']++;
             }
+            $truth_present = $truth_present
+                || pr_colorway_crop_any_match($truth, array_column($sets['tagged'], 'colorway'));
             # End to end: the product from this cutout first, then the colorway among that
             # product's references. No product, no colorway.
             $agg = pr_aggregate_service_neighbors($sets['tagged'], $leaf_models);
@@ -1223,6 +1235,8 @@ function pr_colorway_crop_report(int $limit, int $k, int $wide, callable $on_row
             'e2e_share' => $e2e_best['share'],
             'e2e_support' => $e2e_best['support'],
             'any_e2e' => pr_colorway_crop_any_match($truth, $e2e_votes),
+            # No region answered: a service failure, not a missing reference; keep it scored blank.
+            'truth_present' => $truth_present || !$answered,
             'e2e_votes' => $e2e_votes,
         ];
         pr_colorway_crop_tally($stats, $row);
@@ -1236,7 +1250,7 @@ function pr_colorway_crop_header(): array
 {
     return ['resource', 'stored_colorway', 'stored_product', 'regions', 'match', 'match_share',
             'match_support', 'pixel', 'match_by_region', 'pixel_by_region',
-            'e2e_product', 'e2e', 'e2e_name_share', 'e2e_share', 'e2e_support', 'e2e_by_region', 'category'];
+            'e2e_product', 'e2e', 'e2e_name_share', 'e2e_share', 'e2e_support', 'e2e_by_region', 'category', 'truth_present'];
 }
 
 /** @return list<string> */
@@ -1248,6 +1262,6 @@ function pr_colorway_crop_fields(array $row): array
         $row['pixel']['colorway'], implode('|', $row['match_votes']), implode('|', $row['pixel_votes']),
         $row['e2e_name']['colorway'], $row['e2e']['colorway'], sprintf('%.3f', $row['e2e_name_share']),
         sprintf('%.3f', $row['e2e_share']), (string)$row['e2e_support'], implode('|', $row['e2e_votes']),
-        (string)$row['category'],
+        (string)$row['category'], $row['truth_present'] ? '1' : '0',
     ];
 }

@@ -192,7 +192,7 @@ function pr_color_new_stats(): array
     return [
         'photos' => 0, 'not_a_color' => 0, 'no_name' => 0, 'no_regions' => 0, 'no_alpha_cutout' => 0,
         'no_folder_key' => 0,
-        'no_profile' => 0, 'scored' => 0, 'single_candidate' => 0,
+        'no_profile' => 0, 'scored' => 0, 'single_candidate' => 0, 'truth_absent' => 0,
         'cell' => ['correct' => 0, 'wrong' => 0, 'blank' => 0], 'conflict' => 0,
         'margin' => [], 'category' => [], 'by_color' => [], 'confusion' => [],
     ];
@@ -204,6 +204,10 @@ function pr_color_new_stats(): array
  */
 function pr_color_tally(array &$stats, array $row): void
 {
+    if (!($row['truth_present'] ?? true)) {
+        $stats['truth_absent']++;
+        return;
+    }
     $stats['scored']++;
     if ($row['candidates'] === 1) {
         $stats['single_candidate']++;
@@ -248,6 +252,7 @@ function pr_color_summary(array $stats): array
     $lines[] = sprintf('  no masked cutout, rectangle only (skipped) %d', $stats['no_alpha_cutout']);
     $lines[] = sprintf('  no folder key (skipped)                   %d', $stats['no_folder_key']);
     $lines[] = sprintf('  no profile for the product (skipped)      %d', $stats['no_profile']);
+    $lines[] = sprintf('  true colorway has no profile outside the shoot (not scored) %d', $stats['truth_absent']);
     $lines[] = sprintf('  scored %d (product with one known colorway: %d; regions disagree: %d)',
         $stats['scored'], $stats['single_candidate'], $stats['conflict']);
     $lines[] = '';
@@ -373,6 +378,9 @@ function pr_colorway_color_report(callable $on_row): array
             'candidates' => max(array_column($picks, 'candidates')),
             'support' => $vote['colorway'] === '' ? 0 : min(array_column($picks, 'support')),
             'picks' => array_column($picks, 'colorway'),
+            # The shoot exclusion can remove every profile of the true colorway; such a
+            # photo cannot be right and says nothing about the color measurement.
+            'truth_present' => isset($profiles[pr_fold_label($item['colorway'])]),
         ];
         pr_color_tally($stats, $row);
         $on_row($row);
@@ -384,7 +392,7 @@ function pr_colorway_color_report(callable $on_row): array
 function pr_color_header(): array
 {
     return ['resource', 'stored_colorway', 'stored_product', 'category', 'regions', 'voted',
-            'margin', 'candidates', 'support', 'by_region'];
+            'margin', 'candidates', 'support', 'by_region', 'truth_present'];
 }
 
 /** @return list<string> */
@@ -393,6 +401,6 @@ function pr_color_fields(array $row): array
     return [
         (string)$row['resource'], $row['truth'], $row['product'], $row['category'], (string)$row['regions'],
         $row['vote']['colorway'], sprintf('%.3f', $row['margin']), (string)$row['candidates'],
-        (string)$row['support'], implode('|', $row['picks']),
+        (string)$row['support'], implode('|', $row['picks']), $row['truth_present'] ? '1' : '0',
     ];
 }
