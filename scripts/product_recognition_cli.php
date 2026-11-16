@@ -350,8 +350,9 @@ switch ($mode) {
         }
         if ($mode === '--colorway-accuracy') {
             fputcsv(STDOUT, pr_colorway_report_header(), "\t");
-            # Wide enough that k neighbours survive dropping a whole shoot folder.
-            $stats = pr_colorway_accuracy_report($limit, $k, max(50, 5 * $k), function (array $row) {
+            # Wide enough that k neighbours survive dropping a whole shoot: live, a test photo
+            # shares its shoot with 821 references on average and up to 1,835.
+            $stats = pr_colorway_accuracy_report($limit, $k, max(2000, 5 * $k), function (array $row) {
                 fputcsv(STDOUT, pr_colorway_report_fields($row), "\t");
             });
             fwrite(STDERR, sprintf("Limit %s, k %d\n", $limit === 0 ? 'all' : (string)$limit, $k));

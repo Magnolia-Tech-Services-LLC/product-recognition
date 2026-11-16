@@ -10,10 +10,14 @@
  * Two neighbour sets per photo, because self-exclusion alone overstated model accuracy
  * before (97% leave-one-out against 43% agreement on lifestyle shots):
  *   self    the k nearest references other than the photo itself (what production sees)
- *   folder  the k nearest references that share neither the photo's Folder Path leaf nor
- *           that leaf's parent, so a sibling from the same shoot (Navy/Raw next to
- *           Navy/Selects), tagged from the same folder name, cannot vote. This errs toward
- *           dropping too much, which makes the folder figure conservative
+ *   folder  the k nearest references that do not sit under one of the photo's folder keys
+ *           (its deepest Folder Path folder or that folder's parent, see
+ *           pr_colorway_report_folder_keys), so a sibling from the same shoot (Navy/Raw next
+ *           to Navy/Selects, or deeper in Navy/Selects/Final), tagged from the same folder
+ *           name, cannot vote. It errs toward dropping too much. A shoot can hold hundreds of references, so
+ *           the CLI asks /identify for a wide list; a photo left with fewer than k folder
+ *           neighbours, or with no folder key, is counted apart and kept out of the folder
+ *           figures and bands
  *
  * Two vote paths, because they would write different photos:
  *   a  Name known: pr_voted_colorway_for_names with the photo's stored product leaf
@@ -24,7 +28,10 @@
  */
 
 const PR_COLORWAY_REPORT_SHARE_BANDS = [0.6, 0.7, 0.8, 0.9, 1.01];
-const PR_COLORWAY_REPORT_SIMILARITY_BANDS = [0.4, 0.5, 0.6, 0.7, 0.8, 1.01];
+const PR_COLORWAY_REPORT_SIMILARITY_BANDS = [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.01];
+# A folder-set nearest neighbour at or above this is likely a copy of the same file filed
+# elsewhere, carrying the same filename-derived colorway. Reported with and without.
+const PR_COLORWAY_REPORT_NEAR_DUPLICATE = 0.95;
 
 /**
  * correct, wrong or blank. A stored label is compared folded, as the vote folds.
@@ -47,20 +54,63 @@ function pr_colorway_report_band(float $value, array $edges): string
 {
     foreach ($edges as $edge) {
         if ($value < $edge) {
-            return $edge > 1.0 ? '<=1.0' : sprintf('<%.1f', $edge);
+            return $edge > 1.0 ? '<=1.0' : '<' . $edge;
         }
     }
     return '<=1.0';
 }
 
 /**
+ * Support band: how many neighbours carried the winning colorway.
+ */
+function pr_colorway_report_support_band(int $support): string
+{
+    if ($support >= 5) {
+        return '5+';
+    }
+    return $support >= 3 ? '3-4' : (string)$support;
+}
+
+/**
+ * Folder keys for one photo from its Folder Path nodes. A photo carries its whole path
+ * (each ancestor folder too), so the photo's own folder is the deepest one: a node that is
+ * not the parent of another node on the same photo. Keys are those folders and their
+ * parents. No nodes, no keys.
+ *
+ * @param list<array{ref:int, parent:int}> $nodes
+ * @return array<int,true>
+ */
+function pr_colorway_report_folder_keys(array $nodes): array
+{
+    $parents = [];
+    foreach ($nodes as $node) {
+        $parents[(int)$node['parent']] = true;
+    }
+    $keys = [];
+    foreach ($nodes as $node) {
+        $ref = (int)$node['ref'];
+        if ($ref <= 0 || isset($parents[$ref])) {
+            continue;
+        }
+        $keys[$ref] = true;
+        if ((int)$node['parent'] > 0) {
+            $keys[(int)$node['parent']] = true;
+        }
+    }
+    return $keys;
+}
+
+/**
  * Split /identify neighbours (already self-excluded, nearest first) into the two sets.
- * A neighbour is dropped from the folder set when it shares any folder key (a Folder Path
- * leaf or its parent, see pr_colorway_report_facts) with the query photo. A query with no folder leaf drops nothing.
+ * A neighbour is dropped from the folder set when any folder on its path (it carries every
+ * ancestor) is one of the query photo's keys (pr_colorway_report_folder_keys), so a
+ * neighbour deeper in the same shoot is dropped too. A query with no key drops nothing;
+ * the caller keeps such a photo out of the folder figures. Counting stops once both sets
+ * are full, so 'dropped' is the same-shoot neighbours passed over, not all of them.
  *
  * @param list<array{resource?:int}> $neighbors
- * @param array<int,true> $query_folders folder leaf node => true
- * @param array<int,array<int,true>> $folders_by_resource
+ * @param array<int,true> $query_folders folder key node => true
+ * @param array<int,array<int,true>> $folders_by_resource every Folder Path node per resource
  * @return array{self:list<array>, folder:list<array>, dropped:int}
  */
 function pr_colorway_report_split_neighbors(array $neighbors, array $query_folders,
@@ -99,24 +149,29 @@ function pr_colorway_report_split_neighbors(array $neighbors, array $query_folde
  * @param list<array> $neighbors
  * @param array<int,string> $leaf_models
  * @param list<string> $names stored product leaf names on the photo
- * @return array{a:?string, a_share:float, b:string, b_name:string}
+ * @return array{a:?string, a_share:float, a_support:int, b:string, b_name:string, b_share:float}
  */
 function pr_colorway_report_votes(array $neighbors, array $leaf_models, array $names): array
 {
     $a = null;
     $a_share = 0.0;
+    $a_support = 0;
     if ($names !== []) {
         $detail = pr_voted_colorway_detail_for_names($neighbors, $leaf_models, $names);
         $a = $detail['colorway'];
         $a_share = $detail['share'];
+        $a_support = $detail['support'];
     }
     # pr_aggregate_neighbors leaves name and colorway blank unless a Name won.
     $agg = pr_aggregate_service_neighbors($neighbors, $leaf_models);
     return [
         'a' => $a,
         'a_share' => $a_share,
+        'a_support' => $a_support,
         'b' => (string)$agg['colorway'],
         'b_name' => (string)$agg['name'],
+        # Name share is what gates path b: its colorway exists only after a Name won.
+        'b_share' => (string)$agg['name'] !== '' ? (float)$agg['name_share'] : 0.0,
     ];
 }
 
@@ -131,23 +186,30 @@ function pr_colorway_report_new_stats(): array
         'truth_not_a_color' => 0,
         'no_vector' => 0,
         'no_model' => 0,
+        'no_folder_key' => 0,
+        'folder_underfilled' => 0,
         'dropped_same_folder' => 0,
         'paths' => [
-            'a_self' => $cell, 'a_folder' => $cell,
-            'b_self' => $cell, 'b_folder' => $cell,
+            'a_self' => $cell, 'a_folder' => $cell, 'a_folder_nodup' => $cell,
+            'b_self' => $cell, 'b_folder' => $cell, 'b_folder_nodup' => $cell,
         ],
-        'share_bands' => [],
-        'similarity_bands' => [],
+        'bands' => [
+            'a_share' => [], 'a_support' => [], 'a_similarity' => [], 'b_share' => [],
+        ],
+        'by_color' => [],
         'confusion' => [],
     ];
 }
 
 /**
- * Count one photo. $row carries truth and, per path and set, the voted colorway
- * (null for path a when the photo has no stored product).
+ * Count one photo. $row carries truth and, per path and set, the voted colorway (null for
+ * path a when the photo has no stored product). Folder figures, bands, per-colour and
+ * confusion count only rows with a folder key and a full folder set ('folder_counted').
  *
  * @param array{truth:string, a_self:?string, a_folder:?string, b_self:string, b_folder:string,
- *              a_folder_share:float, folder_top_similarity:float, dropped:int} $row
+ *              a_folder_share:float, a_folder_support:int, b_folder_share:float,
+ *              folder_top_similarity:float, dropped:int, has_folder_key:bool,
+ *              folder_counted:bool} $row
  */
 function pr_colorway_report_tally(array &$stats, array $row): void
 {
@@ -156,28 +218,51 @@ function pr_colorway_report_tally(array &$stats, array $row): void
     if ($row['a_self'] === null) {
         $stats['no_model']++;
     }
-    $outcomes = [];
-    foreach (['a_self', 'a_folder', 'b_self', 'b_folder'] as $key) {
-        if ($row[$key] === null) {
+    if (!$row['has_folder_key']) {
+        $stats['no_folder_key']++;
+    } elseif (!$row['folder_counted']) {
+        $stats['folder_underfilled']++;
+    }
+    $near_duplicate = (float)$row['folder_top_similarity'] >= PR_COLORWAY_REPORT_NEAR_DUPLICATE;
+    $add = static function (string $key, string $outcome) use (&$stats): void {
+        $stats['paths'][$key][$outcome]++;
+    };
+    $band = static function (string $table, string $label, string $outcome) use (&$stats): void {
+        $stats['bands'][$table][$label][$outcome] = ($stats['bands'][$table][$label][$outcome] ?? 0) + 1;
+    };
+    foreach (['a', 'b'] as $path) {
+        $self = $row[$path . '_self'];
+        if ($self !== null) {
+            $add($path . '_self', pr_colorway_report_outcome($row['truth'], (string)$self));
+        }
+        $voted = $row[$path . '_folder'];
+        if ($voted === null || !$row['folder_counted']) {
             continue;
         }
-        $outcome = pr_colorway_report_outcome($row['truth'], (string)$row[$key]);
-        $outcomes[$key] = $outcome;
-        $stats['paths'][$key][$outcome]++;
-        if ($outcome === 'wrong' && ($key === 'a_folder' || $key === 'b_folder')) {
-            $pair = $key[0] . "\t" . $row['truth'] . "\t" . $row[$key];
+        $outcome = pr_colorway_report_outcome($row['truth'], (string)$voted);
+        $add($path . '_folder', $outcome);
+        if (!$near_duplicate) {
+            $add($path . '_folder_nodup', $outcome);
+        }
+        if ($outcome === 'wrong') {
+            $pair = $path . "\t" . $row['truth'] . "\t" . $voted;
             $stats['confusion'][$pair] = ($stats['confusion'][$pair] ?? 0) + 1;
         }
-    }
-    if (isset($outcomes['a_folder'])) {
-        $outcome = $outcomes['a_folder'];
-        if ($outcome !== 'blank') {
-            $band = pr_colorway_report_band((float)$row['a_folder_share'], PR_COLORWAY_REPORT_SHARE_BANDS);
-            $stats['share_bands'][$band][$outcome] = ($stats['share_bands'][$band][$outcome] ?? 0) + 1;
-            $band = pr_colorway_report_band(
-                (float)$row['folder_top_similarity'], PR_COLORWAY_REPORT_SIMILARITY_BANDS
-            );
-            $stats['similarity_bands'][$band][$outcome] = ($stats['similarity_bands'][$band][$outcome] ?? 0) + 1;
+        if ($path === 'a') {
+            # Folded, as outcomes are: "Navy" and "navy" are one row, shown by the first spelling.
+            $fold = pr_fold_label($row['truth']);
+            $stats['by_color'][$fold]['label'] ??= $row['truth'];
+            $stats['by_color'][$fold][$outcome] = ($stats['by_color'][$fold][$outcome] ?? 0) + 1;
+        }
+        if ($outcome === 'blank') {
+            continue;
+        }
+        if ($path === 'a') {
+            $band('a_share', pr_colorway_report_band((float)$row['a_folder_share'], PR_COLORWAY_REPORT_SHARE_BANDS), $outcome);
+            $band('a_support', pr_colorway_report_support_band((int)$row['a_folder_support']), $outcome);
+            $band('a_similarity', pr_colorway_report_band((float)$row['folder_top_similarity'], PR_COLORWAY_REPORT_SIMILARITY_BANDS), $outcome);
+        } else {
+            $band('b_share', pr_colorway_report_band((float)$row['b_folder_share'], PR_COLORWAY_REPORT_SHARE_BANDS), $outcome);
         }
     }
 }
@@ -192,33 +277,54 @@ function pr_colorway_report_summary(array $stats): array
     $pct = static fn(int $n, int $d): string => $d > 0 ? sprintf('%5.1f%%', 100 * $n / $d) : '    -';
     $lines = [];
     $lines[] = sprintf('Considered              %d', $stats['considered']);
-    $lines[] = sprintf('  stored label not a color (skipped)  %d', $stats['truth_not_a_color']);
-    $lines[] = sprintf('  no vector at the service (skipped)  %d', $stats['no_vector']);
-    $lines[] = sprintf('  no stored product (path a n/a)      %d', $stats['no_model']);
-    $lines[] = sprintf('  same-folder neighbours dropped      %d', $stats['dropped_same_folder']);
+    $lines[] = sprintf('  stored label not a color (skipped)    %d', $stats['truth_not_a_color']);
+    $lines[] = sprintf('  no vector at the service (skipped)    %d', $stats['no_vector']);
+    $lines[] = sprintf('  no stored product (path a n/a)        %d', $stats['no_model']);
+    $lines[] = sprintf('  no folder key (self figures only)     %d', $stats['no_folder_key']);
+    $lines[] = sprintf('  fewer than k folder neighbours (same) %d', $stats['folder_underfilled']);
+    $lines[] = sprintf('  same-shoot neighbours passed over     %d', $stats['dropped_same_folder']);
     $lines[] = '';
-    $lines[] = 'path     set     voted  correct  wrong  blank  precision  coverage';
+    $lines[] = 'path     set         voted  correct  wrong  blank  precision  coverage';
+    $sets = ['self' => 'self', 'folder' => 'folder', 'folder_nodup' => 'folder<' . PR_COLORWAY_REPORT_NEAR_DUPLICATE];
     foreach ($stats['paths'] as $key => $cell) {
         $voted = $cell['correct'] + $cell['wrong'];
         $all = $voted + $cell['blank'];
-        [$path, $set] = explode('_', $key);
+        $path = $key[0];
+        $set = $sets[substr($key, 2)] ?? substr($key, 2);
         $lines[] = sprintf(
-            '%-8s %-7s %5d  %7d  %5d  %5d  %9s  %8s',
+            '%-8s %-11s %5d  %7d  %5d  %5d  %9s  %8s',
             $path === 'a' ? 'a name' : 'b e2e', $set, $voted,
             $cell['correct'], $cell['wrong'], $cell['blank'],
             $pct($cell['correct'], $voted), $pct($voted, $all)
         );
     }
-    foreach (['share_bands' => 'vote share', 'similarity_bands' => 'top similarity'] as $key => $title) {
+    $titles = [
+        'a_share' => 'path a, folder set, by colorway vote share',
+        'a_support' => 'path a, folder set, by neighbours carrying the winner',
+        'a_similarity' => 'path a, folder set, by top similarity',
+        'b_share' => 'path b, folder set, by Name share',
+    ];
+    foreach ($titles as $key => $title) {
         $lines[] = '';
-        $lines[] = "path a, folder set, by $title: band  correct  wrong  precision";
-        $bands = $stats[$key];
+        $lines[] = "$title: band  correct  wrong  precision";
+        $bands = $stats['bands'][$key];
         ksort($bands);
-        foreach ($bands as $band => $cell) {
+        foreach ($bands as $label => $cell) {
             $c = (int)($cell['correct'] ?? 0);
             $w = (int)($cell['wrong'] ?? 0);
-            $lines[] = sprintf('  %-6s %7d  %5d  %9s', $band, $c, $w, $pct($c, $c + $w));
+            $lines[] = sprintf('  %-6s %7d  %5d  %9s', $label, $c, $w, $pct($c, $c + $w));
         }
+    }
+    $lines[] = '';
+    $lines[] = 'Path a, folder set, by stored colorway (top 15): correct  wrong  blank  precision';
+    $by_color = $stats['by_color'];
+    $total = static fn(array $cell): int
+        => (int)($cell['correct'] ?? 0) + (int)($cell['wrong'] ?? 0) + (int)($cell['blank'] ?? 0);
+    uasort($by_color, static fn($x, $y) => $total($y) <=> $total($x));
+    foreach (array_slice($by_color, 0, 15, true) as $cell) {
+        $c = (int)($cell['correct'] ?? 0);
+        $w = (int)($cell['wrong'] ?? 0);
+        $lines[] = sprintf('  %-22s %7d  %5d  %5d  %9s', $cell['label'], $c, $w, (int)($cell['blank'] ?? 0), $pct($c, $c + $w));
     }
     $lines[] = '';
     $lines[] = 'Most common wrong votes, folder set (path, stored, voted, count):';
@@ -282,16 +388,17 @@ function pr_colorway_report_photos(bool $tagged, int $limit): array
 }
 
 /**
- * Single colorway leaf (blank for none or several) and Folder Path leaves, for a batch of
- * resources in two queries.
+ * Single colorway leaf (blank for none or several), folder keys
+ * (pr_colorway_report_folder_keys) and every Folder Path node, for a batch of resources in
+ * two queries.
  *
  * @param list<int> $resources
- * @return array{colorway:array<int,string>, folders:array<int,array<int,true>>}
+ * @return array{colorway:array<int,string>, folders:array<int,array<int,true>>, paths:array<int,array<int,true>>}
  */
 function pr_colorway_report_facts(array $resources): array
 {
     $resources = array_values(array_unique(array_filter(array_map('intval', $resources))));
-    $out = ['colorway' => [], 'folders' => []];
+    $out = ['colorway' => [], 'folders' => [], 'paths' => []];
     if ($resources === []) {
         return $out;
     }
@@ -312,16 +419,20 @@ function pr_colorway_report_facts(array $resources): array
     }
     $folderpath = pr_field_ref_by_name('folderpath');
     if ($folderpath > 0) {
+        $nodes = [];
         foreach (ps_query(
             "SELECT rn.resource, n.ref, n.parent FROM resource_node rn
-               JOIN node n ON n.ref = rn.node AND n.resource_type_field = ? AND $leaf
+               JOIN node n ON n.ref = rn.node AND n.resource_type_field = ?
               WHERE rn.resource IN ($in)",
             array_merge(['i', $folderpath], ps_param_fill($resources, 'i'))
         ) as $row) {
-            # Leaf and its parent: Shoot/Navy/Raw and Shoot/Navy/Selects are one shoot.
-            $out['folders'][(int)$row['resource']][(int)$row['ref']] = true;
-            if ((int)$row['parent'] > 0) {
-                $out['folders'][(int)$row['resource']][(int)$row['parent']] = true;
+            $nodes[(int)$row['resource']][] = ['ref' => (int)$row['ref'], 'parent' => (int)$row['parent']];
+            $out['paths'][(int)$row['resource']][(int)$row['ref']] = true;
+        }
+        foreach ($nodes as $resource => $list) {
+            $keys = pr_colorway_report_folder_keys($list);
+            if ($keys !== []) {
+                $out['folders'][$resource] = $keys;
             }
         }
     }
@@ -383,6 +494,10 @@ function pr_colorway_accuracy_report(int $limit, int $k, int $wide, callable $on
     $leaf_models = pr_leaf_models();
     $product_field = pr_product_field();
     $stats = pr_colorway_report_new_stats();
+    # Facts per resource, kept across photos: each photo pulls up to $wide neighbours from
+    # the same reference set, so most lookups repeat. colorway has an entry per looked-up
+    # resource; folders only for a resource with a key.
+    $facts = ['colorway' => [], 'folders' => [], 'paths' => []];
 
     foreach (pr_colorway_report_photos(true, $limit) as $photo) {
         $resource = $photo['resource'];
@@ -399,11 +514,16 @@ function pr_colorway_accuracy_report(int $limit, int $k, int $wide, callable $on
         $neighbors = is_array($result['neighbors'] ?? null) ? $result['neighbors'] : [];
         $refs = array_map(static fn($n) => (int)($n['resource'] ?? 0), $neighbors);
         $refs[] = $resource;
-        $facts = pr_colorway_report_facts($refs);
+        $missing = array_filter($refs, static fn(int $r): bool => !isset($facts['colorway'][$r]));
+        if ($missing !== []) {
+            $new = pr_colorway_report_facts($missing);
+            $facts['colorway'] += $new['colorway'];
+            $facts['folders'] += $new['folders'];
+            $facts['paths'] += $new['paths'];
+        }
         $neighbors = pr_colorway_report_with_colorways($neighbors, $facts['colorway']);
-        $sets = pr_colorway_report_split_neighbors(
-            $neighbors, $facts['folders'][$resource] ?? [], $facts['folders'], $k
-        );
+        $query_keys = $facts['folders'][$resource] ?? [];
+        $sets = pr_colorway_report_split_neighbors($neighbors, $query_keys, $facts['paths'], $k);
         $names = pr_field_leaf_names($resource, $product_field);
         $self = pr_colorway_report_votes($sets['self'], $leaf_models, $names);
         $folder = pr_colorway_report_votes($sets['folder'], $leaf_models, $names);
@@ -414,11 +534,16 @@ function pr_colorway_accuracy_report(int $limit, int $k, int $wide, callable $on
             'a_self' => $self['a'],
             'a_folder' => $folder['a'],
             'a_folder_share' => $folder['a_share'],
+            'a_folder_support' => $folder['a_support'],
             'b_self' => $self['b'],
             'b_folder' => $folder['b'],
             'b_folder_name' => $folder['b_name'],
+            'b_folder_share' => $folder['b_share'],
             'folder_top_similarity' => (float)($sets['folder'][0]['similarity'] ?? 0.0),
             'dropped' => $sets['dropped'],
+            'folder_size' => count($sets['folder']),
+            'has_folder_key' => $query_keys !== [],
+            'folder_counted' => $query_keys !== [] && count($sets['folder']) >= $k,
         ];
         pr_colorway_report_tally($stats, $row);
         $on_row($row);
@@ -441,11 +566,15 @@ function pr_colorway_report_fields(array $row): array
         $cell($row['a_self']),
         $cell($row['a_folder']),
         sprintf('%.3f', $row['a_folder_share']),
+        (string)$row['a_folder_support'],
         $row['b_self'],
         $row['b_folder'],
         $row['b_folder_name'],
+        sprintf('%.3f', $row['b_folder_share']),
         sprintf('%.3f', $row['folder_top_similarity']),
         (string)$row['dropped'],
+        (string)$row['folder_size'],
+        $row['folder_counted'] ? '1' : '0',
     ];
 }
 
@@ -454,7 +583,8 @@ function pr_colorway_report_header(): array
 {
     return [
         'resource', 'stored_colorway', 'stored_product', 'a_self', 'a_folder', 'a_folder_share',
-        'b_self', 'b_folder', 'b_folder_name', 'folder_top_similarity', 'same_folder_dropped',
+        'a_folder_support', 'b_self', 'b_folder', 'b_folder_name', 'b_folder_share',
+        'folder_top_similarity', 'same_folder_dropped', 'folder_size', 'folder_counted',
     ];
 }
 

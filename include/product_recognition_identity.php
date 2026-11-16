@@ -635,16 +635,18 @@ function pr_vote_colorway(array $neighbors): string
 }
 
 /**
- * pr_vote_colorway plus the winner's share of the total weight, so a report can band
- * by it. A blank vote reports the leading label's share (0.0 when nothing was tagged).
+ * pr_vote_colorway plus the winner's share of the total weight and its support (how many
+ * neighbours carried the winning label), so a report can band by both. A blank vote
+ * reports the leading label's share and support (0.0 and 0 when nothing was tagged).
  *
  * @param list<array{similarity?:float|int, colorway?:string}> $neighbors
- * @return array{colorway:string, share:float}
+ * @return array{colorway:string, share:float, support:int}
  */
 function pr_vote_colorway_detail(array $neighbors): array
 {
     $total = 0.0;
     $weight = [];
+    $count = [];
     $label = [];
     $label_sim = [];
     foreach ($neighbors as $neighbor) {
@@ -662,21 +664,23 @@ function pr_vote_colorway_detail(array $neighbors): array
         }
         $fold = pr_fold_label($raw);
         $weight[$fold] = ($weight[$fold] ?? 0.0) + $similarity;
+        $count[$fold] = ($count[$fold] ?? 0) + 1;
         if (!isset($label_sim[$fold]) || $similarity > $label_sim[$fold]) {
             $label[$fold] = $raw;
             $label_sim[$fold] = $similarity;
         }
     }
     if ($total <= 0.0 || $weight === []) {
-        return ['colorway' => '', 'share' => 0.0];
+        return ['colorway' => '', 'share' => 0.0, 'support' => 0];
     }
     arsort($weight);
     $fold = (string)array_key_first($weight);
     $share = $weight[$fold] / $total;
+    $support = $count[$fold];
     if ($share <= 0.5) {
-        return ['colorway' => '', 'share' => $share];
+        return ['colorway' => '', 'share' => $share, 'support' => $support];
     }
-    return ['colorway' => $label[$fold] ?? '', 'share' => $share];
+    return ['colorway' => $label[$fold] ?? '', 'share' => $share, 'support' => $support];
 }
 
 /**
@@ -914,7 +918,7 @@ function pr_voted_colorway_for_names(array $neighbors, array $leaf_models, array
  * @param list<array{model_node?:int, similarity?:float, resource?:int, colorway?:string}> $neighbors
  * @param array<int,string> $leaf_models
  * @param list<string> $names
- * @return array{colorway:string, share:float}
+ * @return array{colorway:string, share:float, support:int}
  */
 function pr_voted_colorway_detail_for_names(array $neighbors, array $leaf_models, array $names): array
 {
@@ -926,7 +930,7 @@ function pr_voted_colorway_detail_for_names(array $neighbors, array $leaf_models
         }
     }
     if ($want === []) {
-        return ['colorway' => '', 'share' => 0.0];
+        return ['colorway' => '', 'share' => 0.0, 'support' => 0];
     }
     $rows = [];
     foreach (pr_named_service_neighbors($neighbors, $leaf_models) as $row) {
