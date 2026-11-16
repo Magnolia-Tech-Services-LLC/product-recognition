@@ -49,10 +49,12 @@ pr_check("colorway vote detail: half is not a win, and the share is still report
          && pr_vote_colorway([['similarity' => 1.0, 'colorway' => 'Navy']]) === 'Navy');
 
 $cw_named = pr_named_service_neighbors(
-    [['model_node' => 7, 'similarity' => 0.9, 'resource' => 999999999, 'colorway' => '']],
+    pr_colorway_report_with_colorways(
+        [['model_node' => 7, 'similarity' => 0.9, 'resource' => 999999999]], []
+    ),
     [7 => 'Loma']
 );
-pr_check("named neighbours: a supplied blank colorway is kept, not looked up again",
+pr_check("named neighbours: a resolved blank colorway is kept, not looked up again",
          count($cw_named) === 1 && $cw_named[0]['colorway'] === '');
 
 $cw_stats = pr_colorway_report_new_stats();

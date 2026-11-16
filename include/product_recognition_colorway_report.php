@@ -358,6 +358,7 @@ function pr_colorway_report_with_colorways(array $neighbors, array $colorways): 
             continue;
         }
         $neighbor['colorway'] = $colorways[(int)($neighbor['resource'] ?? 0)] ?? '';
+        $neighbor['colorway_resolved'] = true;
         $out[] = $neighbor;
     }
     return $out;

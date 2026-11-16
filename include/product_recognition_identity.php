@@ -870,8 +870,8 @@ function pr_named_service_neighbors(array $neighbors, array $leaf_models): array
         $colorway = trim((string)($neighbor['colorway'] ?? ''));
         $resource = (int)($neighbor['resource'] ?? 0);
         # A caller that already looked colorways up (the accuracy report, in one batch)
-        # passes the key, blank included, and is not queried again per neighbor.
-        if (!array_key_exists('colorway', $neighbor) && $resource > 0) {
+        # sets colorway_resolved, and a blank is then not queried again per neighbor.
+        if ($colorway === '' && empty($neighbor['colorway_resolved']) && $resource > 0) {
             $colorway = pr_neighbor_stored_colorway($resource);
         }
         $named[] = [
