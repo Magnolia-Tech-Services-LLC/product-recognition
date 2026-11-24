@@ -335,41 +335,60 @@ function pr_bag_decide(array $query, array $colorway_keys, array $pair_keys, arr
                        array $rejected, array $cfg, array $withheld = []): array
 {
     $out = ['action' => 'none', 'match' => null, 'open_ref' => (int)($open['ref'] ?? 0), 'auto' => false, 'blocked' => ''];
-    $choice = pr_bag_choose(pr_bag_pool_result($colorway_keys), pr_bag_pool_result($pair_keys), $cfg, $rejected);
-    $seed = $choice === null ? null : ($seeds[$choice['ref']] ?? null);
-    if ($choice === null || $seed === null) {
+    $by_colorway = pr_bag_pool_result($colorway_keys);
+    $by_pair = pr_bag_pool_result($pair_keys);
+
+    # What one choice would do on this photo: its row, its plan, whether the pass may write it unattended.
+    $assess = static function (?array $choice) use ($query, $seeds, $cfg, $withheld): ?array {
+        $seed = $choice === null ? null : ($seeds[$choice['ref']] ?? null);
+        if ($choice === null || $seed === null) {
+            return null;
+        }
+        $same_shoot = $choice['gate'] === 'pair' || ($seed['shoot'] !== '' && $seed['shoot'] === $query['shoot']);
+        $plan = pr_bag_write_plan($query['photo'], $choice['name_node'], $choice['colorway_node']);
+        return [
+            'match' => [
+                'gate' => $choice['gate'], 'seed_ref' => $choice['ref'], 'name_node' => $choice['name_node'],
+                'colorway_node' => $choice['colorway_node'], 'similarity' => $choice['similarity'],
+                'margin' => $choice['margin'], 'same_shoot' => $same_shoot,
+            ],
+            'blocked' => $plan['blocked'],
+            # The photo already says exactly this, or nothing could ever be written: not worth a row.
+            'void' => in_array($plan['blocked'], ['no_product', 'no_colorway'], true)
+                || ($plan['blocked'] === '' && !$plan['add_name'] && !$plan['add_colorway']),
+            'auto' => $choice['passes'] && $plan['blocked'] === ''
+                && pr_bag_auto_ok($choice['gate'], $query['photo'], (int)$seed['product'], $same_shoot, $cfg, $withheld),
+        ];
+    };
+    # An auto-eligible gate wins even when the other gate also passes: the two flags are independent.
+    $by_gate = [pr_bag_choose(null, $by_pair, $cfg, $rejected), pr_bag_choose($by_colorway, null, $cfg, $rejected)];
+    $picked = null;
+    foreach ($by_gate as $choice) {
+        $one = $assess($choice);
+        if ($one !== null && !$one['void'] && $one['auto']) {
+            $picked = $one;
+            break;
+        }
+    }
+    # Otherwise the usual preference, falling to the other gate if the preferred row is void.
+    if ($picked === null) {
+        foreach ([pr_bag_choose($by_colorway, $by_pair, $cfg, $rejected), $by_gate[0], $by_gate[1]] as $choice) {
+            $one = $assess($choice);
+            if ($one !== null && !$one['void']) {
+                $picked = $one;
+                break;
+            }
+        }
+    }
+    if ($picked === null) {
         $out['action'] = $open === null ? 'none' : 'close';
         return $out;
     }
-    $same_shoot = $choice['gate'] === 'pair' || ($seed['shoot'] !== '' && $seed['shoot'] === $query['shoot']);
-    $match = [
-        'gate' => $choice['gate'],
-        'seed_ref' => $choice['ref'],
-        'name_node' => $choice['name_node'],
-        'colorway_node' => $choice['colorway_node'],
-        'similarity' => $choice['similarity'],
-        'margin' => $choice['margin'],
-        'same_shoot' => $same_shoot,
-    ];
-    $plan = pr_bag_write_plan($query['photo'], $match['name_node'], $match['colorway_node']);
-    if (in_array($plan['blocked'], ['no_product', 'no_colorway'], true)) {
-        # Product unknown and not inheritable: nothing could ever be written, so nothing is opened.
-        $out['action'] = $open === null ? 'none' : 'close';
-        $out['blocked'] = $plan['blocked'];
-        return $out;
-    }
-    if ($plan['blocked'] === '' && !$plan['add_name'] && !$plan['add_colorway']) {
-        # The photo already says exactly this. Nothing to suggest, nothing to write.
-        $out['action'] = $open === null ? 'none' : 'close';
-        return $out;
-    }
+    $match = $picked['match'];
     $out['match'] = $match;
-    $out['blocked'] = $plan['blocked'];
-    $out['auto'] = $choice['passes'] && $plan['blocked'] === ''
-        && pr_bag_auto_ok($choice['gate'], $query['photo'], (int)$seed['product'], $same_shoot, $cfg, $withheld);
-    if ($open === null) {
-        $out['action'] = 'insert';
-    } elseif ((int)$open['seed_ref'] === $match['seed_ref'] && (int)$open['colorway_node'] === $match['colorway_node']
+    $out['blocked'] = $picked['blocked'];
+    $out['auto'] = $picked['auto'];
+    if ($open !== null && (int)$open['seed_ref'] === $match['seed_ref'] && (int)$open['colorway_node'] === $match['colorway_node']
         && ($open['name_node'] === null ? null : (int)$open['name_node']) === $match['name_node']) {
         $out['action'] = 'update';
     } else {

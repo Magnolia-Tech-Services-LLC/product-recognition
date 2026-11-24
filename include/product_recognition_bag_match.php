@@ -14,10 +14,31 @@
 
 include_once __DIR__ . '/product_recognition_bag_gates.php';
 
-/** True when the pieces matching needs exist: the product field and a colorway field. */
+/**
+ * True when the three tables exist. dbstruct creates them when the plugin's structures are
+ * checked, which can come after the code is deployed; until then the hot paths (a region
+ * commit, a resource delete, every resource view) must not touch them.
+ */
+function pr_bag_tables_exist(): bool
+{
+    static $exists = null;
+    if ($exists !== null) {
+        return $exists;
+    }
+    $exists = (int)ps_value(
+        "SELECT COUNT(*) AS value FROM information_schema.TABLES
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME IN ('product_bag_tag', 'product_cutout_feature', 'product_bag_match')",
+        [],
+        0
+    ) === 3;
+    return $exists;
+}
+
+/** True when matching can run: the tables, the product field and a colorway field. */
 function pr_bag_enabled(): bool
 {
-    return pr_is_configured() && (int)($GLOBALS['product_recognition_colorway_field'] ?? 0) > 0;
+    return pr_bag_tables_exist() && pr_is_configured() && (int)($GLOBALS['product_recognition_colorway_field'] ?? 0) > 0;
 }
 
 /** Folder Path field: two photos are the same shoot when their node sets under it are equal. */
@@ -175,7 +196,7 @@ function pr_bag_post_json(string $path, array $body, int $timeout = 600): ?array
     $response = curl_exec($ch);
     $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $err = curl_error($ch);
-    curl_close($ch);
+    # No curl_close(): a no-op since PHP 8.0 and deprecated in 8.5. The handle frees on scope exit.
     if ($response === false || $status !== 200) {
         logScript("product_recognition: POST $path failed (HTTP $status) $err");
         return null;
@@ -237,6 +258,9 @@ function pr_bag_store_features(int $resource, int $region, string $checksum, arr
  */
 function pr_bag_forget_cutouts(int $resource): void
 {
+    if (!pr_bag_tables_exist()) {
+        return;
+    }
     ps_query('DELETE FROM product_cutout_feature WHERE resource = ?', ['i', $resource]);
     ps_query("UPDATE product_bag_match SET state = 'superseded', decided_at = NOW()
                WHERE resource = ? AND state = 'open'", ['i', $resource]);
@@ -248,6 +272,9 @@ function pr_bag_forget_cutouts(int $resource): void
  */
 function pr_bag_forget_resource(int $resource): void
 {
+    if (!pr_bag_tables_exist()) {
+        return;
+    }
     ps_query("UPDATE product_bag_match SET state = 'superseded', decided_at = NOW()
                WHERE state = 'open' AND seed_ref IN (SELECT ref FROM product_bag_tag WHERE resource = ?)",
              ['i', $resource]);
@@ -272,6 +299,7 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
     $cursor = (int)get_sysvar('product_recognition_bag_feature_position', 0);
     $wrapped = false;
     $budget = $limit;
+    $done = [];       # a wrap must not visit a resource twice in one run
     $sql = "SELECT pr.resource, pr.bbox, pr.checksum AS stamp, r.file_checksum
               FROM product_region pr JOIN resource r ON r.ref = pr.resource AND r.archive >= 0
              WHERE pr.resource > ? AND pr.bbox <> ''
@@ -294,6 +322,10 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
             $resource = (int)$row['resource'];
             $checksum = (string)$row['file_checksum'];
             $cursor = $resource;
+            if (isset($done[$resource])) {
+                continue;
+            }
+            $done[$resource] = true;
             $stats['scanned']++;
             if ((string)$row['stamp'] !== pr_region_stamp($checksum)) {
                 continue;
@@ -1013,4 +1045,148 @@ function pr_bag_nightly(): array
         $match = ['error' => 'bag match threw: ' . $e->getMessage()];
     }
     return ['features' => $features, 'match' => $match];
+}
+
+# ---------------------------------------------------------------------------------------------
+# Screens: the resource panel and the review tab
+# ---------------------------------------------------------------------------------------------
+
+/**
+ * What the panel shows beside each cutout of one photo: the seed a person saved for it, and an
+ * open match found for it.
+ *
+ * @return array<int,array{seed:?array{product:string,colorway:string},match:?array{ref:int,product:string,colorway:string,similarity:float}}>
+ */
+function pr_bag_panel_state(int $resource, string $checksum): array
+{
+    $out = [];
+    foreach (ps_query(
+        "SELECT t.region_index, nn.name AS product, cn.name AS colorway
+           FROM product_bag_tag t
+           JOIN node nn ON nn.ref = t.name_node JOIN node cn ON cn.ref = t.colorway_node
+          WHERE t.resource = ? AND t.file_checksum = ?",
+        ['i', $resource, 's', $checksum]
+    ) as $row) {
+        $out[(int)$row['region_index']]['seed'] = ['product' => (string)$row['product'], 'colorway' => (string)$row['colorway']];
+    }
+    foreach (ps_query(
+        "SELECT m.ref, m.region_index, m.similarity, nn.name AS product, cn.name AS colorway
+           FROM product_bag_match m
+           LEFT JOIN node nn ON nn.ref = m.name_node JOIN node cn ON cn.ref = m.colorway_node
+          WHERE m.resource = ? AND m.file_checksum = ? AND m.state = 'open'",
+        ['i', $resource, 's', $checksum]
+    ) as $row) {
+        $out[(int)$row['region_index']]['match'] = [
+            'ref' => (int)$row['ref'], 'product' => (string)($row['product'] ?? ''),
+            'colorway' => (string)$row['colorway'], 'similarity' => (float)$row['similarity'],
+        ];
+    }
+    foreach ($out as $region => $parts) {
+        $out[$region] += ['seed' => null, 'match' => null];
+    }
+    return $out;
+}
+
+/**
+ * Open matches for the review tab, best first, with what the photo can take.
+ *
+ * @return list<array<string,mixed>>
+ */
+function pr_bag_open_matches(int $limit = 100): array
+{
+    $rows = ps_query(
+        "SELECT m.ref, m.resource, m.region_index, m.similarity, m.margin, m.same_shoot, m.seed_ref, m.name_node,
+                m.colorway_node, nn.name AS product, cn.name AS colorway,
+                t.resource AS seed_resource, t.region_index AS seed_region, t.file_checksum AS seed_checksum,
+                t.bbox AS seed_bbox, sn.name AS seed_product, sc.name AS seed_colorway
+           FROM product_bag_match m
+           JOIN product_bag_tag t ON t.ref = m.seed_ref
+           JOIN node cn ON cn.ref = m.colorway_node
+           JOIN node sn ON sn.ref = t.name_node JOIN node sc ON sc.ref = t.colorway_node
+           LEFT JOIN node nn ON nn.ref = m.name_node
+          WHERE m.state = 'open'
+          ORDER BY m.similarity DESC, m.ref LIMIT ?",
+        ['i', $limit]
+    );
+    $resources = array_values(array_unique(array_map(static fn(array $r): int => (int)$r['resource'], $rows)));
+    $states = pr_bag_load_photo_states($resources);
+    $seed_cuts = pr_bag_current_cutouts(array_values(array_unique(array_map(static fn(array $r): int => (int)$r['seed_resource'], $rows))));
+    $out = [];
+    foreach ($rows as $r) {
+        $plan = pr_bag_write_plan($states[(int)$r['resource']], $r['name_node'] === null ? null : (int)$r['name_node'], (int)$r['colorway_node']);
+        $now = $seed_cuts[(int)$r['seed_resource']] ?? null;
+        $seed_region = $now === null ? null : pr_bag_rebind([
+            'region_index' => (int)$r['seed_region'], 'file_checksum' => (string)$r['seed_checksum'],
+            'bbox' => pr_decode_bbox((string)$r['seed_bbox']) ?? [],
+        ], $now['file_checksum'], $now['bboxes']);
+        $out[] = $r + ['blocked' => $plan['blocked'], 'seed_current_region' => $seed_region,
+                       'seed_current_checksum' => $now['file_checksum'] ?? ''];
+    }
+    return $out;
+}
+
+/**
+ * The review tab body. Output is escaped here; the page owns the frame and the notices.
+ */
+function pr_bag_render_review(): void
+{
+    global $lang, $baseurl;
+
+    $rows = pr_bag_open_matches(100);
+    if ($rows === []) {
+        echo '<p>' . escape($lang['product_recognition_bag_none']) . '</p>';
+        return;
+    }
+    $review = $baseurl . '/plugins/product_recognition/pages/review.php';
+    $mask_url = static function (int $resource, int $region, string $checksum) use ($baseurl): string {
+        return generateURL($baseurl . '/plugins/product_recognition/pages/mask.php',
+                           ['ref' => $resource, 'i' => $region, 'c' => substr($checksum, 0, 12)]);
+    };
+    foreach ($rows as $r) {
+        $resource = (int)$r['resource'];
+        $cut = pr_bag_current_cutouts([$resource])[$resource] ?? ['file_checksum' => '', 'bboxes' => []];
+        $product = (string)($r['product'] ?? '') !== '' ? (string)$r['product'] : $lang['product_recognition_bag_product_on_photo'];
+        ?>
+        <div class="ListviewStyle" style="margin-bottom:1em;">
+            <div style="display:flex;gap:1em;align-items:flex-start;flex-wrap:wrap;">
+                <figure style="margin:0;">
+                    <a href="<?php echo escape($baseurl . '/pages/view.php?ref=' . $resource); ?>" target="_blank">
+                        <img src="<?php echo escape($mask_url($resource, (int)$r['region_index'], $cut['file_checksum'])); ?>"
+                             alt="" style="max-height:180px;max-width:220px;" loading="lazy" />
+                    </a>
+                    <figcaption><?php echo escape($lang['product_recognition_bag_this_cutout']); ?></figcaption>
+                </figure>
+                <figure style="margin:0;">
+                    <?php if ($r['seed_current_region'] !== null) { ?>
+                    <a href="<?php echo escape($baseurl . '/pages/view.php?ref=' . (int)$r['seed_resource']); ?>" target="_blank">
+                        <img src="<?php echo escape($mask_url((int)$r['seed_resource'], (int)$r['seed_current_region'], (string)$r['seed_current_checksum'])); ?>"
+                             alt="" style="max-height:180px;max-width:220px;" loading="lazy" />
+                    </a>
+                    <?php } ?>
+                    <figcaption><?php echo escape(sprintf($lang['product_recognition_bag_seed_caption'], $r['seed_product'], $r['seed_colorway'])); ?></figcaption>
+                </figure>
+                <div>
+                    <p><strong><?php echo escape($product); ?></strong> / <strong><?php echo escape((string)$r['colorway']); ?></strong></p>
+                    <p><?php echo escape($lang['product_recognition_bag_similarity']); ?>
+                       <?php echo escape(sprintf('%.0f%%', 100 * (float)$r['similarity'])); ?>,
+                       <?php echo escape($lang['product_recognition_bag_margin']); ?>
+                       <?php echo $r['margin'] === null ? escape($lang['product_recognition_bag_no_rival']) : escape(sprintf('%.0f%%', 100 * (float)$r['margin'])); ?>,
+                       <?php echo escape((int)$r['same_shoot'] === 1 ? $lang['product_recognition_bag_same_shoot'] : $lang['product_recognition_bag_other_shoot']); ?></p>
+                    <?php if ($r['blocked'] !== '') { ?>
+                    <p><?php echo escape($lang['product_recognition_bag_blocked_' . $r['blocked']] ?? $lang['product_recognition_bag_blocked']); ?></p>
+                    <?php } ?>
+                    <form method="post" action="<?php echo escape($review); ?>" style="display:inline;">
+                        <?php generateFormToken('pr_bag_review'); ?>
+                        <input type="hidden" name="tab" value="bags" />
+                        <input type="hidden" name="match" value="<?php echo (int)$r['ref']; ?>" />
+                        <?php if ($r['blocked'] === '') { ?>
+                        <button type="submit" name="action" value="bag_accept"><?php echo escape($lang['product_recognition_accept']); ?></button>
+                        <?php } ?>
+                        <button type="submit" name="action" value="bag_reject"><?php echo escape($lang['product_recognition_reject']); ?></button>
+                    </form>
+                </div>
+            </div>
+        </div>
+        <?php
+    }
 }

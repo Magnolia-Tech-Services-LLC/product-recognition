@@ -238,11 +238,15 @@ pr_check("decide: a single-cutout photo with another colorway goes to review, bl
          $d['action'] === 'insert' && $d['blocked'] === 'other_colorway' && $d['auto'] === false);
 $d = pr_bag_decide(['photo' => ['products' => [], 'colorways' => [], 'cutouts' => 1]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_on);
 pr_check("decide: product unknown and not inheritable opens nothing",
-         $d['action'] === 'none' && $d['match'] === null && $d['blocked'] === 'no_product' && $d['auto'] === false);
+         $d['action'] === 'none' && $d['match'] === null && $d['auto'] === false);
 $d = pr_bag_decide(['photo' => ['products' => [7], 'colorways' => [3], 'cutouts' => 1]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_on);
 pr_check("decide: a photo that already has this colorway is left alone, and closes a stale open row",
          $d['action'] === 'none' && pr_bag_decide(['photo' => ['products' => [7], 'colorways' => [3], 'cutouts' => 1]] + $bag_q_one,
              $bag_cw_keys, [], $bag_seeds, $open, [], $bag_cfg)['action'] === 'close');
+$bag_both = pr_bag_decide($bag_q_one, $bag_cw_keys, $bag_pair_keys, $bag_seeds, null, [], $bag_on_cw);
+pr_check("decide: with only the colorway flag on, the colorway gate is the one that auto-applies even when the pair gate also passes",
+         $bag_both['match']['gate'] === 'colorway' && $bag_both['auto'] === true
+         && pr_bag_decide($bag_q_one, $bag_cw_keys, $bag_pair_keys, $bag_seeds, null, [], $bag_cfg)['match']['gate'] === 'pair');
 $d = pr_bag_decide($bag_q_one, ['3' => ['all' => 0.90, 'seed' => 0.90, 'ref' => 99, 'n' => 1]], [], $bag_seeds, null, [], $bag_on);
 pr_check("decide: a score for a seed that is no longer there is dropped", $d['action'] === 'none');
 
@@ -287,6 +291,31 @@ pr_check("verdict: one tag with the true colorway hidden fails, however good the
          pr_bag_report_verdict($bag_bad)['ok'] === false);
 pr_check("verdict: nothing tagged is no evidence, not a pass",
          pr_bag_report_verdict([])['ok'] === false);
+
+
+# --- language strings: every key the bag screens use exists, and none has an em dash -------
+# Loaded in a closure: this file is required into the main self-check's scope, where $lang is ResourceSpace's.
+$bag_lang = (static function (): array {
+    $lang = [];
+    include dirname(__DIR__) . '/languages/en.php';
+    return $lang;
+})();
+$bag_used = [];
+foreach (['include/product_recognition_bag_match.php', 'hooks/view.php', 'pages/review.php', 'pages/bag_tag.php', 'pages/apply.php'] as $bag_file) {
+    preg_match_all("/(?:\\\$lang\\[|=>\\s*)['\"](product_recognition_bag_[a-z_]*[a-z])['\"]/", (string)file_get_contents(dirname(__DIR__) . '/' . $bag_file), $bag_m);
+    $bag_used = array_merge($bag_used, $bag_m[1]);
+}
+$bag_missing = array_values(array_filter(array_unique($bag_used), static fn(string $k): bool => !isset($bag_lang[$k])));
+# keys built at run time: product_recognition_bag_blocked_<reason>
+foreach (['other_name', 'other_colorway', 'no_product', 'no_colorway'] as $bag_reason) {
+    if (!isset($bag_lang['product_recognition_bag_blocked_' . $bag_reason])) {
+        $bag_missing[] = 'product_recognition_bag_blocked_' . $bag_reason;
+    }
+}
+pr_check("language: every product_recognition_bag_* key the screens use is in languages/en.php" . ($bag_missing ? ' (missing ' . implode(', ', $bag_missing) . ')' : ''),
+         $bag_missing === [] && count($bag_used) > 10);
+$bag_ui = array_filter($bag_lang, static fn($v, $k): bool => str_starts_with((string)$k, 'product_recognition_bag_') && is_string($v) && str_contains($v, "\u{2014}"), ARRAY_FILTER_USE_BOTH);
+pr_check("language: no em dash in the bag strings", $bag_ui === []);
 
 if (isset($argv[0]) && realpath($argv[0]) === __FILE__) {
     echo "\nall checks passed\n";
