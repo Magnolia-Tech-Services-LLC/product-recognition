@@ -694,6 +694,36 @@ pr_check("wiring: Accept refuses (stays open) when the seed's own mask cannot be
 pr_check("wiring: U1 on a multi-cutout photo the visible picker starts from this cutout's seed or detection, and the seed form posts what it shows",
          preg_match('/\\$region_count > 1 && \\$bag_live.*?\\$bag_seed_here.*?\\$shown_model/s', $bag_src('hooks/view.php')) === 1
          && str_contains($bag_src('hooks/view.php'), "\$bag_pre = \$pre;") && !str_contains($bag_src('hooks/view.php'), '$bag_pre = $bag_here'));
+pr_check("wiring: S1 the feature and match passes arm use_error_exception at the start, again after get_sysvar, and per page/cutout, so a SQL error throws into the finally that saves the cursor",
+         str_contains($bag_fn('pr_bag_arm_exceptions'), "\$GLOBALS['use_error_exception'] = true")
+         && preg_match("/pr_bag_arm_exceptions\\(\\);.*?get_sysvar\\('product_recognition_bag_feature_position'.*?pr_bag_arm_exceptions\\(\\);.*?foreach \\(\\\$rows as \\\$row\\) \\{\\s*pr_bag_arm_exceptions\\(\\);/s", $bag_fn('pr_bag_backfill_features')) === 1
+         && preg_match('/finally \\{.*?set_sysvar\\(.*?pr_bag_arm_exceptions/s', $bag_fn('pr_bag_backfill_features')) === 1
+         && substr_count($bag_fn('pr_bag_run_match'), 'pr_bag_arm_exceptions()') >= 4);
+$bag_funcs_src = $bag_src('include/product_recognition_functions.php');
+pr_check("wiring: S1 the process lock is also freed by a shutdown function when the run ends past its finally",
+         preg_match('/function pr_with_lock.*?\\$held = true;.*?register_shutdown_function\\(.*?clear_process_lock\\(.*?finally \\{\\s*\\$held = false;\\s*clear_process_lock/s', $bag_funcs_src) === 1);
+# Behavior of the alpha check on real files (the two functions are plain PHP, so they are run from their source).
+if (!function_exists('pr_bag_png_alpha')) {
+    eval($bag_fn('pr_bag_quiet') . "\n}\n" . $bag_fn('pr_bag_png_alpha') . "\n}\n");
+}
+$bag_png_dir = sys_get_temp_dir() . '/prbagpng' . getmypid();
+mkdir($bag_png_dir);
+$bag_png = static fn(string $name, int $color_type): string => (static function () use ($bag_png_dir, $name, $color_type): string {
+    $path = $bag_png_dir . '/' . $name;
+    file_put_contents($path, "\x89PNG\r\n\x1a\n" . pack('N', 13) . 'IHDR' . pack('NN', 8, 8) . chr(8) . chr($color_type) . str_repeat("\0", 20));
+    return $path;
+})();
+pr_check("png alpha: a header read with alpha is true, without is false, a file that is not there or too short is null (not 'unusable')",
+         pr_bag_png_alpha($bag_png('a.png', 6)) === true && pr_bag_png_alpha($bag_png('b.png', 2)) === false
+         && pr_bag_png_alpha($bag_png_dir . '/missing.png') === null
+         && (file_put_contents($bag_png_dir . '/short.png', 'PNG') !== false && pr_bag_png_alpha($bag_png_dir . '/short.png') === null));
+$bag_unreadable = $bag_png('c.png', 6);
+chmod($bag_unreadable, 0000);
+pr_check("png alpha: a mask that exists but cannot be read is null, so it is never stored as unusable",
+         posix_geteuid() === 0 || pr_bag_png_alpha($bag_unreadable) === null);
+chmod($bag_unreadable, 0644);
+array_map('unlink', glob($bag_png_dir . '/*') ?: []);
+rmdir($bag_png_dir);
 pr_check("wiring: half-applied accepts are counted (never repaired) in the match pass and in --bag-match-report",
          str_contains($bag_fn('pr_bag_half_applied'), "state = 'applied' AND decided_at IS NULL")
          && str_contains($bag_fn('pr_bag_run_match'), 'pr_bag_half_applied()') && str_contains($bag_fn('pr_bag_report'), 'pr_bag_half_applied()')

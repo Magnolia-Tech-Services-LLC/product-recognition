@@ -417,6 +417,17 @@ function pr_bag_quiet(callable $read)
     }
 }
 
+/**
+ * Make a SQL error throw instead of ending the process. ResourceSpace's errorhandler() prints a page and exits when
+ * use_error_exception is off, which no finally block survives: the feature cursor would stay where it was and the
+ * process lock would be left behind. Some helpers (get_sysvar with a warm cache, set_sysvar, debug) unset the flag,
+ * so the passes call this again after them and at each page. Callers that must restore the flag do it themselves.
+ */
+function pr_bag_arm_exceptions(): void
+{
+    $GLOBALS['use_error_exception'] = true;
+}
+
 /** The mask file's mtime as it is now (never a cached stat), null when the mask is not there or cannot be read. */
 function pr_bag_mask_stat(string $mask): ?int
 {
@@ -569,6 +580,7 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
 {
     $stats = ['computed' => 0, 'unusable' => 0, 'failed' => 0, 'skipped_no_mask' => 0, 'unverified' => 0, 'given_up' => 0, 'stale' => 0, 'service_down' => false,
               'scanned' => 0, 'last' => 0];
+    pr_bag_arm_exceptions();
     if (!$dry_run) {
         pr_bag_prepare_tables();
     }
@@ -582,6 +594,7 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
         return $stats;
     }
     $cursor = (int)get_sysvar('product_recognition_bag_feature_position', 0);
+    pr_bag_arm_exceptions();      # after get_sysvar(), which clears it when the query cache is warm
     $wrapped = false;
     $budget = $limit;
     $done = [];       # a wrap must not visit a resource twice in one run
@@ -611,6 +624,7 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
                 $stored_by_resource[(int)$f['resource']][] = $f;
             }
             foreach ($rows as $row) {
+                pr_bag_arm_exceptions();
                 $resource = (int)$row['resource'];
                 $checksum = (string)$row['file_checksum'];
                 $cursor = $resource;
@@ -706,6 +720,7 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
         $stats['last'] = $cursor;
         if (!$dry_run) {
             set_sysvar('product_recognition_bag_feature_position', (string)max(0, $cursor));
+            pr_bag_arm_exceptions();
         }
     }
     return $stats;
@@ -1146,6 +1161,7 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
     $stats = ['seeds' => 0, 'ignored_seeds' => [], 'competitors' => 0, 'considered' => 0, 'opened' => 0,
               'updated' => 0, 'closed' => 0, 'blocked' => 0, 'stale' => 0, 'missing_features' => 0, 'unverified_features' => 0, 'failed_writes' => 0, 'missing_candidates' => 0,
               'service_down' => false, 'disabled' => false];
+    pr_bag_arm_exceptions();
     if (!$dry_run) {
         pr_bag_prepare_tables();
     }
@@ -1154,6 +1170,7 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
         $stats['disabled_reason'] = pr_bag_disabled_reason();
         return $stats;
     }
+    pr_bag_arm_exceptions();
     if (!$dry_run) {
         $stats['dropped_features'] = pr_bag_drop_stale_pass($stats['unverified_features']);
     }
@@ -1163,6 +1180,7 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
         return $stats;
     }
     $cfg = pr_bag_config();
+    pr_bag_arm_exceptions();
     $loaded = pr_bag_load_seeds($cfg);
     $seeds = $loaded['usable'];
     $stats['seeds'] = count($seeds);
@@ -1249,6 +1267,7 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
 
     $after = 0;
     while (true) {
+        pr_bag_arm_exceptions();
         $cuts = pr_bag_load_cutout_page($after, $page);
         if ($cuts === []) {
             break;

@@ -2355,6 +2355,14 @@ function pr_with_lock(callable $fn): array
         return ['locked' => true];
     }
     set_process_lock($lock);
+    # A SQL error with use_error_exception off ends the process inside errorhandler(), past every finally. The
+    # shutdown function frees the lock then, so the next run does not find a lock nobody holds.
+    $held = true;
+    register_shutdown_function(static function () use (&$held, $lock): void {
+        if ($held) {
+            clear_process_lock($lock);
+        }
+    });
     try {
         $out = $fn();
         if (!is_array($out)) {
@@ -2363,6 +2371,7 @@ function pr_with_lock(callable $fn): array
         $out['locked'] = false;
         return $out;
     } finally {
+        $held = false;
         clear_process_lock($lock);
     }
 }
