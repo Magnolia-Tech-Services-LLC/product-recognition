@@ -1,0 +1,243 @@
+<?php
+/**
+ * Tag-one-bag matching assertions (#34). Pure functions only: no database, no service, no
+ * ResourceSpace. Runs on its own:
+ *
+ *   php scripts/product_recognition_selfcheck_bag_match.php
+ *
+ * and is required from product_recognition_selfcheck.php, which supplies pr_check() there.
+ * The service half is scripts/test_bag_features.py and scripts/test_bag_endpoints.py.
+ */
+if (!function_exists('pr_check')) {
+    function pr_check(string $label, bool $ok): void
+    {
+        printf("%-4s %s\n", $ok ? "ok" : "FAIL", $label);
+        if (!$ok) {
+            exit(1);
+        }
+    }
+}
+include_once dirname(__DIR__) . '/include/product_recognition_bag_gates.php';
+
+# --- config: every auto flag is off, cutoffs are the spec's --------------------------------
+$bag_cfg = pr_bag_config([]);
+pr_check("config defaults: both auto-apply flags off, cutoffs .85/.10 and .90/.10, review floor .75",
+         $bag_cfg['colorway_auto'] === false && $bag_cfg['product_auto'] === false
+         && $bag_cfg['colorway_sim'] === 0.85 && $bag_cfg['colorway_margin'] === 0.10
+         && $bag_cfg['product_sim'] === 0.90 && $bag_cfg['product_margin'] === 0.10
+         && $bag_cfg['review_floor'] === 0.75 && $bag_cfg['copy_segments'] === []);
+$bag_on = pr_bag_config([
+    'product_recognition_bag_colorway_auto_apply' => true,
+    'product_recognition_bag_product_auto_apply' => '1',
+    'product_recognition_bag_copy_segments' => "Copy, Goat Hill (Copy);; ",
+]);
+$bag_on_cw = $bag_on;
+$bag_on_cw['product_auto'] = false;
+pr_check("config: flags and copy segments read from settings, segments folded and deduplicated",
+         $bag_on['colorway_auto'] === true && $bag_on['product_auto'] === true
+         && $bag_on['copy_segments'] === ['copy', 'goat hill copy']);
+
+# --- bbox overlap and rebinding a re-cut seed -----------------------------------------------
+pr_check("iou: identical 1, disjoint 0, half overlap one third, malformed 0",
+         abs(pr_bag_bbox_iou([0, 0, 1, 1], [0, 0, 1, 1]) - 1.0) < 1e-12
+         && pr_bag_bbox_iou([0, 0, .4, .4], [.5, .5, 1, 1]) === 0.0
+         && abs(pr_bag_bbox_iou([0, 0, .5, 1], [.25, 0, .75, 1]) - 1 / 3) < 1e-12
+         && pr_bag_bbox_iou([0, 0, 1], [0, 0, 1, 1]) === 0.0
+         && pr_bag_bbox_iou([.5, .5, .5, .5], [.5, .5, .5, .5]) === 0.0);
+$bag_seed = ['region_index' => 0, 'file_checksum' => 'abc', 'bbox' => [.10, .10, .50, .90]];
+pr_check("rebind: the same index keeps its seed",
+         pr_bag_rebind($bag_seed, 'abc', [0 => [.10, .10, .50, .90]]) === 0);
+pr_check("rebind: a re-cut that renumbered the cutouts finds the seed by overlap",
+         pr_bag_rebind($bag_seed, 'abc', [0 => [.55, .10, .95, .90], 1 => [.11, .10, .50, .91]]) === 1);
+pr_check("rebind: overlap under 0.9 is ignored",
+         pr_bag_rebind($bag_seed, 'abc', [0 => [.10, .10, .50, .70]]) === null);
+pr_check("rebind: a different file is ignored whatever the boxes say",
+         pr_bag_rebind($bag_seed, 'zzz', [0 => [.10, .10, .50, .90]]) === null
+         && pr_bag_rebind(['file_checksum' => ''] + $bag_seed, '', [0 => [.10, .10, .50, .90]]) === null);
+pr_check("rebind: a tie keeps the seed's own index",
+         pr_bag_rebind($bag_seed, 'abc', [0 => [.10, .10, .50, .90], 1 => [.10, .10, .50, .90]]) === 0
+         && pr_bag_rebind(['region_index' => 1] + $bag_seed, 'abc', [0 => [.10, .10, .50, .90], 1 => [.10, .10, .50, .90]]) === 1);
+
+# --- shoot key -----------------------------------------------------------------------------
+$bag_path = [['ref' => 30, 'name' => 'Evergreen'], ['ref' => 10, 'name' => 'Dropbox'], ['ref' => 20, 'name' => 'Loma']];
+pr_check("shoot key: the node set, order-free",
+         pr_bag_shoot_key($bag_path) === '10,20,30'
+         && pr_bag_shoot_key(array_reverse($bag_path)) === '10,20,30');
+pr_check("shoot key: different sets differ, and a photo with no path has no shoot",
+         pr_bag_shoot_key($bag_path) !== pr_bag_shoot_key([['ref' => 10, 'name' => 'Dropbox'], ['ref' => 20, 'name' => 'Loma']])
+         && pr_bag_shoot_key([]) === '');
+pr_check("shoot key: a copy segment (any case) drops out, so a copy folder joins its original",
+         pr_bag_shoot_key(array_merge($bag_path, [['ref' => 99, 'name' => 'COPY']]), ['copy']) === '10,20,30'
+         && pr_bag_shoot_key(array_merge($bag_path, [['ref' => 99, 'name' => 'COPY']])) === '10,20,30,99');
+
+# --- competitors ---------------------------------------------------------------------------
+pr_check("competitor: one cutout, one product, one colorway, and only that",
+         pr_bag_competitor_key(['products' => [7], 'colorways' => [3], 'cutouts' => 1]) === ['product' => 7, 'colorway' => 3]
+         && pr_bag_competitor_key(['products' => [7], 'colorways' => [3], 'cutouts' => 2]) === null
+         && pr_bag_competitor_key(['products' => [7], 'colorways' => [3, 4], 'cutouts' => 1]) === null
+         && pr_bag_competitor_key(['products' => [], 'colorways' => [3], 'cutouts' => 1]) === null
+         && pr_bag_competitor_key(['products' => [7, 8], 'colorways' => [3], 'cutouts' => 1]) === null
+         && pr_bag_competitor_key(['products' => [7], 'colorways' => [], 'cutouts' => 1]) === null);
+
+# --- the winning key and its margin --------------------------------------------------------
+$bag_keys = [
+    '1' => ['all' => 0.91, 'seed' => 0.91, 'ref' => 11, 'n' => 2],
+    '2' => ['all' => 0.80, 'seed' => 0.78, 'ref' => 12, 'n' => 1],
+    '3' => ['all' => 0.70, 'seed' => null, 'ref' => 0, 'n' => 1],
+];
+$bag_res = pr_bag_pool_result($bag_keys);
+pr_check("pool result: best seed key, margin is over the best different key by its best score",
+         $bag_res['key'] === '1' && $bag_res['ref'] === 11 && abs($bag_res['similarity'] - 0.91) < 1e-12
+         && abs($bag_res['margin'] - 0.11) < 1e-12);
+$bag_keys['3']['all'] = 0.95;
+$bag_res = pr_bag_pool_result($bag_keys);
+pr_check("pool result: a competitor key that outscores the seed makes the margin negative; it is never the winner",
+         $bag_res['key'] === '1' && $bag_res['margin'] < 0);
+pr_check("pool result: no key with a seed is no result",
+         pr_bag_pool_result(['3' => ['all' => 0.9, 'seed' => null, 'ref' => 0, 'n' => 1]]) === null
+         && pr_bag_pool_result([]) === null);
+pr_check("pool result: with no rival key at all the margin is unknown, not waived",
+         pr_bag_pool_result(['1' => ['all' => 0.99, 'seed' => 0.99, 'ref' => 5, 'n' => 1]])['margin'] === null);
+pr_check("pool result: a competitor of the winner's own key is not a rival",
+         abs(pr_bag_pool_result([
+             '1' => ['all' => 0.99, 'seed' => 0.90, 'ref' => 5, 'n' => 2],
+             '2' => ['all' => 0.60, 'seed' => 0.60, 'ref' => 6, 'n' => 1],
+         ])['margin'] - 0.30) < 1e-12);
+
+# --- gate numbers --------------------------------------------------------------------------
+pr_check("gate: colorway needs .85 and .10, inclusive; unknown margin never passes",
+         pr_bag_gate_passes('colorway', 0.85, 0.10, $bag_cfg)
+         && !pr_bag_gate_passes('colorway', 0.8499, 0.50, $bag_cfg)
+         && !pr_bag_gate_passes('colorway', 0.99, 0.0999, $bag_cfg)
+         && !pr_bag_gate_passes('colorway', 0.99, null, $bag_cfg));
+pr_check("gate: pair needs .90 and .10, inclusive",
+         pr_bag_gate_passes('pair', 0.90, 0.10, $bag_cfg)
+         && !pr_bag_gate_passes('pair', 0.89, 0.50, $bag_cfg)
+         && !pr_bag_gate_passes('pair', 0.95, 0.09, $bag_cfg));
+
+# --- which row a cutout gets ---------------------------------------------------------------
+$bag_c = ['key' => '3', 'similarity' => 0.88, 'margin' => 0.12, 'ref' => 5];
+$bag_p = ['key' => '7|3', 'similarity' => 0.93, 'margin' => 0.20, 'ref' => 6];
+$pick = pr_bag_choose($bag_c, $bag_p, $bag_cfg);
+pr_check("choose: a passing pair wins and carries the product and colorway",
+         $pick['gate'] === 'pair' && $pick['name_node'] === 7 && $pick['colorway_node'] === 3
+         && $pick['passes'] === true && $pick['ref'] === 6);
+$pick = pr_bag_choose($bag_c, ['margin' => 0.01] + $bag_p, $bag_cfg);
+pr_check("choose: a passing colorway beats a pair that does not pass, with no product to write",
+         $pick['gate'] === 'colorway' && $pick['name_node'] === null && $pick['colorway_node'] === 3
+         && $pick['passes'] === true);
+$pick = pr_bag_choose(['similarity' => 0.80, 'margin' => 0.02] + $bag_c, ['similarity' => 0.82, 'margin' => 0.5] + $bag_p, $bag_cfg);
+pr_check("choose: with nothing passing, the more similar one goes to review",
+         $pick['gate'] === 'pair' && $pick['passes'] === false);
+pr_check("choose: under the .75 review floor is nothing",
+         pr_bag_choose(['similarity' => 0.74] + $bag_c, null, $bag_cfg) === null
+         && pr_bag_choose(['similarity' => 0.75] + $bag_c, null, $bag_cfg)['passes'] === false
+         && pr_bag_choose(null, null, $bag_cfg) === null);
+pr_check("choose: a rejected colorway is not offered again, the other gate still is",
+         pr_bag_choose($bag_c, null, $bag_cfg, [3]) === null
+         && pr_bag_choose($bag_c, ['key' => '7|4'] + $bag_p, $bag_cfg, [3])['colorway_node'] === 4);
+pr_check("choose: no margin means suggest only",
+         pr_bag_choose(['margin' => null] + $bag_c, null, $bag_cfg)['passes'] === false);
+
+# --- may it be written without a person ----------------------------------------------------
+$bag_one = ['products' => [7], 'colorways' => [], 'cutouts' => 1];
+pr_check("auto: both flags are off by default, whatever the numbers",
+         !pr_bag_auto_ok('colorway', $bag_one, 7, true, $bag_cfg) && !pr_bag_auto_ok('pair', $bag_one, 7, true, $bag_cfg));
+pr_check("auto colorway: exactly one product, one cutout, and the seed has that product",
+         pr_bag_auto_ok('colorway', $bag_one, 7, false, $bag_on)
+         && !pr_bag_auto_ok('colorway', $bag_one, 8, false, $bag_on)
+         && !pr_bag_auto_ok('colorway', ['products' => [7], 'colorways' => [], 'cutouts' => 2], 7, false, $bag_on)
+         && !pr_bag_auto_ok('colorway', ['products' => [7, 8], 'colorways' => [], 'cutouts' => 1], 7, false, $bag_on)
+         && !pr_bag_auto_ok('colorway', ['products' => [], 'colorways' => [], 'cutouts' => 1], 7, false, $bag_on));
+pr_check("auto pair: same shoot, and the photo has no product or already has the seed's",
+         pr_bag_auto_ok('pair', ['products' => [], 'colorways' => [], 'cutouts' => 3], 7, true, $bag_on)
+         && pr_bag_auto_ok('pair', ['products' => [7, 9], 'colorways' => [], 'cutouts' => 3], 7, true, $bag_on)
+         && !pr_bag_auto_ok('pair', ['products' => [9], 'colorways' => [], 'cutouts' => 3], 7, true, $bag_on)
+         && !pr_bag_auto_ok('pair', $bag_one, 7, false, $bag_on));
+pr_check("auto: each gate obeys its own flag, and a never-auto-apply product is left for a person",
+         !pr_bag_auto_ok('pair', $bag_one, 7, true, $bag_on_cw) && pr_bag_auto_ok('colorway', $bag_one, 7, true, $bag_on_cw)
+         && !pr_bag_auto_ok('pair', $bag_one, 7, true, $bag_on, [7 => true])
+         && !pr_bag_auto_ok('colorway', $bag_one, 7, true, $bag_on, [7 => true]));
+
+# --- what a write may add (fill-empty, never replace) --------------------------------------
+pr_check("plan: a single-cutout photo with nothing gets the name and the colorway",
+         pr_bag_write_plan(['products' => [], 'colorways' => [], 'cutouts' => 1], 7, 3)
+         === ['add_name' => true, 'add_colorway' => true, 'blocked' => '']);
+pr_check("plan: a photo that already has the product only gains the colorway",
+         pr_bag_write_plan($bag_one, 7, 3) === ['add_name' => false, 'add_colorway' => true, 'blocked' => '']
+         && pr_bag_write_plan($bag_one, null, 3) === ['add_name' => false, 'add_colorway' => true, 'blocked' => '']);
+pr_check("plan: product unknown and not inheritable writes nothing",
+         pr_bag_write_plan(['products' => [], 'colorways' => [], 'cutouts' => 2], null, 3)
+         === ['add_name' => false, 'add_colorway' => false, 'blocked' => 'no_product']);
+pr_check("plan: a single-cutout photo with a different Name or Colorway is blocked, never replaced",
+         pr_bag_write_plan($bag_one, 8, 3)['blocked'] === 'other_name'
+         && pr_bag_write_plan(['products' => [7], 'colorways' => [4], 'cutouts' => 1], 7, 3)['blocked'] === 'other_colorway'
+         && pr_bag_write_plan(['products' => [7], 'colorways' => [4], 'cutouts' => 1], 7, 3)['add_colorway'] === false);
+pr_check("plan: the same colorway already there is a no-op, not a block",
+         pr_bag_write_plan(['products' => [7], 'colorways' => [3], 'cutouts' => 1], 7, 3)
+         === ['add_name' => false, 'add_colorway' => false, 'blocked' => '']);
+pr_check("plan: a multi-cutout photo may add the matched bag's values beside its own",
+         pr_bag_write_plan(['products' => [9], 'colorways' => [4], 'cutouts' => 3], 7, 3)
+         === ['add_name' => true, 'add_colorway' => true, 'blocked' => '']
+         && pr_bag_write_plan(['products' => [], 'colorways' => [], 'cutouts' => 3], 7, 3)['add_name'] === true);
+pr_check("plan: no colorway is no write", pr_bag_write_plan($bag_one, 7, 0)['blocked'] === 'no_colorway');
+
+# --- undo ----------------------------------------------------------------------------------
+pr_check("ids csv: dedupes, drops zero, round-trips",
+         pr_bag_ids_csv([4, 5, 4, 0, -1]) === '4,5' && pr_bag_csv_ids('4,5,x,0,4') === [4, 5]
+         && pr_bag_csv_ids('') === []);
+$bag_undo = pr_bag_undo_plan('applied', '10,11', '30', [10, 30, 99]);
+pr_check("undo: removes only what the match wrote and what is still there",
+         $bag_undo['remove'] === [10, 30] && $bag_undo['already_gone'] === [11]);
+pr_check("undo: a person's node the match did not write is untouched",
+         pr_bag_undo_plan('applied', '', '30', [30, 31])['remove'] === [30]);
+pr_check("undo: only an applied match has anything to undo",
+         pr_bag_undo_plan('open', '10', '30', [10, 30]) === ['remove' => [], 'already_gone' => []]
+         && pr_bag_undo_plan('undone', '10', '30', [10, 30])['remove'] === []
+         && pr_bag_undo_plan('applied', '', '', [10])['remove'] === []);
+
+# --- importing tags ------------------------------------------------------------------------
+$bag_row = ['resource' => 5, 'region_index' => 0, 'file_checksum' => 'abc', 'bbox' => [.1, .1, .5, .9],
+            'name' => 'Loma', 'colorway' => 'Evergreen', 'user' => 1];
+$bag_now = ['file_checksum' => 'abc', 'bboxes' => [0 => [.1, .1, .5, .9]]];
+pr_check("import: a row that still matches the cutout is accepted",
+         pr_bag_import_check($bag_row, $bag_now, 7, 3) === ['ok' => true, 'reason' => '']);
+pr_check("import: rejects a changed file, a moved box, a missing cutout, unknown labels, and no product",
+         pr_bag_import_check($bag_row, ['file_checksum' => 'new'] + $bag_now, 7, 3)['reason'] === 'checksum'
+         && pr_bag_import_check($bag_row, ['bboxes' => [0 => [.1, .1, .5, .5]]] + $bag_now, 7, 3)['reason'] === 'bbox'
+         && pr_bag_import_check(['region_index' => 4] + $bag_row, $bag_now, 7, 3)['reason'] === 'no_cutout'
+         && pr_bag_import_check($bag_row, $bag_now, null, 3)['reason'] === 'unknown_name'
+         && pr_bag_import_check($bag_row, $bag_now, 7, null)['reason'] === 'unknown_colorway'
+         && pr_bag_import_check(['name' => ' '] + $bag_row, $bag_now, 7, 3)['reason'] === 'no_product'
+         && pr_bag_import_check(['colorway' => ''] + $bag_row, $bag_now, 7, 3)['reason'] === 'no_colorway'
+         && pr_bag_import_check($bag_row, null, 7, 3)['reason'] === 'no_resource'
+         && pr_bag_import_check(['file_checksum' => ''] + $bag_row, $bag_now, 7, 3)['reason'] === 'checksum');
+
+# --- the report and its enable condition ---------------------------------------------------
+pr_check("report halves: deterministic, and both halves are used",
+         pr_bag_report_held_out('10,20,30') === pr_bag_report_held_out('10,20,30')
+         && count(array_unique(array_map(static fn(int $n): bool => pr_bag_report_held_out((string)$n), range(1, 40)))) === 2);
+$bag_win = ['key' => '3', 'similarity' => 0.95, 'margin' => 0.2, 'ref' => 1];
+pr_check("report outcome: right, wrong, or nothing passed",
+         pr_bag_report_outcome('colorway', $bag_win, '3', $bag_cfg) === 'right'
+         && pr_bag_report_outcome('colorway', $bag_win, '4', $bag_cfg) === 'wrong'
+         && pr_bag_report_outcome('colorway', ['margin' => 0.05] + $bag_win, '3', $bag_cfg) === 'none'
+         && pr_bag_report_outcome('pair', null, '7|3', $bag_cfg) === 'none');
+$bag_good = ['loo:colorway' => ['right' => 49, 'wrong' => 0, 'none' => 9], 'loo:pair' => ['right' => 60, 'wrong' => 1, 'none' => 2],
+             'hidden:colorway' => ['right' => 0, 'wrong' => 0, 'none' => 58], 'hidden:pair' => ['right' => 0, 'wrong' => 0, 'none' => 63]];
+pr_check("verdict: 98% right or better in leave-one-out and nothing tagged with the true colorway hidden passes",
+         pr_bag_report_verdict($bag_good)['ok'] === true);
+$bag_bad = $bag_good;
+$bag_bad['loo:colorway'] = ['right' => 48, 'wrong' => 2, 'none' => 0];
+pr_check("verdict: 96% right fails",
+         pr_bag_report_verdict($bag_bad)['ok'] === false);
+$bag_bad = $bag_good;
+$bag_bad['hidden:pair']['wrong'] = 1;
+pr_check("verdict: one tag with the true colorway hidden fails, however good the rest",
+         pr_bag_report_verdict($bag_bad)['ok'] === false);
+pr_check("verdict: nothing tagged is no evidence, not a pass",
+         pr_bag_report_verdict([])['ok'] === false);
+
+if (isset($argv[0]) && realpath($argv[0]) === __FILE__) {
+    echo "\nall checks passed\n";
+}
