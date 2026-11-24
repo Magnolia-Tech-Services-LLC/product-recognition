@@ -700,6 +700,8 @@ function pr_commit_regions(int $ref, string $checksum, array $boxes, array $pngs
             pr_mark_mask_failed($mask);
         }
     }
+    # Again now the masks are written: features computed from the old masks while this ran are stale.
+    pr_bag_forget_cutouts($ref);
 }
 
 /**

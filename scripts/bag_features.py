@@ -124,22 +124,6 @@ def _per_key(sims, kinds, keys):
     return out
 
 
-def _fold_unknown_product(pair):
-    """Pair keys are 'product|colorway'. A competitor with no product is key '0|colorway'. It is a
-    different key from another only when its colorway differs: with the same colorway it may be the
-    very bag, so it joins that colorway's keys instead of rivaling them. With no such key it stays
-    a rival of every key."""
-    for key in [k for k in pair if k.startswith('0|')]:
-        colorway = key.split('|', 1)[1]
-        same = [k for k in pair if k != key and k.split('|', 1)[1] == colorway]
-        if not same:
-            continue
-        entry = pair.pop(key)
-        for k in same:
-            pair[k]['all'] = max(pair[k]['all'], entry['all'])
-            pair[k]['n'] += entry['n']
-
-
 def match_queries(queries, cands, mix=MIX, near_copy=None):
     """Score query cutouts against seed and competitor cutouts. Gates are not applied here.
 
@@ -147,8 +131,8 @@ def match_queries(queries, cands, mix=MIX, near_copy=None):
         hide_product]}
         products: iterable of product node ids on the query's photo (may be empty)
         shoot: string, '' when the photo has no Folder Path
-        hide_*: report only. Drops candidates of that colorway (colorway pool) or of that
-        product and colorway (pair pool), so a tag found is a tag that is wrong.
+        hide_colorway: report only. Drops every candidate, seed or competitor, of that colorway
+        from both pools, so a tag found is a tag that is wrong.
     cands: list of dicts {dino, hist, resource, checksum, kind, product, colorway, shoot, ref}
         kind: 'seed' or 'competitor'; ref: the seed's id (0 for a competitor)
 
@@ -189,7 +173,6 @@ def match_queries(queries, cands, mix=MIX, near_copy=None):
             if near:
                 ok &= ~np.isin(c_res, list(near))
         hide_cw = int(q.get('hide_colorway') or 0)
-        hide_pr = int(q.get('hide_product') or 0)
         res = {'colorway': {}, 'pair': {}}
         prods = set(int(p) for p in q['products'])
         # A competitor with no known product still says "this look is that colorway", so it counts
@@ -208,7 +191,7 @@ def match_queries(queries, cands, mix=MIX, near_copy=None):
         if q['shoot']:
             same = ok & (c_shoot == q['shoot'])
             if hide_cw:
-                same &= ~((c_prod == hide_pr) & (c_color == hide_cw))
+                same &= c_color != hide_cw
             idx = np.where(same)[0]
             if len(idx):
                 keys = ['%d|%d' % (cands[i]['product'], cands[i]['colorway']) for i in idx]
@@ -216,6 +199,5 @@ def match_queries(queries, cands, mix=MIX, near_copy=None):
                     res['pair'][key] = {'all': best_all, 'seed': best_seed,
                                         'ref': int(cands[idx[at]]['ref']) if at >= 0 else 0,
                                         'n': keys.count(key)}
-            _fold_unknown_product(res['pair'])
         out.append(res)
     return out

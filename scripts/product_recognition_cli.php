@@ -24,7 +24,7 @@
  *   php product_recognition_cli.php --import-bag-tags=FILE [--dry-run]   # JSON rows, see below
  *   php product_recognition_cli.php --bag-match [--dry-run]
  *   php product_recognition_cli.php --bag-match-report                   # read-only
- *   php product_recognition_cli.php --undo-bag-matches [--resource=N] [--dry-run]
+ *   php product_recognition_cli.php --undo-bag-matches [--resource=N | --match=N] [--dry-run]
  *   php product_recognition_cli.php --all
  *
  * Bag tags (#34): FILE is a JSON array of {resource, region_index, file_checksum, bbox, name,
@@ -93,8 +93,10 @@ function pr_bag_print_match_summary(array $stats, string $indent = ''): void
         printf("%s  superseded %d open suggestions (cutout gone or re-cut, or no usable seed)\n", $indent, (int)$stats['superseded']);
     }
     foreach ((array)($stats['stale_applied'] ?? []) as $a) {
-        printf("%s  applied match %d (resource %d) came from seed %d, which has since been re-answered; not undone (see --undo-bag-matches --resource=%d)\n",
-               $indent, $a['match'], $a['resource'], $a['seed_ref'], $a['resource']);
+        # Only what the pass wrote unattended can be undone; a person's accepted match is theirs.
+        printf("%s  applied match %d (resource %d) came from seed %d, which has since been re-answered; %s\n",
+               $indent, $a['match'], $a['resource'], $a['seed_ref'],
+               $a['unattended'] ? sprintf('not undone (see --undo-bag-matches --match=%d)', $a['match']) : 'accepted by a person, so it stays');
     }
     if (!empty($stats['service_down'])) {
         printf("%s  the service did not answer; the pass stopped early\n", $indent);
@@ -490,8 +492,9 @@ switch ($mode) {
             exit(1);
         }
         printf("Cutout features%s\n", $dry_run ? ' (would compute)' : '');
-        printf("  computed         %d\n  unusable         %d\n  failed           %d\n  no mask yet      %d\n  resources scanned %d\n",
-               $stats['computed'], $stats['unusable'], $stats['failed'], $stats['skipped_no_mask'], $stats['scanned']);
+        printf("  computed         %d\n  unusable         %d\n  failed           %d\n  given up (%d tries) %d\n  mask rewritten   %d\n  no mask yet      %d\n  resources scanned %d\n",
+               $stats['computed'], $stats['unusable'], $stats['failed'], PR_BAG_MAX_ATTEMPTS, $stats['given_up'], $stats['stale'],
+               $stats['skipped_no_mask'], $stats['scanned']);
         if ($stats['service_down']) {
             fwrite(STDERR, "product_recognition: the service did not answer, or kept failing; stopped.\n");
             exit(1);
@@ -562,7 +565,7 @@ switch ($mode) {
         }
         fwrite(STDERR, "Held-out half (leave-one-out, then true colorway hidden):\n");
         foreach ($report['tally'] as $name => $t) {
-            fwrite(STDERR, sprintf("  %-16s right %d, wrong %d, not tagged %d\n", $name, $t['right'], $t['wrong'], $t['none']));
+            fwrite(STDERR, sprintf("  %-16s right %d, wrong %d, not tagged %d, no margin %d\n", $name, $t['right'], $t['wrong'], $t['none'], $t['unmeasured'] ?? 0));
         }
         fwrite(STDERR, $report['verdict']['ok']
             ? "Enable condition MET on the held-out half.\n"
@@ -576,17 +579,22 @@ switch ($mode) {
     case '--undo-bag-matches':
         # No --resource means the whole library, so a mistyped argument must stop, not widen the undo.
         $only = null;
+        $only_match = null;
         foreach (array_slice($modes, 1) as $arg) {
             if ($arg === '--dry-run') {
                 continue;
             }
-            if ($only !== null || !preg_match('/^--resource=([1-9]\d*)$/', $arg, $m)) {
-                fwrite(STDERR, "Usage: --undo-bag-matches [--resource=N] [--dry-run]\n");
+            if ($only !== null || $only_match !== null || !preg_match('/^--(resource|match)=([1-9]\d*)$/', $arg, $m)) {
+                fwrite(STDERR, "Usage: --undo-bag-matches [--resource=N | --match=N] [--dry-run]\n");
                 exit(1);
             }
-            $only = (int)$m[1];
+            if ($m[1] === 'match') {
+                $only_match = (int)$m[2];
+            } else {
+                $only = (int)$m[2];
+            }
         }
-        $stats = $pr_cli_run(fn() => pr_bag_undo_matches($dry_run, $only));
+        $stats = $pr_cli_run(fn() => pr_bag_undo_matches($dry_run, $only, $only_match));
         if ($stats === null) {
             exit(0);
         }

@@ -514,7 +514,7 @@ def match_bags(payload: dict = Body(...)):
 
       {db, mix?, near_copy?,
        queries:    [{resource, region_index, checksum, shoot, products:[node,...],
-                     hide_colorway?, hide_product?}],
+                     hide_colorway?}],
        candidates: [{resource, region_index, checksum, kind: seed|competitor,
                      product, colorway, shoot, ref}]}
 
@@ -555,8 +555,7 @@ def match_bags(payload: dict = Body(...)):
         qs.append({"dino": found[0], "hist": found[1], "resource": int(row["resource"]),
                    "checksum": found[2], "shoot": str(row.get("shoot") or ""),
                    "products": [int(p) for p in row.get("products") or []],
-                   "hide_colorway": int(row.get("hide_colorway") or 0),
-                   "hide_product": int(row.get("hide_product") or 0)})
+                   "hide_colorway": int(row.get("hide_colorway") or 0)})
     scored = bag_features.match_queries(qs, cands, mix, near_copy)
     results = [None] * len(queries)
     for at, res in zip(present, scored):

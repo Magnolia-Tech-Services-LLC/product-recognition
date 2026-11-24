@@ -308,6 +308,53 @@ function pr_bag_store_features(int $resource, int $region, string $checksum, arr
 }
 
 /**
+ * Record that the pass is about to post this cutout, before it does. A row with status 'attempt' and a
+ * count; success overwrites it (pr_bag_store_features), so what is left after a crash or a failure is
+ * the count of tries for this checksum, box and mask.
+ */
+function pr_bag_store_attempt(int $resource, int $region, string $checksum, array $bbox, int $mask_mtime, int $attempts): void
+{
+    ps_query('DELETE FROM product_cutout_feature WHERE resource = ? AND region_index = ?',
+             ['i', $resource, 'i', $region]);
+    ps_query(
+        "INSERT INTO product_cutout_feature (resource, region_index, file_checksum, bbox, mask_mtime, status, attempts)
+         VALUES (?,?,?,?,?, 'attempt', ?)",
+        ['i', $resource, 'i', $region, 's', $checksum, 's', json_encode($bbox), 'i', $mask_mtime, 'i', $attempts]
+    );
+}
+
+/** The mask file's mtime for a feature row, null when the mask is not there. */
+function pr_bag_mask_mtime(array $row): ?int
+{
+    $mask = pr_mask_file((int)$row['resource'], (string)$row['file_checksum'], (int)$row['region_index']);
+    return is_file($mask) ? (int)filemtime($mask) : null;
+}
+
+/**
+ * Delete feature rows that are not current (re-cut leftovers). Not when the mask folder itself cannot
+ * be seen: a missing mount must not wipe every vector.
+ *
+ * @param list<array<string,mixed>> $rows rows with ref
+ * @param array<string,array<string,mixed>> $current pr_bag_current_features of those rows
+ */
+function pr_bag_drop_stale_features(array $rows, array $current): int
+{
+    if (!is_dir(pr_mask_dir())) {
+        return 0;
+    }
+    $stale = [];
+    foreach ($rows as $row) {
+        if (!isset($current[(int)$row['resource'] . ':' . (int)$row['region_index']])) {
+            $stale[] = (int)($row['ref'] ?? $row['feature_ref']);
+        }
+    }
+    foreach (array_chunk($stale, 500) as $chunk) {
+        ps_query('DELETE FROM product_cutout_feature WHERE ref IN (' . pr_bag_marks($chunk) . ')', pr_bag_int_params($chunk));
+    }
+    return count($stale);
+}
+
+/**
  * A re-cut or a replaced file makes the stored features and any open suggestion for the photo
  * stale. Called from pr_commit_regions. Seeds stay: they re-bind by checksum and overlap.
  */
@@ -356,14 +403,16 @@ function pr_bag_service_up(): bool
  * Compute features for cutouts that have none, up to $limit cutouts. Resumes from a cursor;
  * a cutout whose features were cleared by a re-cut is found again by its missing row.
  *
- * A cutout the service fails on is left without a row and retried on the next lap. Several in a
- * row is the service, not the cutouts, and stops the run.
+ * Before a cutout is posted an 'attempt' row records the try (checksum, box, mask mtime, count). A
+ * cutout that fails or kills the service is retried on the next lap and left alone after
+ * PR_BAG_MAX_ATTEMPTS tries, until its checksum, box or mask changes. Several failures in a row are
+ * the service, not the cutouts, and stop the run.
  *
- * @return array{computed:int,unusable:int,failed:int,skipped_no_mask:int,service_down:bool,scanned:int,last:int}
+ * @return array{computed:int,unusable:int,failed:int,skipped_no_mask:int,given_up:int,stale:int,service_down:bool,scanned:int,last:int}
  */
 function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
 {
-    $stats = ['computed' => 0, 'unusable' => 0, 'failed' => 0, 'skipped_no_mask' => 0, 'service_down' => false,
+    $stats = ['computed' => 0, 'unusable' => 0, 'failed' => 0, 'skipped_no_mask' => 0, 'given_up' => 0, 'stale' => 0, 'service_down' => false,
               'scanned' => 0, 'last' => 0];
     $failed_in_a_row = 0;
     if (!$dry_run && pr_bag_disabled_reason() === 'tables') {
@@ -383,7 +432,8 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
                AND pr.checksum LIKE CONCAT(r.file_checksum, ':%')
                AND (SELECT COUNT(*) FROM product_cutout_feature f
                      WHERE f.resource = pr.resource AND f.file_checksum = r.file_checksum
-                       AND LOCATE(f.bbox, pr.bbox) > 0)
+                       AND LOCATE(f.bbox, pr.bbox) > 0
+                       AND (f.status <> 'attempt' OR f.attempts >= " . PR_BAG_MAX_ATTEMPTS . "))
                    < (LENGTH(pr.bbox) - LENGTH(REPLACE(pr.bbox, '],[', ''))) / 3 + 1
              ORDER BY pr.resource LIMIT 500";
     while ($budget > 0) {
@@ -409,51 +459,50 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
                 continue;
             }
             $boxes = pr_decode_bboxes((string)$row['bbox']);
-            # A stored row counts only if it is this cutout (file checksum and box). A re-cut that landed
-            # while a lap was computing leaves a row that is not, and it is replaced here.
-            $stored = ps_query('SELECT ref, resource, region_index, file_checksum, bbox FROM product_cutout_feature WHERE resource = ?',
+            # A stored row counts only if it is this cutout: file checksum, box and mask file. Anything
+            # else (a re-cut landed while a lap was computing) is a leftover and is replaced here.
+            $stored = ps_query('SELECT ref, resource, region_index, file_checksum, bbox, mask_mtime, status, attempts FROM product_cutout_feature WHERE resource = ?',
                                ['i', $resource]);
-            $current = pr_bag_current_features($stored, [$resource => ['file_checksum' => $checksum, 'bboxes' => $boxes]]);
-            $have = [];
-            foreach ($stored as $f) {
-                if (isset($current[$resource . ':' . (int)$f['region_index']])) {
-                    $have[(int)$f['region_index']] = true;
-                } elseif (!$dry_run) {
-                    ps_query('DELETE FROM product_cutout_feature WHERE ref = ?', ['i', (int)$f['ref']]);
-                }
+            $current = pr_bag_current_features($stored, [$resource => ['file_checksum' => $checksum, 'bboxes' => $boxes]], 'pr_bag_mask_mtime');
+            if (!$dry_run) {
+                pr_bag_drop_stale_features($stored, $current);
             }
             foreach ($boxes as $index => $bbox) {
-                if (isset($have[$index])) {
+                $mine = $current[$resource . ':' . $index] ?? null;
+                $state = pr_bag_feature_state($mine);
+                if ($state === 'done') {
+                    continue;
+                }
+                $mask = pr_mask_file($resource, $checksum, (int)$index);
+                if (!is_file($mask) || is_file($mask . '.fail')) {
+                    $stats['skipped_no_mask']++;
+                    continue;
+                }
+                if ($state === 'given_up') {
+                    $stats['given_up']++;
                     continue;
                 }
                 if ($budget <= 0) {
                     $cursor = $resource - 1;      # resume at this resource
                     break 3;
                 }
-                $mask = pr_mask_file($resource, $checksum, (int)$index);
-                if (!is_file($mask)) {
-                    $stats['skipped_no_mask']++;
-                    continue;
-                }
                 $budget--;
                 if ($dry_run) {
                     $stats['computed']++;
                     continue;
                 }
+                $mtime = (int)filemtime($mask);
+                pr_bag_store_attempt($resource, (int)$index, $checksum, $bbox, $mtime, (int)($mine['attempts'] ?? 0) + 1);
                 $features = pr_bag_compute_features($mask);
                 if ($features === null) {
-                    $cutout = $resource . ':' . $index;
-                    $suspect = (string)get_sysvar('product_recognition_bag_feature_suspect', '');
-                    if (pr_bag_no_answer_action(pr_bag_service_up(), $suspect, $cutout) === 'stop') {
+                    # No answer: the service is down, or it died on this cutout. Wait for it. Still down
+                    # means stop here, with the cursor at this photo; the try is already counted, so a
+                    # cutout that keeps killing it is left alone after PR_BAG_MAX_ATTEMPTS tries.
+                    if (!pr_bag_service_up()) {
                         $stats['service_down'] = true;
-                        $cursor = $resource - 1;      # resume at this resource
-                        set_sysvar('product_recognition_bag_feature_suspect', $cutout);
+                        $cursor = $resource - 1;
                         break 3;
                     }
-                    # The service is up, or this cutout was already the one running when it went down last
-                    # time: it is the cutout it could not take (a crash, a timeout, a mask that vanished).
-                    # Count it as a failure and move on, or every run stops here.
-                    set_sysvar('product_recognition_bag_feature_suspect', '');
                     $features = ['status' => 'error', 'dinov2' => null, 'hist' => null];
                 }
                 if ($features['status'] === 'error') {
@@ -465,7 +514,11 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
                     continue;
                 }
                 $failed_in_a_row = 0;
-                pr_bag_store_features($resource, (int)$index, $checksum, $bbox, (int)@filemtime($mask), $features);
+                if ((int)@filemtime($mask) !== $mtime) {
+                    $stats['stale']++;        # the mask was rewritten while the service worked: this answer is for the old one
+                    continue;
+                }
+                pr_bag_store_features($resource, (int)$index, $checksum, $bbox, $mtime, $features);
                 $stats[$features['status'] === 'ok' ? 'computed' : 'unusable']++;
             }
         }
@@ -537,21 +590,23 @@ function pr_bag_store_tag(int $resource, int $region, string $checksum, array $b
 
 /**
  * Applied matches whose seed has since been re-answered (another Product or Colorway). They are
- * not undone automatically; --bag-match lists them so a person can run --undo-bag-matches.
+ * not undone automatically; --bag-match lists them, and for the ones the pass wrote unattended a
+ * person can run --undo-bag-matches. A match a person accepted is theirs and has no undo.
  *
- * @return list<array{match:int,resource:int,seed_ref:int}>
+ * @return list<array{match:int,resource:int,seed_ref:int,unattended:bool}>
  */
 function pr_bag_applied_from_changed_seeds(): array
 {
     $out = [];
     foreach (ps_query(
-        "SELECT m.ref, m.resource, m.seed_ref FROM product_bag_match m
+        "SELECT m.ref, m.resource, m.seed_ref, m.decided_by FROM product_bag_match m
            JOIN product_bag_tag t ON t.ref = m.seed_ref
           WHERE m.state = 'applied'
             AND (m.colorway_node <> t.colorway_node OR (m.name_node IS NOT NULL AND m.name_node <> t.name_node))
           ORDER BY m.ref"
     ) as $r) {
-        $out[] = ['match' => (int)$r['ref'], 'resource' => (int)$r['resource'], 'seed_ref' => (int)$r['seed_ref']];
+        $out[] = ['match' => (int)$r['ref'], 'resource' => (int)$r['resource'], 'seed_ref' => (int)$r['seed_ref'],
+                  'unattended' => (int)$r['decided_by'] === 0];
     }
     return $out;
 }
@@ -622,12 +677,12 @@ function pr_bag_load_seeds(?array $cfg = null): array
     $rows = [];
     foreach (array_chunk($resources, 500) as $chunk) {
         $rows = array_merge($rows, ps_query(
-            "SELECT ref, resource, region_index, file_checksum, bbox, status FROM product_cutout_feature
+            "SELECT ref, resource, region_index, file_checksum, bbox, mask_mtime, status, attempts FROM product_cutout_feature
               WHERE resource IN (" . pr_bag_marks($chunk) . ")",
             pr_bag_int_params($chunk)
         ));
     }
-    $features = pr_bag_current_features($rows, $cutouts);
+    $features = pr_bag_current_features($rows, $cutouts, 'pr_bag_mask_mtime');
     $products = pr_leaf_models();
     $colorways = pr_field_leaves((int)($GLOBALS['product_recognition_colorway_field'] ?? 0));
     $usable = [];
@@ -651,8 +706,11 @@ function pr_bag_load_seeds(?array $cfg = null): array
                 $reason = 'no_cutout_overlaps';
             } else {
                 $f = $features[$resource . ':' . $region] ?? null;
-                if ($f === null) {
+                $state = pr_bag_feature_state($f);
+                if ($state === 'retry') {
                     $reason = 'features_pending';
+                } elseif ($state === 'given_up') {
+                    $reason = 'features_failed';
                 } elseif ((string)$f['status'] !== 'ok') {
                     $reason = 'cutout_unusable';
                 }
@@ -745,7 +803,7 @@ function pr_bag_load_competitors(array $seed_resources, array $cfg): array
     $after = 0;
     while (true) {
         $rows = ps_query(
-            "SELECT f.ref, f.resource, f.region_index, f.file_checksum, f.bbox, r.file_checksum AS current_checksum
+            "SELECT f.ref, f.resource, f.region_index, f.file_checksum, f.bbox, f.mask_mtime, r.file_checksum AS current_checksum
                FROM product_cutout_feature f
                JOIN resource r ON r.ref = f.resource AND r.file_checksum = f.file_checksum AND r.archive >= 0
               WHERE f.status = 'ok' AND f.region_index = 0 AND f.resource > ?
@@ -762,7 +820,7 @@ function pr_bag_load_competitors(array $seed_resources, array $cfg): array
         $after = max($ids);
         $states = pr_bag_load_photo_states($ids);
         $shoots = pr_bag_load_shoots($ids, $cfg);
-        $current = pr_bag_current_features($rows, pr_bag_current_cutouts($ids));
+        $current = pr_bag_current_features($rows, pr_bag_current_cutouts($ids), 'pr_bag_mask_mtime');
         foreach ($rows as $row) {
             $resource = (int)$row['resource'];
             $key = pr_bag_competitor_key($states[$resource]);
@@ -785,13 +843,32 @@ function pr_bag_load_competitors(array $seed_resources, array $cfg): array
 function pr_bag_load_cutout_page(int $after_ref, int $size): array
 {
     return ps_query(
-        "SELECT f.ref AS feature_ref, f.resource, f.region_index, f.file_checksum, f.bbox
+        "SELECT f.ref AS feature_ref, f.resource, f.region_index, f.file_checksum, f.bbox, f.mask_mtime
            FROM product_cutout_feature f
            JOIN resource r ON r.ref = f.resource AND r.file_checksum = f.file_checksum AND r.archive >= 0
           WHERE f.status = 'ok' AND f.ref > ?
           ORDER BY f.ref LIMIT ?",
         ['i', $after_ref, 'i', $size]
     );
+}
+
+/**
+ * The candidate list the service scores against: seeds, then competitors. The nightly pass and the
+ * report both build it here.
+ *
+ * @param array<int,array<string,mixed>> $seeds usable seeds from pr_bag_load_seeds
+ * @param list<array<string,mixed>> $competitors from pr_bag_load_competitors
+ * @return list<array<string,mixed>>
+ */
+function pr_bag_build_candidates(array $seeds, array $competitors): array
+{
+    $out = [];
+    foreach ($seeds as $seed) {
+        $out[] = ['resource' => $seed['resource'], 'region_index' => $seed['region_index'],
+                  'checksum' => $seed['checksum'], 'kind' => 'seed', 'product' => $seed['product'],
+                  'colorway' => $seed['colorway'], 'shoot' => $seed['shoot'], 'ref' => $seed['ref']];
+    }
+    return array_merge($out, $competitors);
 }
 
 /**
@@ -805,7 +882,7 @@ function pr_bag_load_cutout_page(int $after_ref, int $size): array
 function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
 {
     $stats = ['seeds' => 0, 'ignored_seeds' => [], 'competitors' => 0, 'considered' => 0, 'opened' => 0,
-              'updated' => 0, 'closed' => 0, 'auto_applied' => 0, 'blocked' => 0, 'missing_features' => 0,
+              'updated' => 0, 'closed' => 0, 'auto_applied' => 0, 'blocked' => 0, 'stale' => 0, 'missing_features' => 0,
               'service_down' => false, 'disabled' => false];
     if (!$dry_run && pr_bag_disabled_reason() === 'tables') {
         pr_bag_ensure_tables();
@@ -813,6 +890,10 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
     if (!pr_bag_enabled()) {
         $stats['disabled'] = true;
         $stats['disabled_reason'] = pr_bag_disabled_reason();
+        return $stats;
+    }
+    if (!pr_service_health()) {
+        $stats['service_down'] = true;
         return $stats;
     }
     $cfg = pr_bag_config();
@@ -846,15 +927,16 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
         $seed_cutouts[$seed['resource'] . ':' . $seed['region_index']] = true;
         $seed_resources[$seed['resource']] = true;
     }
-    $candidates = [];
-    foreach ($seeds as $seed) {
-        $candidates[] = ['resource' => $seed['resource'], 'region_index' => $seed['region_index'],
-                         'checksum' => $seed['checksum'], 'kind' => 'seed', 'product' => $seed['product'],
-                         'colorway' => $seed['colorway'], 'shoot' => $seed['shoot'], 'ref' => $seed['ref']];
-    }
     $competitors = pr_bag_load_competitors($seed_resources, $cfg);
     $stats['competitors'] = count($competitors);
-    $candidates = array_merge($candidates, $competitors);
+    $candidates = pr_bag_build_candidates($seeds, $competitors);
+    # A seed still waiting for its features will be usable soon: what was found from it stays open.
+    $pending_seeds = [];
+    foreach ($loaded['ignored'] as $i) {
+        if ($i['reason'] === 'features_pending') {
+            $pending_seeds[(int)$i['ref']] = true;
+        }
+    }
 
     # Stored decisions follow the cutout (file checksum + box), not its old index. A row that no
     # longer binds to a current cutout suppresses nothing.
@@ -905,17 +987,11 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
         $after = (int)$cuts[count($cuts) - 1]['feature_ref'];
         # A feature row can outlive its cutout (regions cut under an older stamp, say). A match for
         # it could never bind, so it would be opened and superseded again every night.
-        $fresh = pr_bag_current_features($cuts, pr_bag_current_cutouts(array_map(static fn(array $c): int => (int)$c['resource'], $cuts)));
+        $fresh = pr_bag_current_features($cuts, pr_bag_current_cutouts(array_map(static fn(array $c): int => (int)$c['resource'], $cuts)), 'pr_bag_mask_mtime');
         # A row that is not its cutout any more (a re-cut landed while it was being computed) is dropped,
         # so the feature pass sees the cutout as missing and computes it again.
-        $stale = [];
-        foreach ($cuts as $c) {
-            if (!isset($fresh[(int)$c['resource'] . ':' . (int)$c['region_index']])) {
-                $stale[] = (int)$c['feature_ref'];
-            }
-        }
-        if (!$dry_run && $stale !== []) {
-            ps_query('DELETE FROM product_cutout_feature WHERE ref IN (' . pr_bag_marks($stale) . ')', pr_bag_int_params($stale));
+        if (!$dry_run) {
+            pr_bag_drop_stale_features($cuts, $fresh);
         }
         $queries = [];
         foreach ($cuts as $c) {
@@ -955,18 +1031,16 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
                 continue;
             }
             $stats['considered']++;
-            $decide = static fn(array $photo): array => pr_bag_decide(
-                ['photo' => $photo, 'shoot' => $q['shoot']],
+            $decision = pr_bag_decide(
+                ['photo' => $states[$q['resource']], 'shoot' => $q['shoot']],
                 (array)($scores['colorway'] ?? []), (array)($scores['pair'] ?? []),
                 $seed_facts, $open[$cut_key] ?? null, $rejected[$cut_key] ?? [], $cfg, $withheld
             );
-            $decision = $decide($states[$q['resource']]);
-            if ($decision['auto'] && !$dry_run) {
-                # The page's photo states were read before the scoring call, and another cutout of
-                # this photo may have been written since. An unattended write is decided on the
-                # photo as it is now.
-                $decision = $decide(pr_bag_load_photo_states([$q['resource']])[$q['resource']]);
+            if ($decision['action'] === 'close' && isset($pending_seeds[(int)($open[$cut_key]['seed_ref'] ?? 0)])) {
+                continue;
             }
+            # Anything written is checked again on the photo as it is then (pr_bag_pre_write), not on
+            # what this run read at its start.
             pr_bag_enact($decision, $q, $dry_run, $stats);
         }
     }
@@ -1015,6 +1089,14 @@ function pr_bag_enact(array $decision, array $query, bool $dry_run, array &$stat
         }
         $match_ref = $decision['open_ref'];
     } else {
+        $bbox = (string)ps_value('SELECT bbox AS value FROM product_cutout_feature WHERE resource = ? AND region_index = ?',
+                                 ['i', $query['resource'], 'i', $query['region_index']], '');
+        $row = ['resource' => $query['resource'], 'region_index' => $query['region_index'], 'file_checksum' => $query['checksum'],
+                'bbox' => $bbox, 'seed_ref' => $m['seed_ref'], 'name_node' => $m['name_node'], 'colorway_node' => $m['colorway_node']];
+        if (pr_bag_pre_write($row)['status'] === 'gone') {
+            $stats['stale']++;      # what the scores said is no longer true: open nothing
+            return;
+        }
         $stats['opened']++;
         if ($dry_run) {
             $stats['auto_applied'] += $decision['auto'] ? 1 : 0;
@@ -1024,8 +1106,6 @@ function pr_bag_enact(array $decision, array $query, bool $dry_run, array &$stat
             ps_query("UPDATE product_bag_match SET state = 'superseded', decided_at = NOW() WHERE ref = ? AND state = 'open'",
                      ['i', $decision['open_ref']]);
         }
-        $bbox = ps_value('SELECT bbox AS value FROM product_cutout_feature WHERE resource = ? AND region_index = ?',
-                         ['i', $query['resource'], 'i', $query['region_index']], '');
         ps_query(
             "INSERT INTO product_bag_match (resource, region_index, file_checksum, bbox, seed_ref, name_node, colorway_node,
                                             similarity, margin, same_shoot, state)
@@ -1050,11 +1130,51 @@ function pr_bag_enact(array $decision, array $query, bool $dry_run, array &$stat
 # ---------------------------------------------------------------------------------------------
 
 /**
+ * The check before a match is opened or written, on the database as it is now: the seed it came
+ * from, the cutout's own answer and rejections, the photo's tags. pr_bag_pre_write_verdict decides;
+ * this only gathers the facts, so it is the one place to run against a real database.
+ *
+ * @param array<string,mixed> $m resource, region_index, file_checksum, bbox, seed_ref, name_node, colorway_node
+ * @return array{status:string,reason:string,plan:?array,photo:?array,seed:?array}
+ */
+function pr_bag_pre_write(array $m): array
+{
+    $resource = (int)$m['resource'];
+    $now = pr_bag_current_cutouts([$resource])[$resource] ?? null;
+    $bound = pr_bag_bind_row($m, $now);
+    $seed = ps_query('SELECT name_node, colorway_node FROM product_bag_tag WHERE ref = ?', ['i', (int)$m['seed_ref']])[0] ?? null;
+    $own_seed = false;
+    $rejected = false;
+    if ($bound !== null) {
+        $tags = ps_query('SELECT ref, resource, region_index, file_checksum, bbox FROM product_bag_tag WHERE resource = ?', ['i', $resource]);
+        $own_seed = array_filter(pr_bag_bind_rows($tags, [$resource => $now]), static fn(array $r): bool => $r['bound'] === $bound) !== [];
+        $gone = ps_query("SELECT ref, resource, region_index, file_checksum, bbox FROM product_bag_match
+                           WHERE resource = ? AND state IN ('rejected','undone') AND colorway_node = ?",
+                         ['i', $resource, 'i', (int)$m['colorway_node']]);
+        $rejected = array_filter(pr_bag_bind_rows($gone, [$resource => $now]), static fn(array $r): bool => $r['bound'] === $bound) !== [];
+    }
+    $name_node = $m['name_node'] === null ? null : (int)$m['name_node'];
+    $photo = pr_bag_load_photo_states([$resource])[$resource] ?? null;
+    $verdict = pr_bag_pre_write_verdict(
+        $bound, ['name_node' => $name_node, 'colorway_node' => (int)$m['colorway_node']], $seed, $own_seed, $rejected, $photo,
+        $name_node === null || pr_is_leaf_model($name_node), pr_bag_colorway_valid((int)$m['colorway_node'])
+    );
+    return $verdict + ['photo' => $photo, 'seed' => $seed];
+}
+
+/**
  * Write an open match to its photo: add the Name and Colorway nodes that are missing, nothing
  * else, and record exactly which node ids were added so --undo-bag-matches can remove only those.
  * Name and Colorway fields only: the other identity fields (Family, Category) are not touched.
  *
- * $manual is a person clicking Accept: edit access is checked. The nightly pass passes false.
+ * $manual is a person clicking Accept: edit access is checked. The nightly pass passes false, and
+ * then the match must also still clear its gate and be allowed to write unattended, on the photo
+ * as it is now.
+ *
+ * Everything runs in one transaction: the claim, the check (pr_bag_pre_write, read after the claim
+ * so it is current), the nodes, the log and the lists of what was written commit together or not at
+ * all, so a killed run leaves no tag --undo-bag-matches cannot find. The claim row-locks, so two
+ * accepts cannot both add nodes. Nothing in the writes starts a transaction of its own.
  *
  * @return 'applied'|'blocked'|'gone'|'denied'|'failed'
  */
@@ -1072,48 +1192,9 @@ function pr_bag_apply_match(int $match_ref, int $user, bool $manual): string
     if ($manual && !pr_can_edit_resource($resource)) {
         return 'denied';
     }
-    # The match was found for a cutout (file checksum + box). If the file was replaced or the
-    # cutout moved since, it no longer describes anything on the photo: close it, write nothing.
-    if (pr_bag_bind_row($m, pr_bag_current_cutouts([$resource])[$resource] ?? null) === null) {
-        ps_query("UPDATE product_bag_match SET state = 'superseded', decided_at = NOW() WHERE ref = ? AND state = 'open'",
-                 ['i', $match_ref]);
-        return 'gone';
-    }
-    $photo = pr_bag_load_photo_states([$resource])[$resource] ?? null;
     $name_node = $m['name_node'] === null ? null : (int)$m['name_node'];
     $colorway_node = (int)$m['colorway_node'];
-    if ($photo === null || ($name_node !== null && !pr_is_leaf_model($name_node))) {
-        return 'failed';
-    }
-    # 0 (the seed is gone) is on no photo, so a colorway-only match without its seed is blocked.
-    $seed_product = (int)ps_value('SELECT name_node AS value FROM product_bag_tag WHERE ref = ?', ['i', (int)$m['seed_ref']], 0);
-    if (!pr_bag_colorway_valid($colorway_node)) {
-        return 'blocked';       # the Colorway was deleted, moved or is no longer a leaf of the field
-    }
-    $plan = pr_bag_write_plan($photo, $name_node, $colorway_node, $seed_product);
-    if ($plan['blocked'] !== '') {
-        return 'blocked';
-    }
-    $note = sprintf(
-        'Product recognition bag match %d: seed tag %d, similarity %.3f, margin %s, %s gate',
-        $match_ref, (int)$m['seed_ref'], (float)$m['similarity'],
-        $m['margin'] === null ? 'n/a' : sprintf('%.3f', (float)$m['margin']),
-        $name_node === null ? 'colorway' : 'product+colorway'
-    );
-    $name_missing = [];
-    $colorway_missing = [];
-    if ($plan['add_name'] && $name_node !== null) {
-        $name_missing = array_values(array_diff(pr_nodes_to_apply($name_node), pr_resource_field_nodes($resource, pr_product_field())));
-    }
     $cw_field = (int)$GLOBALS['product_recognition_colorway_field'];
-    if ($plan['add_colorway']) {
-        $colorway_missing = array_values(array_diff(
-            pr_model_nodes_with_ancestors($colorway_node), pr_resource_field_nodes($resource, $cw_field)
-        ));
-    }
-    # One transaction: the claim, the nodes, the log and the lists of what was written commit together
-    # or not at all, so a killed run leaves no tag --undo-bag-matches cannot find. The claim row-locks,
-    # so two accepts cannot both add nodes. Nothing in the writes below starts a transaction of its own.
     db_begin_transaction('pr_bag_apply');
     try {
         ps_query("UPDATE product_bag_match SET state = 'applied', decided_by = ?, decided_at = NOW() WHERE ref = ? AND state = 'open'",
@@ -1122,6 +1203,36 @@ function pr_bag_apply_match(int $match_ref, int $user, bool $manual): string
             db_rollback_transaction('pr_bag_apply');
             return 'gone';
         }
+        $check = pr_bag_pre_write($m);
+        $refused = $check['status'];
+        if ($refused === 'ok' && !$manual) {
+            $cfg = pr_bag_config();
+            $gate = $name_node === null ? 'colorway' : 'pair';
+            if (!pr_bag_gate_passes($gate, (float)$m['similarity'], $m['margin'] === null ? null : (float)$m['margin'], $cfg)
+                || !pr_bag_auto_ok($gate, $check['photo'], (int)$check['seed']['name_node'], (int)$m['same_shoot'] === 1, $cfg,
+                                   pr_nodes_withheld_from_auto_apply())) {
+                $refused = 'blocked';
+            }
+        }
+        if ($refused !== 'ok') {
+            db_rollback_transaction('pr_bag_apply');
+            if ($refused === 'gone') {
+                ps_query("UPDATE product_bag_match SET state = 'superseded', decided_at = NOW() WHERE ref = ? AND state = 'open'",
+                         ['i', $match_ref]);
+            }
+            return $refused;
+        }
+        $plan = $check['plan'];
+        $note = sprintf(
+            'Product recognition bag match %d: seed tag %d, similarity %.3f, margin %s, %s gate',
+            $match_ref, (int)$m['seed_ref'], (float)$m['similarity'],
+            $m['margin'] === null ? 'n/a' : sprintf('%.3f', (float)$m['margin']),
+            $name_node === null ? 'colorway' : 'product+colorway'
+        );
+        $name_missing = $plan['add_name'] && $name_node !== null
+            ? array_values(array_diff(pr_nodes_to_apply($name_node), pr_resource_field_nodes($resource, pr_product_field()))) : [];
+        $colorway_missing = $plan['add_colorway']
+            ? array_values(array_diff(pr_model_nodes_with_ancestors($colorway_node), pr_resource_field_nodes($resource, $cw_field))) : [];
         if ($name_missing !== []) {
             add_resource_nodes($resource, $name_missing, false, false);
             resource_log($resource, LOG_CODE_EDITED, pr_product_field(), $note);
@@ -1179,12 +1290,26 @@ function pr_bag_nodes_on_photo(int $resource, array $nodes): array
 }
 
 /**
+ * Leaf nodes on the photo, whatever field they belong to.
+ *
+ * @return list<int>
+ */
+function pr_bag_photo_leaves(int $resource): array
+{
+    return array_map(static fn(array $r): int => (int)$r['node'], ps_query(
+        "SELECT rn.node FROM resource_node rn
+          WHERE rn.resource = ? AND NOT EXISTS (SELECT 1 FROM node ch WHERE ch.parent = rn.node)",
+        ['i', $resource]
+    ));
+}
+
+/**
  * --undo-bag-matches: take back what unattended applied matches wrote, only those nodes and only if still
  * present, then mark the match undone (which also stops it being suggested again).
  *
  * @return array{matches:int,nodes_removed:int,already_gone:int,protected:int}
  */
-function pr_bag_undo_matches(bool $dry_run = false, ?int $resource = null): array
+function pr_bag_undo_matches(bool $dry_run = false, ?int $resource = null, ?int $match = null): array
 {
     $stats = ['matches' => 0, 'nodes_removed' => 0, 'already_gone' => 0, 'protected' => 0];
     if (pr_bag_disabled_reason() === 'tables') {
@@ -1196,7 +1321,11 @@ function pr_bag_undo_matches(bool $dry_run = false, ?int $resource = null): arra
     $params = [];
     if ($resource !== null) {
         $sql .= ' AND resource = ?';
-        $params = ['i', $resource];
+        $params = array_merge($params, ['i', $resource]);
+    }
+    if ($match !== null) {
+        $sql .= ' AND ref = ?';
+        $params = array_merge($params, ['i', $match]);
     }
     $rows = ps_query($sql . ' ORDER BY ref', $params);
     $pending = [];
@@ -1211,6 +1340,7 @@ function pr_bag_undo_matches(bool $dry_run = false, ?int $resource = null): arra
             $recorded = array_merge($recorded, pr_bag_csv_ids((string)$m['name_written']), pr_bag_csv_ids((string)$m['colorway_written']));
         }
         $present = pr_bag_nodes_on_photo($res, $recorded);
+        $leaves = pr_bag_photo_leaves($res);
         # Applied matches on this photo that stay (a person's accepted ones, say): what they wrote, and
         # the Product and Colorway they stand for even when they wrote nothing because it was already
         # there, are not removed from under them.
@@ -1234,6 +1364,10 @@ function pr_bag_undo_matches(bool $dry_run = false, ?int $resource = null): arra
                 }
             }
             $plan = pr_bag_undo_plan('applied', (string)$m['name_written'], (string)$m['colorway_written'], $present, $protect);
+            # A Product or Colorway that is the parent of a leaf staying on the photo stays too.
+            $kept = pr_bag_keep_ancestors($plan['remove'], $leaves, 'pr_model_nodes_with_ancestors');
+            $plan['remove'] = $kept['remove'];
+            $plan['protected'] = array_values(array_unique(array_merge($plan['protected'], $kept['kept'])));
             $stats['matches']++;
             $stats['nodes_removed'] += count($plan['remove']);
             $stats['already_gone'] += count($plan['already_gone']);
@@ -1245,6 +1379,7 @@ function pr_bag_undo_matches(bool $dry_run = false, ?int $resource = null): arra
                 delete_resource_nodes($res, $plan['remove'], false);
                 resource_log($res, LOG_CODE_EDITED, 0, sprintf('Product recognition bag match %d undone: removed nodes %s', (int)$m['ref'], pr_bag_ids_csv($plan['remove'])));
                 $present = array_values(array_diff($present, $plan['remove']));
+                $leaves = array_values(array_diff($leaves, $plan['remove']));
             }
             ps_query("UPDATE product_bag_match SET state = 'undone', decided_at = NOW() WHERE ref = ? AND state = 'applied'", ['i', (int)$m['ref']]);
         }
@@ -1261,8 +1396,13 @@ function pr_bag_undo_matches(bool $dry_run = false, ?int $resource = null): arra
  * copies removed as prop3 did), and again with its own colorway hidden. The held-out half is
  * the shoots whose key checksum is odd; the verdict is on that half only.
  *
- * Differences from prop3, deliberately: seeds are the only candidates (no competitors), and the
- * near-copy test covers the seed cutouts of a photo, not every cutout the photo has.
+ * It runs the nightly pass's code: the same seeds, competitors and candidate list
+ * (pr_bag_build_candidates), the same service call, the same pool result and gate numbers. The
+ * hidden colorway is removed from seeds AND competitors by the service. A hidden query with no
+ * margin cannot be tested against the gate and is counted as 'unmeasured', never as safe; the
+ * verdict needs a minimum number of measurable ones.
+ *
+ * The near-copy test covers the seed cutouts of a photo, not every cutout the photo has.
  *
  * @param callable(array):void $on_row
  * @return array{tally:array<string,array<string,int>>,seeds:int,ignored:list<array>,verdict:array{ok:bool,reasons:list<string>},error:?string}
@@ -1272,7 +1412,7 @@ function pr_bag_report(callable $on_row): array
     $cfg = pr_bag_config();
     if (pr_bag_disabled_reason() !== '') {
         return ['tally' => [], 'seeds' => 0, 'ignored' => [], 'error' => pr_bag_disabled_text(pr_bag_disabled_reason()),
-                'verdict' => pr_bag_report_verdict([])];
+                'verdict' => pr_bag_report_verdict([], $cfg['report_min_hidden'])];
     }
     $loaded = pr_bag_load_seeds($cfg);
     $seeds = array_values($loaded['usable']);
@@ -1280,20 +1420,24 @@ function pr_bag_report(callable $on_row): array
             'verdict' => ['ok' => false, 'reasons' => []]];
     if (count($seeds) < 2) {
         $out['error'] = 'fewer than two usable seeds';
-        $out['verdict'] = pr_bag_report_verdict([]);
+        $out['verdict'] = pr_bag_report_verdict([], $cfg['report_min_hidden']);
         return $out;
     }
-    $candidates = array_map(static fn(array $s): array => [
-        'resource' => $s['resource'], 'region_index' => $s['region_index'], 'checksum' => $s['checksum'],
-        'kind' => 'seed', 'product' => $s['product'], 'colorway' => $s['colorway'], 'shoot' => $s['shoot'], 'ref' => $s['ref'],
-    ], $seeds);
+    if (!pr_service_health()) {
+        $out['error'] = 'service did not answer';
+        return $out;
+    }
+    $seed_resources = [];
+    foreach ($seeds as $seed) {
+        $seed_resources[$seed['resource']] = true;
+    }
+    $candidates = pr_bag_build_candidates($seeds, pr_bag_load_competitors($seed_resources, $cfg));
     $modes = ['loo' => false, 'hidden' => true];
     foreach ($modes as $mode => $hide) {
         foreach (pr_bag_report_chunks($seeds) as $chunk) {
             $queries = array_map(static fn(array $s): array => [
                 'resource' => $s['resource'], 'region_index' => $s['region_index'], 'checksum' => $s['checksum'],
-                'shoot' => $s['shoot'], 'products' => [$s['product']],
-                'hide_colorway' => $hide ? $s['colorway'] : 0, 'hide_product' => $hide ? $s['product'] : 0,
+                'shoot' => $s['shoot'], 'products' => [$s['product']], 'hide_colorway' => $hide ? $s['colorway'] : 0,
             ], $chunk);
             $response = pr_bag_post_json('/match_bags', [
                 'db' => (string)$GLOBALS['mysql_db'], 'queries' => $queries, 'candidates' => $candidates, 'near_copy' => 0.95,
@@ -1310,10 +1454,10 @@ function pr_bag_report(callable $on_row): array
                 $held = pr_bag_report_held_out($seed['shoot'] !== '' ? $seed['shoot'] : 'resource-' . $seed['resource']);
                 foreach (['colorway' => (string)$seed['colorway'], 'pair' => $seed['product'] . '|' . $seed['colorway']] as $gate => $truth) {
                     $result = pr_bag_pool_result((array)($scores[$gate] ?? []));
-                    $outcome = pr_bag_report_outcome($gate, $result, $truth, $cfg);
+                    $outcome = pr_bag_report_outcome($gate, $result, $truth, $cfg, $hide);
                     if ($held) {
                         $tally = &$out['tally']["$mode:$gate"];
-                        $tally ??= ['right' => 0, 'wrong' => 0, 'none' => 0];
+                        $tally ??= ['right' => 0, 'wrong' => 0, 'none' => 0, 'unmeasured' => 0];
                         $tally[$outcome]++;
                         unset($tally);
                     }
@@ -1327,7 +1471,7 @@ function pr_bag_report(callable $on_row): array
             }
         }
     }
-    $out['verdict'] = pr_bag_report_verdict($out['tally']);
+    $out['verdict'] = pr_bag_report_verdict($out['tally'], $cfg['report_min_hidden']);
     return $out;
 }
 

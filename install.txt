@@ -45,3 +45,11 @@ tables are made). A web request never creates them and never runs ResourceSpace'
 check for them. Until the tables exist the panel and the Bag matches tab say "Bag matching is
 not ready" and touch no table, and --bag-match-report, --undo-bag-matches and the dry runs say
 the tables are missing instead of claiming there is no colorway field.
+
+Feature pass: before a cutout is sent to the service an attempt is recorded for its file checksum,
+box and mask file. A cutout that fails, or that takes the service down, is retried on the next
+runs and left alone after 3 tries, until its file, box or mask changes. --cutout-features shows
+how many were given up on. --bag-match checks the service is up before it starts.
+--undo-bag-matches takes --resource=N or --match=N. --bag-match-report needs at least
+$product_recognition_bag_report_min_hidden (default 50) hidden-colorway queries with a margin
+before the enable condition can pass.

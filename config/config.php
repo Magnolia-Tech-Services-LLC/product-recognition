@@ -86,3 +86,6 @@ $product_recognition_bag_copy_segments = "";
 $product_recognition_bag_shoot_field = 200;
 # Cutouts whose features are computed per nightly pass.
 $product_recognition_bag_batch = 2000;
+# --bag-match-report passes the enable condition only with at least this many held-out
+# hidden-colorway queries that had a margin to test (ones with no margin are counted apart).
+$product_recognition_bag_report_min_hidden = 50;

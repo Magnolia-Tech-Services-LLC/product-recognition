@@ -20,6 +20,9 @@
 /** Cutouts in a row the service may fail on before the feature pass treats it as down. */
 const PR_BAG_MAX_FEATURE_FAILURES = 5;
 
+/** Tries the feature pass gives one cutout (same file checksum and box) before it leaves it alone. */
+const PR_BAG_MAX_ATTEMPTS = 3;
+
 /** A seed whose photo was re-cut keeps its bag when a current cutout overlaps it this much. */
 const PR_BAG_REBIND_IOU = 0.9;
 
@@ -28,7 +31,7 @@ const PR_BAG_REBIND_IOU = 0.9;
  * flags are only to be switched on once --bag-match-report meets the enable condition.
  *
  * @param array<string,mixed>|null $source defaults to the plugin globals
- * @return array{colorway_auto:bool,product_auto:bool,colorway_sim:float,colorway_margin:float,product_sim:float,product_margin:float,review_floor:float,copy_segments:list<string>,batch:int}
+ * @return array{colorway_auto:bool,product_auto:bool,colorway_sim:float,colorway_margin:float,product_sim:float,product_margin:float,review_floor:float,copy_segments:list<string>,batch:int,report_min_hidden:int}
  */
 function pr_bag_config(?array $source = null): array
 {
@@ -54,6 +57,7 @@ function pr_bag_config(?array $source = null): array
         'review_floor' => (float)($g['product_recognition_bag_review_floor'] ?? 0.75),
         'copy_segments' => array_values($copy),
         'batch' => max(1, (int)($g['product_recognition_bag_batch'] ?? 2000)),
+        'report_min_hidden' => max(1, (int)($g['product_recognition_bag_report_min_hidden'] ?? 50)),
     ];
 }
 
@@ -89,6 +93,7 @@ function pr_bag_table_definitions(): array
             file_checksum varchar(64) NOT NULL DEFAULT '',
             bbox varchar(255) NOT NULL DEFAULT '',
             mask_mtime int NOT NULL DEFAULT '0',
+            attempts int NOT NULL DEFAULT '0',
             dinov2 blob,
             hist blob,
             status varchar(10) NOT NULL DEFAULT 'ok',
@@ -257,17 +262,20 @@ function pr_bag_bind_rows(array $rows, array $current): array
 /**
  * Feature rows that describe the cutout now at their index: the file is the current file and the
  * stored box overlaps the current box (the service reads a cutout's features by index, so a row
- * at another index is no use to it). Anything else is a leftover from before a re-cut.
+ * at another index is no use to it), and the mask file is the one it was computed from
+ * (mask_mtime). Anything else is a leftover from before a re-cut.
  *
- * @param list<array<string,mixed>> $rows resource, region_index, file_checksum, bbox, ...
+ * @param list<array<string,mixed>> $rows resource, region_index, file_checksum, bbox, mask_mtime, ...
  * @param array<int,array{file_checksum:string,bboxes:array<int,array<int,float>>}> $current by resource
+ * @param callable(array):?int|null $mtime the row's mask file mtime now, null when there is no mask; null skips the check
  * @return array<string,array<string,mixed>> "resource:index" => row
  */
-function pr_bag_current_features(array $rows, array $current): array
+function pr_bag_current_features(array $rows, array $current, ?callable $mtime = null): array
 {
     $out = [];
     foreach ($rows as $row) {
-        if (pr_bag_bind_row($row, $current[(int)$row['resource']] ?? null) === (int)$row['region_index']) {
+        if (pr_bag_bind_row($row, $current[(int)$row['resource']] ?? null) === (int)$row['region_index']
+            && ($mtime === null || ($now = $mtime($row)) !== null && (int)$row['mask_mtime'] === $now)) {
             $out[(int)$row['resource'] . ':' . (int)$row['region_index']] = $row;
         }
     }
@@ -275,16 +283,88 @@ function pr_bag_current_features(array $rows, array $current): array
 }
 
 /**
- * The feature pass got no answer for a cutout. If the service is up, or this same cutout was
- * already the one running when it went down last run, the cutout is what it cannot take: skip it.
- * Otherwise it is the service: stop here and remember the cutout, so a cutout that keeps killing
- * the service (slower to restart than the wait) is passed on the next run, not retried every night.
+ * What the feature pass does with a cutout, from its current stored row (null = none). A row with
+ * status 'attempt' is a try that did not finish; after PR_BAG_MAX_ATTEMPTS the cutout is left alone
+ * until its file checksum, box or mask changes (the row then stops being current and is replaced).
  *
- * @return 'skip'|'stop'
+ * @param array<string,mixed>|null $row
+ * @return 'done'|'retry'|'given_up'
  */
-function pr_bag_no_answer_action(bool $service_up, string $suspect, string $cutout): string
+function pr_bag_feature_state(?array $row): string
 {
-    return ($service_up || ($suspect !== '' && $suspect === $cutout)) ? 'skip' : 'stop';
+    if ($row === null) {
+        return 'retry';
+    }
+    if ((string)$row['status'] !== 'attempt') {
+        return 'done';
+    }
+    return (int)$row['attempts'] >= PR_BAG_MAX_ATTEMPTS ? 'given_up' : 'retry';
+}
+
+/**
+ * Undo may not remove a node that is the ancestor of a leaf that stays on the photo.
+ *
+ * @param list<int> $remove nodes the undo plan would remove
+ * @param list<int> $photo_leaves leaf nodes on the photo now
+ * @param callable(int):list<int> $ancestors a node and its ancestors
+ * @return array{remove:list<int>,kept:list<int>}
+ */
+function pr_bag_keep_ancestors(array $remove, array $photo_leaves, callable $ancestors): array
+{
+    $stay = [];
+    foreach (array_diff($photo_leaves, $remove) as $leaf) {
+        foreach ($ancestors((int)$leaf) as $node) {
+            $stay[(int)$node] = true;
+        }
+    }
+    $kept = array_values(array_filter($remove, static fn(int $n): bool => isset($stay[$n])));
+    return ['remove' => array_values(array_diff($remove, $kept)), 'kept' => $kept];
+}
+
+/**
+ * The one check before any match is opened or written, on facts read just now (never on what the
+ * nightly run read at its start). The caller gathers the facts; this decides.
+ *
+ *  - 'gone':    the match no longer describes anything true: its cutout is not on the photo, its seed
+ *               is gone or was re-answered, the cutout has an answer of its own, or the colorway was
+ *               rejected for it. Close it.
+ *  - 'failed':  the Product is no longer a leaf.
+ *  - 'blocked': it cannot be written now (colorway gone, or what the photo has): leave it for review.
+ *  - 'ok':      'plan' says what may be added.
+ *
+ * @param array{name_node:?int,colorway_node:int} $match
+ * @param array{name_node:int,colorway_node:int}|null $seed the seed row now
+ * @param array{products:list<int>,colorways:list<int>,cutouts:int}|null $photo
+ * @return array{status:string,reason:string,plan:?array{add_name:bool,add_colorway:bool,blocked:string}}
+ */
+function pr_bag_pre_write_verdict(?int $bound, array $match, ?array $seed, bool $own_seed, bool $rejected,
+                                  ?array $photo, bool $name_ok, bool $colorway_ok): array
+{
+    $out = static fn(string $status, string $reason, ?array $plan = null): array => ['status' => $status, 'reason' => $reason, 'plan' => $plan];
+    if ($bound === null) {
+        return $out('gone', 'cutout');
+    }
+    if ($seed === null) {
+        return $out('gone', 'seed_gone');
+    }
+    if ((int)$seed['colorway_node'] !== (int)$match['colorway_node']
+        || ($match['name_node'] !== null && (int)$seed['name_node'] !== (int)$match['name_node'])) {
+        return $out('gone', 'seed_changed');
+    }
+    if ($own_seed) {
+        return $out('gone', 'own_seed');
+    }
+    if ($rejected) {
+        return $out('gone', 'rejected');
+    }
+    if ($photo === null || !$name_ok) {
+        return $out('failed', 'photo_or_product');
+    }
+    if (!$colorway_ok) {
+        return $out('blocked', 'colorway_gone');
+    }
+    $plan = pr_bag_write_plan($photo, $match['name_node'], (int)$match['colorway_node'], (int)$seed['name_node']);
+    return $plan['blocked'] !== '' ? $out('blocked', $plan['blocked'], $plan) : $out('ok', '', $plan);
 }
 
 /**
@@ -361,9 +441,12 @@ function pr_bag_pool_result(array $keys, array $rejected_colorways = []): ?array
     if ($best === null) {
         return null;
     }
+    # A competitor with no known product ("0|colorway") says nothing against a key of its own colorway:
+    # it may be the very bag. It rivals only the other colorways.
+    $best_colorway = substr($best['key'], (int)strrpos('|' . $best['key'], '|'));
     $rival = null;
     foreach ($keys as $key => $entry) {
-        if ((string)$key === $best['key']) {
+        if ((string)$key === $best['key'] || (string)$key === '0|' . $best_colorway) {
             continue;
         }
         $rival = $rival === null ? (float)$entry['all'] : max($rival, (float)$entry['all']);
@@ -712,11 +795,17 @@ function pr_bag_report_chunks(array $seeds, int $size = 200): array
 /**
  * Score one report query for one gate and mode.
  *
+ * In the hidden-colorway mode a query with no winner or no margin cannot be tested against the gate
+ * at all: it is 'unmeasured', counted apart and never as safe.
+ *
  * @param array{key:string,similarity:float,margin:?float,ref:int}|null $result pr_bag_pool_result
- * @return string 'right'|'wrong'|'none' (none: nothing passed the gate, or no candidate)
+ * @return string 'right'|'wrong'|'none' (nothing passed the gate)|'unmeasured' (hidden mode, no margin)
  */
-function pr_bag_report_outcome(string $gate, ?array $result, string $truth_key, array $cfg): string
+function pr_bag_report_outcome(string $gate, ?array $result, string $truth_key, array $cfg, bool $hidden = false): string
 {
+    if ($hidden && ($result === null || $result['margin'] === null)) {
+        return 'unmeasured';
+    }
     if ($result === null || !pr_bag_gate_passes($gate, $result['similarity'], $result['margin'], $cfg)) {
         return 'none';
     }
@@ -725,13 +814,14 @@ function pr_bag_report_outcome(string $gate, ?array $result, string $truth_key, 
 
 /**
  * The enable condition for auto-apply, from held-out-half tallies:
- * zero wrong among hidden-colorway cutouts, and at least 98% right among leave-one-out cutouts
- * that were tagged. A tally with nothing tagged is no evidence, so it does not pass.
+ * zero wrong among hidden-colorway cutouts, at least $min_hidden of those measurable (they had a
+ * margin), and at least 98% right among leave-one-out cutouts that were tagged. A tally with
+ * nothing tagged is no evidence, so it does not pass.
  *
- * @param array<string,array{right:int,wrong:int,none:int}> $tally keys "loo:<gate>" and "hidden:<gate>"
+ * @param array<string,array{right:int,wrong:int,none:int,unmeasured?:int}> $tally keys "loo:<gate>" and "hidden:<gate>"
  * @return array{ok:bool,reasons:list<string>}
  */
-function pr_bag_report_verdict(array $tally): array
+function pr_bag_report_verdict(array $tally, int $min_hidden = 50): array
 {
     $reasons = [];
     foreach (['colorway', 'pair'] as $gate) {
@@ -747,6 +837,11 @@ function pr_bag_report_verdict(array $tally): array
         if ($hidden['right'] + $hidden['wrong'] > 0) {
             $reasons[] = sprintf('%s: %d tagged with the true colorway hidden (every one is wrong)',
                 $gate, $hidden['right'] + $hidden['wrong']);
+        }
+        $measured = $hidden['right'] + $hidden['wrong'] + $hidden['none'];
+        if ($measured < $min_hidden) {
+            $reasons[] = sprintf('%s: only %d measurable hidden-colorway queries (%d had no margin), need %d',
+                $gate, $measured, (int)($hidden['unmeasured'] ?? 0), $min_hidden);
         }
     }
     return ['ok' => $reasons === [], 'reasons' => $reasons];

@@ -365,11 +365,80 @@ pr_check("features: another file's row, or a row for a cutout that is gone, is n
 pr_check("features: a box that moved a little (IoU >= 0.9) is still the cutout",
          array_keys(pr_bag_current_features([$bag_feat(0, 'F1', '[0.11,0.1,0.5,0.9]')], $bag_feat_now)) === ['5:0']);
 
-pr_check("features: no answer with the service up skips the cutout; with it down, stop, unless this same cutout was the one running last time",
-         pr_bag_no_answer_action(true, '', '5:0') === 'skip'
-         && pr_bag_no_answer_action(false, '', '5:0') === 'stop'
-         && pr_bag_no_answer_action(false, '4:1', '5:0') === 'stop'
-         && pr_bag_no_answer_action(false, '5:0', '5:0') === 'skip');
+pr_check("features: a mask rewritten since (mtime differs) or gone makes the row stale, however the box reads",
+         array_keys(pr_bag_current_features([$bag_feat(0, 'F1', '[0.1,0.1,0.5,0.9]') + ['mask_mtime' => 100]], $bag_feat_now, static fn(array $r): ?int => 100)) === ['5:0']
+         && pr_bag_current_features([$bag_feat(0, 'F1', '[0.1,0.1,0.5,0.9]') + ['mask_mtime' => 100]], $bag_feat_now, static fn(array $r): ?int => 101) === []
+         && pr_bag_current_features([$bag_feat(0, 'F1', '[0.1,0.1,0.5,0.9]') + ['mask_mtime' => 100]], $bag_feat_now, static fn(array $r): ?int => null) === []);
+pr_check("features: no row is retried; a finished row is done; an attempt is retried until " . PR_BAG_MAX_ATTEMPTS . " tries, then left alone",
+         pr_bag_feature_state(null) === 'retry'
+         && pr_bag_feature_state(['status' => 'ok', 'attempts' => 0]) === 'done'
+         && pr_bag_feature_state(['status' => 'unusable', 'attempts' => 0]) === 'done'
+         && pr_bag_feature_state(['status' => 'attempt', 'attempts' => PR_BAG_MAX_ATTEMPTS - 1]) === 'retry'
+         && pr_bag_feature_state(['status' => 'attempt', 'attempts' => PR_BAG_MAX_ATTEMPTS]) === 'given_up');
+
+# --- undo keeps the parent of any leaf that stays -----------------------------------------
+$bag_anc = static fn(int $n): array => [20 => [20, 2], 21 => [21, 2], 30 => [30, 3]][$n] ?? [$n];
+$bag_kept = pr_bag_keep_ancestors([20, 2, 30, 3], [21, 30], $bag_anc);
+pr_check("undo: a parent of a leaf that stays on the photo is not removed; the rest is",
+         $bag_kept['remove'] === [20, 30, 3] && $bag_kept['kept'] === [2]
+         && pr_bag_keep_ancestors([20, 2], [20], $bag_anc)['remove'] === [20, 2]
+         && pr_bag_keep_ancestors([], [21], $bag_anc) === ['remove' => [], 'kept' => []]);
+
+# --- the check before any write: facts read just now --------------------------------------
+$bag_pm = ['name_node' => null, 'colorway_node' => 3];
+$bag_ps = ['name_node' => 7, 'colorway_node' => 3];
+$bag_pp = ['products' => [7], 'colorways' => [], 'cutouts' => 1];
+$bag_pw = static function (array $o = []) use ($bag_pm, $bag_ps, $bag_pp): array {
+    $get = static fn(string $k, $default) => array_key_exists($k, $o) ? $o[$k] : $default;
+    return pr_bag_pre_write_verdict($get('bound', 0), $get('match', $bag_pm), $get('seed', $bag_ps), $get('own', false),
+                                    $get('rej', false), $get('photo', $bag_pp), $get('name_ok', true), $get('cw_ok', true));
+};
+pr_check("pre-write: everything as it was is ok, with the plan",
+         $bag_pw()['status'] === 'ok' && $bag_pw()['plan']['add_colorway'] === true);
+pr_check("pre-write: a cutout no longer on the photo, a seed that is gone or re-answered (either value), is gone",
+         $bag_pw(['bound' => null])['reason'] === 'cutout' && $bag_pw(['seed' => null])['reason'] === 'seed_gone'
+         && $bag_pw(['seed' => ['colorway_node' => 4] + $bag_ps])['reason'] === 'seed_changed'
+         && $bag_pw(['match' => ['name_node' => 7, 'colorway_node' => 3], 'seed' => ['name_node' => 8] + $bag_ps])['reason'] === 'seed_changed'
+         && $bag_pw(['seed' => ['name_node' => 8] + $bag_ps])['status'] === 'blocked');      # a colorway-only match only needs the photo to have the seed's product
+pr_check("pre-write: a cutout with an answer of its own, or the colorway rejected for it, is gone",
+         $bag_pw(['own' => true])['reason'] === 'own_seed' && $bag_pw(['rej' => true])['reason'] === 'rejected'
+         && $bag_pw(['own' => true])['status'] === 'gone');
+pr_check("pre-write: the photo's tags as they are now decide the plan; a Product that is no longer a leaf fails; a deleted Colorway blocks",
+         $bag_pw(['photo' => ['products' => [7], 'colorways' => [4], 'cutouts' => 1]])['reason'] === 'other_colorway'
+         && $bag_pw(['photo' => ['products' => [9], 'colorways' => [], 'cutouts' => 1]])['reason'] === 'product_changed'
+         && $bag_pw(['photo' => null])['status'] === 'failed'
+         && $bag_pw(['name_ok' => false])['status'] === 'failed'
+         && $bag_pw(['cw_ok' => false])['status'] === 'blocked');
+
+# --- the report: unmeasured hidden queries are not safe, and a minimum must be measurable ---
+$bag_win = ['key' => '3', 'similarity' => 0.95, 'margin' => 0.2, 'ref' => 1];
+pr_check("report outcome: in hidden mode a query with no winner or no margin is unmeasured, not 'none'",
+         pr_bag_report_outcome('colorway', null, '3', $bag_cfg, true) === 'unmeasured'
+         && pr_bag_report_outcome('colorway', ['margin' => null] + $bag_win, '3', $bag_cfg, true) === 'unmeasured'
+         && pr_bag_report_outcome('colorway', ['margin' => null] + $bag_win, '3', $bag_cfg, false) === 'none'
+         && pr_bag_report_outcome('colorway', ['margin' => 0.05] + $bag_win, '3', $bag_cfg, true) === 'none'
+         && pr_bag_report_outcome('colorway', $bag_win, '4', $bag_cfg, true) === 'wrong');
+$bag_few = ['loo:colorway' => ['right' => 49, 'wrong' => 0, 'none' => 9], 'loo:pair' => ['right' => 60, 'wrong' => 1, 'none' => 2],
+            'hidden:colorway' => ['right' => 0, 'wrong' => 0, 'none' => 49, 'unmeasured' => 900], 'hidden:pair' => ['right' => 0, 'wrong' => 0, 'none' => 63]];
+$bag_few_v = pr_bag_report_verdict($bag_few);
+pr_check("verdict: 49 measurable hidden queries is not enough however many had no margin; 50 is, and the minimum is configurable",
+         $bag_few_v['ok'] === false && count($bag_few_v['reasons']) === 1 && str_contains($bag_few_v['reasons'][0], '900 had no margin')
+         && pr_bag_report_verdict(['hidden:colorway' => ['none' => 50] + $bag_few['hidden:colorway']] + $bag_few)['ok'] === true
+         && pr_bag_report_verdict($bag_few, 49)['ok'] === true
+         && pr_bag_config(['product_recognition_bag_report_min_hidden' => 12])['report_min_hidden'] === 12
+         && pr_bag_config([])['report_min_hidden'] === 50);
+
+# --- a competitor with no product rivals other colorways only ------------------------------
+$bag_pp_keys = [
+    '7|1' => ['all' => 0.95, 'seed' => 0.95, 'ref' => 5, 'n' => 1],
+    '0|1' => ['all' => 0.99, 'seed' => null, 'ref' => 0, 'n' => 1],       # same colorway, product unknown: ignored
+    '0|2' => ['all' => 0.80, 'seed' => null, 'ref' => 0, 'n' => 1],       # another colorway: a rival
+    '8|1' => ['all' => 0.70, 'seed' => null, 'ref' => 0, 'n' => 1],       # same colorway, another product: a rival pair key
+];
+pr_check("pool result: a productless competitor of the winner's own colorway is ignored, one of another colorway rivals it, a known other product still does",
+         abs(pr_bag_pool_result($bag_pp_keys)['margin'] - 0.15) < 1e-12
+         && pr_bag_pool_result(['7|1' => $bag_pp_keys['7|1'], '0|1' => $bag_pp_keys['0|1']])['margin'] === null
+         && abs(pr_bag_pool_result(['7|1' => $bag_pp_keys['7|1'], '8|1' => $bag_pp_keys['8|1']])['margin'] - 0.25) < 1e-12);
 
 # --- the three tables: CREATE statements match dbstruct, and only the CLI writes them ------
 $bag_defs = pr_bag_table_definitions();
@@ -447,6 +516,39 @@ pr_check("tables: the review tab, accept and reject check the tables exist befor
          preg_match('/function pr_bag_render_review\(\): void\s*\{\s*global[^;]*;\s*if \(!pr_bag_tables_exist\(\)\)/', $bag_match_src) === 1
          && preg_match('/function pr_bag_apply_match\([^)]*\): string\s*\{\s*if \(!pr_bag_tables_exist\(\)\)/', $bag_match_src) === 1
          && preg_match('/function pr_bag_reject_match\([^)]*\): string\s*\{\s*if \(!pr_bag_tables_exist\(\)\)/', $bag_match_src) === 1);
+
+# --- the DB layer is wired to the pure checks (source checks: the SQL itself needs a database) ---
+$bag_fn = static function (string $name) use ($bag_match_src): string {
+    $at = (int)strpos($bag_match_src, "function $name(");
+    $end = strpos($bag_match_src, "\n}\n", $at);
+    return substr($bag_match_src, $at, ($end === false ? strlen($bag_match_src) : $end) - $at);
+};
+pr_check("wiring: accept and the nightly write run pr_bag_pre_write inside the transaction, after the claim, and the unattended one re-checks its gate and auto-apply",
+         preg_match('/db_begin_transaction.*?UPDATE product_bag_match SET state = .applied..*?pr_bag_pre_write\(\$m\).*?db_end_transaction/s', $bag_fn('pr_bag_apply_match')) === 1
+         && str_contains($bag_fn('pr_bag_apply_match'), 'pr_bag_gate_passes') && str_contains($bag_fn('pr_bag_apply_match'), 'pr_bag_auto_ok')
+         && !str_contains($bag_fn('pr_bag_run_match'), 'pr_bag_load_photo_states([$q'));
+pr_check("wiring: an open row is checked with pr_bag_pre_write before it is inserted",
+         preg_match('/pr_bag_pre_write\(\$row\).*?INSERT INTO product_bag_match/s', $bag_fn('pr_bag_enact')) === 1);
+pr_check("wiring: matching and the report check /health first; both build candidates with pr_bag_build_candidates and load competitors",
+         preg_match('/pr_bag_enabled\(\)\)\s*\{.*?\}\s*if \(!pr_service_health\(\)\)/s', $bag_fn('pr_bag_run_match')) === 1
+         && str_contains($bag_fn('pr_bag_run_match'), 'pr_bag_build_candidates(') && str_contains($bag_fn('pr_bag_report'), 'pr_bag_build_candidates(')
+         && str_contains($bag_fn('pr_bag_report'), 'pr_bag_load_competitors(') && str_contains($bag_fn('pr_bag_report'), 'pr_service_health()')
+         && !str_contains($bag_fn('pr_bag_report'), 'hide_product'));
+pr_check("wiring: an open row whose seed is only waiting for its features is not closed",
+         str_contains($bag_fn('pr_bag_run_match'), "'close' && isset(\$pending_seeds["));
+pr_check("wiring: the feature pass records an attempt before posting, stores only if the mask mtime did not move, skips .fail masks, and has no sysvar or rewind",
+         preg_match('/pr_bag_store_attempt\(.*?pr_bag_compute_features.*?filemtime\(\$mask\) !== \$mtime.*?pr_bag_store_features/s', $bag_fn('pr_bag_backfill_features')) === 1
+         && str_contains($bag_fn('pr_bag_backfill_features'), "'.fail'") && !str_contains($bag_match_src, 'feature_suspect'));
+$bag_view_src = $bag_src('include/product_recognition_view.php');
+pr_check("wiring: a region commit clears the cutout features before and after it writes the masks",
+         preg_match('/function pr_commit_regions.*?pr_bag_forget_cutouts\(\$ref\);.*?pr_write_mask_bytes.*?pr_bag_forget_cutouts\(\$ref\);\s*\}/s', $bag_view_src) === 1);
+pr_check("wiring: undo keeps ancestors of the leaves that stay, and can be limited to one match",
+         str_contains($bag_fn('pr_bag_undo_matches'), 'pr_bag_keep_ancestors(') && str_contains($bag_fn('pr_bag_undo_matches'), 'AND ref = ?')
+         && str_contains($bag_src('scripts/product_recognition_cli.php'), '--undo-bag-matches [--resource=N | --match=N]'));
+pr_check("wiring: the undo hint is printed only for rows the pass wrote, and the not-ready message names the CLI modes",
+         str_contains($bag_src('scripts/product_recognition_cli.php'), "\$a['unattended'] ?")
+         && str_contains($bag_fn('pr_bag_applied_from_changed_seeds'), 'decided_by')
+         && preg_match('/product_recognition_bag_no_tables"\] = "[^"]*--cutout-features or --all/', $bag_src('languages/en.php')) === 1);
 
 # --- forms: the AJAX post never sends the clicked button -----------------------------------
 $bag_view = $bag_src('hooks/view.php');

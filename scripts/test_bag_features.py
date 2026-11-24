@@ -204,11 +204,12 @@ check('colorway pool: a productless competitor is a rival colorway for any query
       set(_out['colorway']) == {'1', '2'} and _out['colorway']['2']['seed'] is None)
 check('pair pool: a productless competitor of ANOTHER colorway is a different key (rival)',
       '0|2' in _out['pair'] and _out['pair']['0|2']['seed'] is None)
-check('pair pool: a productless competitor of the SAME colorway joins that key, not a rival key',
-      '0|1' not in _out['pair'] and _out['pair']['7|1']['n'] == 2 and set(_out['pair']) == {'7|1', '0|2'})
+check('pair pool: a productless competitor of the SAME colorway stays its own key (PHP ignores it for that colorway)',
+      '0|1' in _out['pair'] and _out['pair']['0|1']['seed'] is None and _out['pair']['7|1']['n'] == 1
+      and set(_out['pair']) == {'7|1', '0|1', '0|2'})
 _alone = bf.match_queries([_q], [_c(10, 7, 1, 'seed', ref=5), _c(12, 0, 1, 'competitor')])[0]
-check('pair pool: with only the same-colorway productless competitor there is no rival key at all (margin unknown)',
-      set(_alone['pair']) == {'7|1'})
+check('pair pool: the same-colorway productless competitor is reported, not merged into the seed key',
+      set(_alone['pair']) == {'7|1', '0|1'} and _alone['pair']['7|1']['all'] == _alone['pair']['7|1']['seed'])
 _other = bf.match_queries([dict(_q, products={8})], [_c(11, 0, 2, 'competitor'), _c(13, 7, 2, 'competitor')])[0]
 check('colorway pool: a competitor of another known product is still left out', set(_other['colorway']) == {'2'} and _other['colorway']['2']['n'] == 1)
 check('no queries or no candidates is an empty answer, not an error',
@@ -231,16 +232,20 @@ want = {str(k): float(SIM2[0, np.where(keep & (c_color == k))[0]].max()) for k i
 check('near_copy drops a candidate whose photo holds a >.95 DINOv2 near copy, whole photo',
       nd == {int(c_res2[7])} and {k: v['all'] for k, v in dropped.items()} == want
       and {k: v['all'] for k, v in plain.items()} != want)
-hidden = bf.match_queries([dict(q0, hide_colorway=2, hide_product=7)], cands)[0]
+hidden = bf.match_queries([dict(q0, hide_colorway=2)], cands)[0]
 check('hide_colorway removes that colorway from the colorway pool',
       '2' not in hidden['colorway'] and '2' in bf.match_queries([q0], cands)[0]['colorway'])
 q_same = dict(q0, shoot='A')
 full = bf.match_queries([q_same], cands)[0]['pair']
 victim = sorted(full)[0]
-vp, vc = (int(n) for n in victim.split('|'))
-hp = bf.match_queries([dict(q_same, hide_colorway=vc, hide_product=vp)], cands)[0]['pair']
-check('hide removes only that product|colorway key from the pair pool',
-      len(full) > 1 and victim not in hp and set(hp) == set(full) - {victim})
+vc = int(victim.split('|')[1])
+hp = bf.match_queries([dict(q_same, hide_colorway=vc)], cands)[0]['pair']
+check('hide removes every candidate of that colorway, of any product, from the pair pool',
+      len(full) > 1 and not any(int(k.split('|')[1]) == vc for k in hp)
+      and set(hp) == {k for k in full if int(k.split('|')[1]) != vc})
+_hid = bf.match_queries([dict(_q, hide_colorway=2)], [_c(10, 7, 1, 'seed', ref=5), _c(11, 0, 2, 'competitor'), _c(14, 7, 2, 'seed', ref=6)])[0]
+check('hide removes competitors of the hidden colorway too, in both pools',
+      set(_hid['colorway']) == {'1'} and set(_hid['pair']) == {'7|1'})
 
 print('\nFAILED %d' % fails if fails else '\nall checks passed')
 sys.exit(1 if fails else 0)
