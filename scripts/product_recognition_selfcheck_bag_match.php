@@ -104,6 +104,29 @@ pr_check("pool result: a competitor of the winner's own key is not a rival",
              '2' => ['all' => 0.60, 'seed' => 0.60, 'ref' => 6, 'n' => 1],
          ])['margin'] - 0.30) < 1e-12);
 
+# --- a rejected colorway cannot win, but it still counts as a rival ----------------------------
+$bag_black_navy = [
+    '3' => ['all' => 0.90, 'seed' => 0.90, 'ref' => 11, 'n' => 1],      # Black, rejected for this cutout
+    '4' => ['all' => 0.89, 'seed' => 0.89, 'ref' => 12, 'n' => 1],      # Navy
+    '5' => ['all' => 0.60, 'seed' => 0.60, 'ref' => 13, 'n' => 1],
+];
+$bag_res = pr_bag_pool_result($bag_black_navy, [3]);
+pr_check("pool result: with Black rejected the next best key (Navy) is offered, and Black still lowers its margin",
+         $bag_res['key'] === '4' && $bag_res['ref'] === 12 && abs($bag_res['margin'] - (0.89 - 0.90)) < 1e-12
+         && pr_bag_pool_result($bag_black_navy)['key'] === '3');
+pr_check("pool result: a pair key is rejected by its colorway part; every key rejected is no result",
+         pr_bag_pool_result(['7|3' => ['all' => 0.9, 'seed' => 0.9, 'ref' => 1], '7|4' => ['all' => 0.8, 'seed' => 0.8, 'ref' => 2]], [3])['key'] === '7|4'
+         && pr_bag_pool_result(['7|3' => ['all' => 0.9, 'seed' => 0.9, 'ref' => 1]], [3]) === null
+         && pr_bag_pool_result(['13' => ['all' => 0.9, 'seed' => 0.9, 'ref' => 1]], [3])['key'] === '13');
+$bag_decide_q = ['photo' => ['products' => [7], 'colorways' => [], 'cutouts' => 2], 'shoot' => '10,77'];
+$bag_decide_seeds = [11 => ['product' => 7, 'shoot' => '10,20'], 12 => ['product' => 7, 'shoot' => '10,20']];
+$d = pr_bag_decide($bag_decide_q, $bag_black_navy, [], $bag_decide_seeds, null, [3], $bag_cfg);
+pr_check("decide: rejecting Black does not hide Navy; it goes to review (the margin is negative), never auto",
+         $d['action'] === 'insert' && $d['match']['colorway_node'] === 4 && $d['match']['seed_ref'] === 12
+         && $d['auto'] === false && $d['match']['margin'] < 0);
+$d = pr_bag_decide($bag_decide_q, $bag_black_navy, [], $bag_decide_seeds, null, [3, 4], $bag_cfg);
+pr_check("decide: with both rejected, only a key under the review floor is left, so nothing", $d['action'] === 'none');
+
 # --- gate numbers --------------------------------------------------------------------------
 pr_check("gate: colorway needs .85 and .10, inclusive; unknown margin never passes",
          pr_bag_gate_passes('colorway', 0.85, 0.10, $bag_cfg)
@@ -133,9 +156,6 @@ pr_check("choose: under the .75 review floor is nothing",
          pr_bag_choose(['similarity' => 0.74] + $bag_c, null, $bag_cfg) === null
          && pr_bag_choose(['similarity' => 0.75] + $bag_c, null, $bag_cfg)['passes'] === false
          && pr_bag_choose(null, null, $bag_cfg) === null);
-pr_check("choose: a rejected colorway is not offered again, the other gate still is",
-         pr_bag_choose($bag_c, null, $bag_cfg, [3]) === null
-         && pr_bag_choose($bag_c, ['key' => '7|4'] + $bag_p, $bag_cfg, [3])['colorway_node'] === 4);
 pr_check("choose: no margin means suggest only",
          pr_bag_choose(['margin' => null] + $bag_c, null, $bag_cfg)['passes'] === false);
 
@@ -199,6 +219,8 @@ pr_check("undo: a person's node the match did not write is untouched",
 $bag_undo = pr_bag_undo_plan('applied', '10,11', '30', [10, 30], [10]);
 pr_check("undo: a node another applied match on the photo also wrote stays",
          $bag_undo['remove'] === [30] && $bag_undo['protected'] === [10]);
+pr_check("undo: a Colorway a person's accepted match relies on stays, though that match wrote nothing itself",
+         pr_bag_undo_plan('applied', '', '30,31', [30, 31], [30])['remove'] === [31]);
 pr_check("undo: only an applied match has anything to undo",
          pr_bag_undo_plan('open', '10', '30', [10, 30]) === ['remove' => [], 'already_gone' => [], 'protected' => []]
          && pr_bag_undo_plan('undone', '10', '30', [10, 30])['remove'] === []
@@ -327,6 +349,110 @@ pr_check("identity: two rows for one cutout bind to the same index and only the 
          $bag_two[0]['bound'] === 1 && $bag_two[1]['bound'] === 1 && $bag_two[0]['newest'] === false
          && $bag_two[1]['newest'] === true && $bag_two[2]['bound'] === null && $bag_two[2]['newest'] === false);
 
+
+# --- a stored feature row is the cutout only if file and box say so ------------------------
+$bag_feat_now = [5 => ['file_checksum' => 'F1', 'bboxes' => [0 => [0.1, 0.1, 0.5, 0.9], 1 => [0.6, 0.1, 0.9, 0.9]]]];
+$bag_feat = static fn(int $i, string $sum, string $box): array => ['ref' => $i + 1, 'resource' => 5, 'region_index' => $i, 'file_checksum' => $sum, 'bbox' => $box];
+$bag_fresh = pr_bag_current_features([
+    $bag_feat(0, 'F1', '[0.1,0.1,0.5,0.9]'),       # current
+    $bag_feat(1, 'F1', '[0.1,0.1,0.5,0.9]'),       # stored under the old numbering: index 1 is another bag now
+], $bag_feat_now);
+pr_check("features: a row whose box is not the box now at its index is a leftover from a re-cut, however the checksum reads",
+         array_keys($bag_fresh) === ['5:0']);
+pr_check("features: another file's row, or a row for a cutout that is gone, is no use",
+         pr_bag_current_features([$bag_feat(0, 'OLD', '[0.1,0.1,0.5,0.9]'), $bag_feat(3, 'F1', '[0.1,0.1,0.5,0.9]')], $bag_feat_now) === []
+         && pr_bag_current_features([$bag_feat(0, 'F1', '[0.1,0.1,0.5,0.9]')], []) === []);
+pr_check("features: a box that moved a little (IoU >= 0.9) is still the cutout",
+         array_keys(pr_bag_current_features([$bag_feat(0, 'F1', '[0.11,0.1,0.5,0.9]')], $bag_feat_now)) === ['5:0']);
+
+# --- the three tables: CREATE statements match dbstruct, and only the CLI writes them ------
+$bag_defs = pr_bag_table_definitions();
+pr_check("tables: exactly the three bag tables, each CREATE TABLE IF NOT EXISTS",
+         array_keys($bag_defs) === ['product_bag_tag', 'product_cutout_feature', 'product_bag_match']
+         && count(array_filter($bag_defs, static fn(string $q, string $t): bool => str_starts_with($q, "CREATE TABLE IF NOT EXISTS $t ("), ARRAY_FILTER_USE_BOTH)) === 3);
+$bag_dbstruct_bad = [];
+foreach ($bag_defs as $bag_table => $bag_sql) {
+    foreach (file(dirname(__DIR__) . "/dbstruct/table_$bag_table.txt", FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $bag_line) {
+        [$bag_col, $bag_type, $bag_null, $bag_key, $bag_default, $bag_extra] = array_pad(explode(',', $bag_line, 6), 6, '');
+        $bag_type = preg_replace('/^(int|bigint)\(\d+\)$/', '$1', $bag_type);
+        if (!preg_match('/^\s+' . preg_quote($bag_col, '/') . ' (\S+?)(?: (NOT NULL))?(?: AUTO_INCREMENT)?(?: DEFAULT ([^\s,]+))?,?$/m', $bag_sql, $bag_m)) {
+            $bag_dbstruct_bad[] = "$bag_table.$bag_col missing";
+            continue;
+        }
+        $bag_has_default = isset($bag_m[3]);
+        $bag_want_default = $bag_default === '' ? null : trim($bag_default, "'");
+        if ($bag_m[1] !== $bag_type) {
+            $bag_dbstruct_bad[] = "$bag_table.$bag_col type {$bag_m[1]} vs $bag_type";
+        }
+        if ((($bag_m[2] ?? '') === 'NOT NULL') !== ($bag_null === 'NO')) {
+            $bag_dbstruct_bad[] = "$bag_table.$bag_col nullability";
+        }
+        if ($bag_want_default !== null && (!$bag_has_default || trim($bag_m[3], "'") !== $bag_want_default)) {
+            $bag_dbstruct_bad[] = "$bag_table.$bag_col default";
+        }
+        if (str_contains($bag_extra, 'auto_increment') !== str_contains($bag_sql, "$bag_col int NOT NULL AUTO_INCREMENT")) {
+            $bag_dbstruct_bad[] = "$bag_table.$bag_col auto_increment";
+        }
+    }
+    $bag_indexes = [];
+    foreach (glob(dirname(__DIR__) . "/dbstruct/index_$bag_table.txt") as $bag_file) {
+        foreach (file($bag_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $bag_line) {
+            $c = explode(',', $bag_line);
+            $bag_indexes[$c[2]]['unique'] = $c[1] === '0';
+            $bag_indexes[$c[2]]['cols'][(int)$c[3]] = $c[4];
+        }
+    }
+    foreach ($bag_indexes as $bag_name => $bag_ix) {
+        ksort($bag_ix['cols']);
+        $bag_want = ($bag_ix['unique'] ? 'UNIQUE KEY' : 'KEY') . " $bag_name (" . implode(', ', $bag_ix['cols']) . ')';
+        if (!str_contains($bag_sql, $bag_want)) {
+            $bag_dbstruct_bad[] = "$bag_table index $bag_want";
+        }
+    }
+    if (substr_count($bag_sql, 'KEY ') !== count($bag_indexes) + 1) {     # + PRIMARY KEY
+        $bag_dbstruct_bad[] = "$bag_table has an index dbstruct does not";
+    }
+}
+pr_check("tables: every dbstruct column (type, NOT NULL, default, auto_increment) and index is in the CREATE statement" . ($bag_dbstruct_bad ? ' (' . implode('; ', $bag_dbstruct_bad) . ')' : ''),
+         $bag_dbstruct_bad === []);
+# Web requests, read-only modes and the hot paths never create tables or run the structure check.
+$bag_src = static fn(string $f): string => (string)file_get_contents(dirname(__DIR__) . '/' . $f);
+$bag_no_check = true;
+foreach (array_merge(glob(dirname(__DIR__) . '/include/*.php'), glob(dirname(__DIR__) . '/hooks/*.php'), glob(dirname(__DIR__) . '/pages/*.php')) as $bag_file) {
+    foreach (token_get_all((string)file_get_contents($bag_file)) as $bag_tok) {       # code only, not comments
+        if (is_array($bag_tok) && $bag_tok[0] === T_STRING && $bag_tok[1] === 'check_db_structs') {
+            $bag_no_check = false;
+        }
+    }
+}
+$bag_ensure = $bag_src('include/product_recognition_bag_match.php');
+$bag_ensure = substr($bag_ensure, (int)strpos($bag_ensure, 'function pr_bag_ensure_tables'), 700);
+pr_check("tables: nothing calls check_db_structs(), and creating the tables refuses to run outside the CLI",
+         $bag_no_check && str_contains($bag_ensure, "PHP_SAPI !== 'cli'") && str_contains($bag_ensure, 'pr_bag_table_definitions()'));
+$bag_callers = [];
+foreach (array_merge(glob(dirname(__DIR__) . '/include/*.php'), glob(dirname(__DIR__) . '/hooks/*.php'), glob(dirname(__DIR__) . '/pages/*.php')) as $bag_file) {
+    if (preg_match_all('/pr_bag_ensure_tables\(/', (string)file_get_contents($bag_file), $bag_m) && !str_ends_with($bag_file, 'product_recognition_bag_match.php')) {
+        $bag_callers[] = basename($bag_file);
+    }
+}
+pr_check("tables: no hook or page calls pr_bag_ensure_tables()", $bag_callers === []);
+$bag_match_src = $bag_src('include/product_recognition_bag_match.php');
+pr_check("tables: the review tab, accept and reject check the tables exist before they query them",
+         preg_match('/function pr_bag_render_review\(\): void\s*\{\s*global[^;]*;\s*if \(!pr_bag_tables_exist\(\)\)/', $bag_match_src) === 1
+         && preg_match('/function pr_bag_apply_match\([^)]*\): string\s*\{\s*if \(!pr_bag_tables_exist\(\)\)/', $bag_match_src) === 1
+         && preg_match('/function pr_bag_reject_match\([^)]*\): string\s*\{\s*if \(!pr_bag_tables_exist\(\)\)/', $bag_match_src) === 1);
+
+# --- forms: the AJAX post never sends the clicked button -----------------------------------
+$bag_view = $bag_src('hooks/view.php');
+pr_check("forms: the panel's bag Accept and Reject carry the action in a hidden field, not in a submit button's name",
+         !preg_match('/<button[^>]*name="action"[^>]*value="bag_/', $bag_view)
+         && str_contains($bag_view, "'bag_accept' => 'product_recognition_accept'")
+         && preg_match('/<input type="hidden" name="action" value="<\?php echo escape\(\$bag_action\)/', $bag_view) === 1);
+pr_check("forms: the panel's Apply form carries the file checksum and box, and apply.php passes them to the seed save",
+         preg_match('/pr_catalog_apply.*?name="file_checksum".*?name="bbox"/s', $bag_view) === 1
+         && preg_match('/pr_bag_save_tag\([^;]*getval\("file_checksum"[^;]*getval\("bbox"/s', $bag_src('pages/apply.php')) === 1);
+pr_check("panel: tells the person when the tables are missing instead of showing nothing",
+         str_contains($bag_view, "pr_bag_disabled_reason() === 'tables'") && str_contains($bag_view, 'product_recognition_bag_no_tables'));
 
 # --- import rows must be objects -----------------------------------------------------------
 pr_check("import: only a JSON object is a row; a number, string, null, list or bool is rejected, not fatal",

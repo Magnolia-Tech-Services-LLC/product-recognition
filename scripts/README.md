@@ -110,6 +110,12 @@ reads `product_cutout_feature` itself and returns raw scores per key (colorway p
 only. Gates, margins and what may be written are PHP's (`product_recognition_bag_gates.php`).
 `near_copy` and the `hide_*` query fields exist for `--bag-match-report` only.
 
+The three tables (`product_bag_tag`, `product_cutout_feature`, `product_bag_match`) are created
+by the plugin's CLI writing modes with `CREATE TABLE IF NOT EXISTS` statements that match
+`dbstruct/`, as the sheet tables are. A web request or a read-only mode never creates them and
+never runs ResourceSpace's structure check. The service reads a cutout's features by index, so
+the plugin sends only cutouts whose stored file checksum and box still match the photo (IoU >= 0.9).
+
 Tests, no model and no database needed (numpy and Pillow; the endpoint test also needs torch,
 fastapi and httpx, and skips without them):
 

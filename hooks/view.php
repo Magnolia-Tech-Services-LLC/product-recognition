@@ -233,6 +233,8 @@ function HookProduct_recognitionViewCustompanels()
                                 <?php generateFormToken('pr_catalog_apply'); ?>
                                 <input type="hidden" name="resource" value="<?php echo (int)$ref; ?>" />
                                 <input type="hidden" name="region" value="<?php echo (int)$row['region']; ?>" />
+                                <input type="hidden" name="file_checksum" value="<?php echo escape($checksum); ?>" />
+                                <input type="hidden" name="bbox" value="<?php echo escape(json_encode($bag_boxes[(int)$row['region']] ?? [])); ?>" />
                                 <input type="hidden" name="model_text"
                                        value="<?php echo escape((string)$row['model_name']); ?>" />
                                 <?php if ($in_modal) { ?>
@@ -398,23 +400,29 @@ function HookProduct_recognitionViewCustompanels()
                                 $bag_here['seed']['product'], $bag_here['seed']['colorway'])); ?></div>
                             <?php } ?>
                             <?php if ($bag_here['match'] !== null) { ?>
+                            <span><?php echo escape(sprintf($lang['product_recognition_bag_found'],
+                                $bag_here['match']['product'] !== '' ? $bag_here['match']['product'] : $lang['product_recognition_bag_product_on_photo'],
+                                $bag_here['match']['colorway'],
+                                sprintf('%.0f%%', 100 * $bag_here['match']['similarity']))); ?></span>
+                            <?php /* One form per button, the action in a hidden field: the AJAX post serializes the form, which never includes the clicked button. */
+                            foreach (['bag_accept' => 'product_recognition_accept', 'bag_reject' => 'product_recognition_reject'] as $bag_action => $bag_label) { ?>
                             <form method="post" action="<?php echo escape($review); ?>" style="display:inline;"
                                   onsubmit="return <?php echo $post_js; ?>(this, true);">
                                 <?php generateFormToken('pr_bag_review'); ?>
+                                <input type="hidden" name="action" value="<?php echo escape($bag_action); ?>" />
                                 <input type="hidden" name="match" value="<?php echo (int)$bag_here['match']['ref']; ?>" />
                                 <input type="hidden" name="from" value="view" />
                                 <input type="hidden" name="resource" value="<?php echo (int)$ref; ?>" />
                                 <?php if ($in_modal) { ?>
                                 <input type="hidden" name="modal" value="true" />
                                 <?php } ?>
-                                <span><?php echo escape(sprintf($lang['product_recognition_bag_found'],
-                                    $bag_here['match']['product'] !== '' ? $bag_here['match']['product'] : $lang['product_recognition_bag_product_on_photo'],
-                                    $bag_here['match']['colorway'],
-                                    sprintf('%.0f%%', 100 * $bag_here['match']['similarity']))); ?></span>
-                                <button type="submit" name="action" value="bag_accept"><?php echo escape($lang['product_recognition_accept']); ?></button>
-                                <button type="submit" name="action" value="bag_reject"><?php echo escape($lang['product_recognition_reject']); ?></button>
+                                <button type="submit"><?php echo escape($lang[$bag_label]); ?></button>
                             </form>
                             <?php } ?>
+                            <?php } ?>
+                            <?php } ?>
+                            <?php if (empty($row['fallback']) && pr_bag_disabled_reason() === 'tables') { ?>
+                            <div><?php echo escape($lang['product_recognition_bag_no_tables']); ?></div>
                             <?php } ?>
                             <?php if ($row['suggestion'] > 0) { ?>
                             <form method="post" action="<?php echo escape($review); ?>" style="display:inline;"

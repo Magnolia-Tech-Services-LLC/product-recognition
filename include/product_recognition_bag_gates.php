@@ -57,6 +57,71 @@ function pr_bag_config(?array $source = null): array
     ];
 }
 
+/**
+ * CREATE TABLE IF NOT EXISTS for the three bag tables, matching dbstruct/ column for column and
+ * index for index (dbstruct lists NOT NULL but ResourceSpace's structure check ignores it, so the
+ * check would create them nullable). Run only by the CLI writing modes (pr_bag_ensure_tables),
+ * as pr_sheet_ensure_tables does for the sheet tables.
+ *
+ * @return array<string,string> table => statement
+ */
+function pr_bag_table_definitions(): array
+{
+    $tail = ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci';
+    return [
+        'product_bag_tag' => "CREATE TABLE IF NOT EXISTS product_bag_tag (
+            ref int NOT NULL AUTO_INCREMENT,
+            resource int NOT NULL,
+            region_index int NOT NULL DEFAULT '0',
+            file_checksum varchar(64) NOT NULL DEFAULT '',
+            bbox varchar(255) NOT NULL DEFAULT '',
+            name_node int NOT NULL DEFAULT '0',
+            colorway_node int NOT NULL DEFAULT '0',
+            user int DEFAULT NULL,
+            created datetime DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ref),
+            KEY bag_tag_resource (resource, file_checksum)
+        $tail",
+        'product_cutout_feature' => "CREATE TABLE IF NOT EXISTS product_cutout_feature (
+            ref int NOT NULL AUTO_INCREMENT,
+            resource int NOT NULL,
+            region_index int NOT NULL DEFAULT '0',
+            file_checksum varchar(64) NOT NULL DEFAULT '',
+            bbox varchar(255) NOT NULL DEFAULT '',
+            mask_mtime int NOT NULL DEFAULT '0',
+            dinov2 blob,
+            hist blob,
+            status varchar(10) NOT NULL DEFAULT 'ok',
+            created datetime DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ref),
+            UNIQUE KEY cutout_feature_key (resource, region_index)
+        $tail",
+        'product_bag_match' => "CREATE TABLE IF NOT EXISTS product_bag_match (
+            ref int NOT NULL AUTO_INCREMENT,
+            resource int NOT NULL,
+            region_index int NOT NULL DEFAULT '0',
+            file_checksum varchar(64) NOT NULL DEFAULT '',
+            bbox varchar(255) NOT NULL DEFAULT '',
+            seed_ref int NOT NULL DEFAULT '0',
+            name_node int DEFAULT NULL,
+            colorway_node int NOT NULL DEFAULT '0',
+            similarity double NOT NULL DEFAULT '0',
+            margin double DEFAULT NULL,
+            same_shoot tinyint(1) NOT NULL DEFAULT '0',
+            state varchar(10) NOT NULL DEFAULT 'open',
+            name_written varchar(255) NOT NULL DEFAULT '',
+            colorway_written varchar(255) NOT NULL DEFAULT '',
+            decided_by int DEFAULT NULL,
+            decided_at datetime DEFAULT NULL,
+            created datetime DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ref),
+            KEY bag_match_cutout (resource, region_index),
+            KEY bag_match_state (state),
+            KEY bag_match_seed (seed_ref)
+        $tail",
+    ];
+}
+
 /** Case, punctuation and spacing folded away, as pr_fold_label does for node names. */
 function pr_bag_fold(string $name): string
 {
@@ -190,6 +255,26 @@ function pr_bag_bind_rows(array $rows, array $current): array
 }
 
 /**
+ * Feature rows that describe the cutout now at their index: the file is the current file and the
+ * stored box overlaps the current box (the service reads a cutout's features by index, so a row
+ * at another index is no use to it). Anything else is a leftover from before a re-cut.
+ *
+ * @param list<array<string,mixed>> $rows resource, region_index, file_checksum, bbox, ...
+ * @param array<int,array{file_checksum:string,bboxes:array<int,array<int,float>>}> $current by resource
+ * @return array<string,array<string,mixed>> "resource:index" => row
+ */
+function pr_bag_current_features(array $rows, array $current): array
+{
+    $out = [];
+    foreach ($rows as $row) {
+        if (pr_bag_bind_row($row, $current[(int)$row['resource']] ?? null) === (int)$row['region_index']) {
+            $out[(int)$row['resource'] . ':' . (int)$row['region_index']] = $row;
+        }
+    }
+    return $out;
+}
+
+/**
  * The shoot a photo belongs to: its Folder Path node set, minus the configured copy segments,
  * as one comparable string. Two photos are the same shoot when the strings are equal and not
  * empty. A photo with no Folder Path has no shoot.
@@ -238,19 +323,23 @@ function pr_bag_competitor_key(array $photo): ?array
 /**
  * The best seed key of one pool and its margin over the best DIFFERENT key. A rival counts by
  * its best score over seeds AND competitors ('all'); only a key with a seed can win ('seed').
+ * A key whose colorway a person rejected for this cutout cannot win, but it still counts as a
+ * rival: the next best key is offered, with the rejected one lowering its margin.
  * With no other key at all the margin is null: unknown, which never passes a gate.
  *
  * @param array<string,array{all:float,seed:?float,ref:int,n?:int}> $keys service output for one pool
- * @return array{key:string,similarity:float,margin:?float,ref:int}|null null when no key has a seed
+ * @param list<int> $rejected_colorways
+ * @return array{key:string,similarity:float,margin:?float,ref:int}|null null when no key may win
  */
-function pr_bag_pool_result(array $keys): ?array
+function pr_bag_pool_result(array $keys, array $rejected_colorways = []): ?array
 {
     $best = null;
     foreach ($keys as $key => $entry) {
-        if ($entry['seed'] === null) {
+        $key = (string)$key;
+        $cut = strrpos($key, '|');
+        if ($entry['seed'] === null || in_array((int)($cut === false ? $key : substr($key, $cut + 1)), $rejected_colorways, true)) {
             continue;
         }
-        $key = (string)$key;
         if ($best === null || $entry['seed'] > $best['similarity'] + 1e-12
             || (abs($entry['seed'] - $best['similarity']) <= 1e-12 && strcmp($key, $best['key']) < 0)) {
             $best = ['key' => $key, 'similarity' => (float)$entry['seed'], 'margin' => null, 'ref' => (int)$entry['ref']];
@@ -283,15 +372,13 @@ function pr_bag_gate_passes(string $gate, float $similarity, ?float $margin, arr
 
 /**
  * The one row a cutout gets: a passing pair, else a passing colorway, else the more similar of
- * what clears the review floor. A colorway a person already rejected for this cutout is never
- * offered again (it still counted toward the margins above).
+ * what clears the review floor.
  *
  * @param array{key:string,similarity:float,margin:?float,ref:int}|null $colorway pr_bag_pool_result of the colorway pool
  * @param array{key:string,similarity:float,margin:?float,ref:int}|null $pair     pr_bag_pool_result of the pair pool
- * @param list<int> $rejected_colorways
  * @return array{gate:string,name_node:?int,colorway_node:int,similarity:float,margin:?float,ref:int,passes:bool}|null
  */
-function pr_bag_choose(?array $colorway, ?array $pair, array $cfg, array $rejected_colorways = []): ?array
+function pr_bag_choose(?array $colorway, ?array $pair, array $cfg): ?array
 {
     $options = [];
     if ($colorway !== null) {
@@ -305,8 +392,7 @@ function pr_bag_choose(?array $colorway, ?array $pair, array $cfg, array $reject
     }
     $keep = [];
     foreach ($options as $option) {
-        if ($option['colorway_node'] <= 0 || in_array($option['colorway_node'], $rejected_colorways, true)
-            || $option['similarity'] < $cfg['review_floor'] - 1e-12) {
+        if ($option['colorway_node'] <= 0 || $option['similarity'] < $cfg['review_floor'] - 1e-12) {
             continue;
         }
         $option['passes'] = pr_bag_gate_passes($option['gate'], $option['similarity'], $option['margin'], $cfg);
@@ -418,8 +504,8 @@ function pr_bag_decide(array $query, array $colorway_keys, array $pair_keys, arr
                        array $rejected, array $cfg, array $withheld = []): array
 {
     $out = ['action' => 'none', 'match' => null, 'open_ref' => (int)($open['ref'] ?? 0), 'auto' => false, 'blocked' => ''];
-    $by_colorway = pr_bag_pool_result($colorway_keys);
-    $by_pair = pr_bag_pool_result($pair_keys);
+    $by_colorway = pr_bag_pool_result($colorway_keys, $rejected);
+    $by_pair = pr_bag_pool_result($pair_keys, $rejected);
 
     # What one choice would do on this photo: its row, its plan, whether the pass may write it unattended.
     $assess = static function (?array $choice) use ($query, $seeds, $cfg, $withheld): ?array {
@@ -444,7 +530,7 @@ function pr_bag_decide(array $query, array $colorway_keys, array $pair_keys, arr
         ];
     };
     # An auto-eligible gate wins even when the other gate also passes: the two flags are independent.
-    $by_gate = [pr_bag_choose(null, $by_pair, $cfg, $rejected), pr_bag_choose($by_colorway, null, $cfg, $rejected)];
+    $by_gate = [pr_bag_choose(null, $by_pair, $cfg), pr_bag_choose($by_colorway, null, $cfg)];
     $picked = null;
     foreach ($by_gate as $choice) {
         $one = $assess($choice);
@@ -455,7 +541,7 @@ function pr_bag_decide(array $query, array $colorway_keys, array $pair_keys, arr
     }
     # Otherwise the usual preference, falling to the other gate if the preferred row is void.
     if ($picked === null) {
-        foreach ([pr_bag_choose($by_colorway, $by_pair, $cfg, $rejected), $by_gate[0], $by_gate[1]] as $choice) {
+        foreach ([pr_bag_choose($by_colorway, $by_pair, $cfg), $by_gate[0], $by_gate[1]] as $choice) {
             $one = $assess($choice);
             if ($one !== null && !$one['void']) {
                 $picked = $one;

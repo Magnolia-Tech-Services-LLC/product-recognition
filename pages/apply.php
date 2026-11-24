@@ -49,10 +49,19 @@ if (enforcePostRequest(false)) {
 }
 
 # A photo with exactly one current cutout and both values set: that is a person's answer for
-# the bag, so it is also saved as a seed (product_bag_tag) for the tag-one-bag matcher.
+# the bag, so it is also saved as a seed (product_bag_tag) for the tag-one-bag matcher. The form
+# carries the file and box the person was looking at; if that is no longer the cutout, nothing is saved.
 $bag_status = "";
 if ($model_text !== "" && $colorway_text !== "" && pr_bag_enabled() && pr_stored_region_count($resource) === 1) {
-    $bag_status = pr_bag_save_tag($resource, 0, $model_text, $colorway_text, (int)$userref);
+    $bag_status = pr_bag_save_tag(
+        $resource,
+        (int)getval("region", 0),
+        $model_text,
+        $colorway_text,
+        (int)$userref,
+        (string)getval("file_checksum", ""),
+        (string)getval("bbox", "")
+    );
 }
 
 $view_params = ["ref" => $resource, "pr_apply" => $status];

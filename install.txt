@@ -38,10 +38,10 @@ turned on. Leave both flags off until --bag-match-report meets the enable condit
 A match a person accepted is theirs and stays.
 
 Database structure: the feature adds three tables (product_bag_tag, product_cutout_feature,
-product_bag_match), created from dbstruct/ by ResourceSpace's structure check. Run that check
-after deploying this plugin version: the CLI writing modes (--cutout-features,
---import-bag-tags, --bag-match, --all) run it themselves when the tables are missing, and
-ResourceSpace also runs it on upgrade. Until the tables exist the panel, the review tab and
-the hooks leave them alone (the panel shows "not ready"), and --bag-match-report,
---undo-bag-matches and the dry runs say the tables are missing instead of claiming there is
-no colorway field.
+product_bag_match). They are created by the CLI writing modes (--cutout-features,
+--import-bag-tags, --bag-match, --all), the first time one runs after deploying this plugin
+version, with CREATE TABLE IF NOT EXISTS statements that match dbstruct/ (the same way the sheet
+tables are made). A web request never creates them and never runs ResourceSpace's structure
+check for them. Until the tables exist the panel and the Bag matches tab say "Bag matching is
+not ready" and touch no table, and --bag-match-report, --undo-bag-matches and the dry runs say
+the tables are missing instead of claiming there is no colorway field.
