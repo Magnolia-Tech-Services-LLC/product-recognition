@@ -698,9 +698,18 @@ pr_check("wiring: U9 missing candidates are counted in the match pass and the re
 pr_check("wiring: Accept refuses (stays open) when the seed's own mask cannot be read",
          str_contains($bag_fn('pr_bag_pre_write'), 'pr_bag_seed_mask_readable(') && str_contains($bag_fn('pr_bag_seed_mask_readable'), 'pr_bag_png_alpha(')
          && pr_bag_pre_write_verdict(0, $bag_pm, $bag_ps, false, false, false, true, $bag_pp, true, true, true, false)['reason'] === 'seed_mask_unverified');
-pr_check("wiring: U1 on a multi-cutout photo the visible picker starts from this cutout's seed or detection, and the seed form posts what it shows",
-         preg_match('/\\$region_count > 1 && \\$bag_live.*?\\$bag_seed_here.*?\\$shown_model/s', $bag_src('hooks/view.php')) === 1
-         && str_contains($bag_src('hooks/view.php'), "\$bag_pre = \$pre;") && !str_contains($bag_src('hooks/view.php'), '$bag_pre = $bag_here'));
+pr_check("wiring: U1 on a multi-cutout photo the seed form and the picker's colorway start from this cutout's seed or detection; the Apply form and its facets stay on the detected model",
+         preg_match('/\\$bag_pre = \\$pre;\\s*if \\(\\$region_count > 1 && \\$bag_live.*?\\$bag_seed_here/s', $bag_src('hooks/view.php')) === 1
+         && !str_contains($bag_src('hooks/view.php'), '$shown_model')
+         && str_contains($bag_src('hooks/view.php'), "pr_identity_for_reference_label((string)\$row['model_name'])")
+         && preg_match('/class="pr-picker".*?name="model_text"\\s+value="<\\?php echo escape\\(\\(string\\)\\$row\\[.model_name.\\]\\)/s', $bag_src('hooks/view.php')) === 1
+         && str_contains($bag_src('hooks/view.php'), "data-keep-seed") && str_contains($bag_src('hooks/view.php'), "getAttribute('data-initial')"));
+pr_check("wiring: seeds' cutouts get their features first, every run, with their own position; the sweep cursor is not moved by it, and they are counted",
+         str_contains($bag_fn('pr_bag_backfill_features'), 'FROM product_bag_tag t WHERE t.resource = pr.resource')
+         && preg_match('/\\$seed_phase = true;.*?if \\(\\$seed_phase\\) \\{.*?\\$pos = &\\$seed_pos;.*?\\} else \\{.*?\\$pos = &\\$cursor;/s', $bag_fn('pr_bag_backfill_features')) === 1
+         && str_contains($bag_fn('pr_bag_backfill_features'), "'seed_computed'") && str_contains(file_get_contents(__DIR__ . '/product_recognition_cli.php'), 'seed_computed'));
+pr_check("wiring: the nightly pass opens nothing when the pre-write check could not be made ('failed'), in the live and the dry-run branch, and counts it",
+         preg_match("/pr_bag_pre_write\\(\\\$row\\)\\['status'\\];.*?'failed'.*?check_failed.*?pr_bag_pre_write\\(\\\$row, true\\)\\['status'\\];\\s*if \\(\\\$status === 'gone' \\|\\| \\\$status === 'failed'\\).*?db_rollback_transaction.*?return;/s", $bag_fn('pr_bag_enact')) === 1);
 pr_check("wiring: S1 the feature and match passes arm use_error_exception at the start, again after get_sysvar, and per page/cutout, so a SQL error throws into the finally that saves the cursor",
          str_contains($bag_fn('pr_bag_arm_exceptions'), "\$GLOBALS['use_error_exception'] = true")
          && preg_match("/pr_bag_arm_exceptions\\(\\);.*?get_sysvar\\('product_recognition_bag_feature_position'.*?pr_bag_arm_exceptions\\(\\);.*?foreach \\(\\\$rows as \\\$row\\) \\{\\s*pr_bag_arm_exceptions\\(\\);/s", $bag_fn('pr_bag_backfill_features')) === 1
@@ -833,7 +842,7 @@ pr_check("wiring: the bags tab loads the leaf lists and access once, leaves pr_o
 pr_check("wiring: the panel hides the seed form and buttons on a photo that is not live, and a multi-cutout photo's seed form does not use the photo-level colorway",
          str_contains($bag_src('hooks/view.php'), '$bag_live = $bag_cuts !== null') && str_contains($bag_src('hooks/view.php'), "empty(\$row['fallback']) && \$bag_live")
          && preg_match('/\$region_count > 1 && \$bag_live.*?pr_picker_preselect\(\(string\)\$row\[.model_name.\], \(string\)\$row\[.colorway.\], \$catalog\)/s', $bag_src('hooks/view.php')) === 1
-         && preg_match('/name="model_text"\s+id="<\?php echo escape\(\$picker_id\); \?>-bag-model"\s+value="<\?php echo escape\(\$bag_pre\[/', $bag_src('hooks/view.php')) === 1);
+         && preg_match('/name="model_text"\s+id="<\?php echo escape\(\$picker_id\); \?>-bag-model"\s+<\?php echo \$region_count > 1.*?\?>\s+value="<\?php echo escape\(\$bag_pre\[/s', $bag_src('hooks/view.php')) === 1);
 
 # --- forms: the AJAX post never sends the clicked button -----------------------------------
 $bag_view = $bag_src('hooks/view.php');

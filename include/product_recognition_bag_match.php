@@ -591,7 +591,8 @@ function pr_bag_probe_service(): bool
  * plugin's back (new mtime) is noticed the first time the pass gets to it and recomputed, with its
  * tries counted from zero. A cutout whose features were cleared by a re-cut is found by its missing row.
  *
- * Before a cutout is posted an 'attempt' row records the try (checksum, box, mask mtime, count). A
+ * Cutouts of photos that hold a seed come first, every run, before the sweep: a seed must not wait nights for its
+ * features. Before a cutout is posted an 'attempt' row records the try (checksum, box, mask mtime, count). A
  * cutout that fails or kills the service is retried on the next lap and left alone after
  * PR_BAG_MAX_ATTEMPTS tries, until its checksum, box or mask changes. The service is checked before
  * the first attempt is recorded. When a cutout fails, what failed is settled by pr_bag_failure_plan():
@@ -604,7 +605,7 @@ function pr_bag_probe_service(): bool
 function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
 {
     $stats = ['computed' => 0, 'unusable' => 0, 'failed' => 0, 'skipped_no_mask' => 0, 'unverified' => 0, 'given_up' => 0, 'stale' => 0, 'service_down' => false,
-              'scanned' => 0, 'last' => 0];
+              'scanned' => 0, 'last' => 0, 'seed_computed' => 0];
     pr_bag_arm_exceptions();
     if (!$dry_run) {
         pr_bag_prepare_tables();
@@ -628,16 +629,32 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
              WHERE pr.resource > ? AND pr.bbox <> ''
                AND pr.checksum LIKE CONCAT(r.file_checksum, ':%')
              ORDER BY pr.resource LIMIT 500";
+    # Seed cutouts first. A seed saved today must not wait for the sweep to come round to its photo (that can take
+    # many nights, and until then it is left out of matching), and a re-cut that cleared a seed photo's features
+    # is repaired the same night. The seed pass has its own position; the sweep's saved cursor is untouched.
+    $seed_sql = str_replace('WHERE pr.resource > ?', 'WHERE pr.resource > ? AND EXISTS (SELECT 1 FROM product_bag_tag t WHERE t.resource = pr.resource)', $sql);
+    $seed_phase = true;
+    $seed_pos = 0;
     try {
         while ($budget > 0) {
-            $rows = ps_query($sql, ['i', $cursor]);
-            if ($rows === []) {
-                if (!$wrapped && $cursor > 0) {
-                    $wrapped = true;
-                    $cursor = 0;
+            if ($seed_phase) {
+                $rows = ps_query($seed_sql, ['i', $seed_pos]);
+                if ($rows === []) {
+                    $seed_phase = false;
                     continue;
                 }
-                break;
+                $pos = &$seed_pos;
+            } else {
+                $rows = ps_query($sql, ['i', $cursor]);
+                if ($rows === []) {
+                    if (!$wrapped && $cursor > 0) {
+                        $wrapped = true;
+                        $cursor = 0;
+                        continue;
+                    }
+                    break;
+                }
+                $pos = &$cursor;
             }
             $page_resources = array_map(static fn(array $r): int => (int)$r['resource'], $rows);
             $stored_by_resource = [];
@@ -652,7 +669,7 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
                 pr_bag_arm_exceptions();
                 $resource = (int)$row['resource'];
                 $checksum = (string)$row['file_checksum'];
-                $cursor = $resource;
+                $pos = $resource;
                 if (isset($done[$resource])) {
                     continue;
                 }
@@ -686,12 +703,13 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
                         continue;
                     }
                     if ($budget <= 0) {
-                        $cursor = $resource - 1;      # resume at this resource
+                        $pos = $resource - 1;      # resume at this resource
                         break 3;
                     }
                     $budget--;
                     if ($dry_run) {
                         $stats['computed']++;
+                        $stats['seed_computed'] += $seed_phase ? 1 : 0;
                         continue;
                     }
                     $mtime = pr_bag_mask_stat($mask);
@@ -730,13 +748,14 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
                         }
                         if ($plan['stop']) {
                             $stats['service_down'] = true;
-                            $cursor = $plan['cursor'] === 'past' ? $resource : $resource - 1;
+                            $pos = $plan['cursor'] === 'past' ? $resource : $resource - 1;
                             break 3;
                         }
                         continue;
                     }
                     pr_bag_store_features($resource, (int)$index, $checksum, $bbox, $mtime, $features);
                     $stats[$features['status'] === 'ok' ? 'computed' : 'unusable']++;
+                    $stats['seed_computed'] += $seed_phase ? 1 : 0;
                 }
             }
         }
@@ -1202,7 +1221,7 @@ function pr_bag_build_candidates(array $seeds, array $competitors): array
 function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
 {
     $stats = ['seeds' => 0, 'ignored_seeds' => [], 'competitors' => 0, 'considered' => 0, 'opened' => 0,
-              'updated' => 0, 'closed' => 0, 'blocked' => 0, 'stale' => 0, 'missing_features' => 0, 'unverified_features' => 0, 'failed_writes' => 0, 'missing_candidates' => 0,
+              'updated' => 0, 'closed' => 0, 'blocked' => 0, 'stale' => 0, 'missing_features' => 0, 'unverified_features' => 0, 'failed_writes' => 0, 'check_failed' => 0, 'missing_candidates' => 0,
               'service_down' => false, 'disabled' => false];
     pr_bag_arm_exceptions();
     if (!$dry_run) {
@@ -1429,8 +1448,11 @@ function pr_bag_enact(array $decision, array $query, bool $dry_run, array &$stat
     $row = ['resource' => $query['resource'], 'region_index' => $query['region_index'], 'file_checksum' => $query['checksum'],
             'bbox' => $bbox, 'seed_ref' => $m['seed_ref'], 'name_node' => $m['name_node'], 'colorway_node' => $m['colorway_node']];
     if ($dry_run) {
-        if (pr_bag_pre_write($row)['status'] === 'gone') {
+        $status = pr_bag_pre_write($row)['status'];
+        if ($status === 'gone') {
             $stats['stale']++;
+        } elseif ($status === 'failed') {
+            $stats['check_failed']++;      # the check could not be made (a mask unreadable, the photo or Product): open nothing
         } else {
             $stats['opened']++;
         }
@@ -1441,9 +1463,12 @@ function pr_bag_enact(array $decision, array $query, bool $dry_run, array &$stat
     db_begin_transaction('pr_bag_open');
     try {
         pr_bag_lock_photo($query['resource']);
-        if (pr_bag_pre_write($row, true)['status'] === 'gone') {
+        $status = pr_bag_pre_write($row, true)['status'];
+        if ($status === 'gone' || $status === 'failed') {
             db_rollback_transaction('pr_bag_open');
-            $stats['stale']++;      # what the scores said is no longer true: open nothing
+            # gone: what the scores said is no longer true. failed: the check could not be made (a mask cannot be
+            # read, the photo or Product is not usable now). Either way open nothing; the next night asks again.
+            $stats[$status === 'gone' ? 'stale' : 'check_failed']++;
             return;
         }
         if ($decision['open_ref'] > 0) {

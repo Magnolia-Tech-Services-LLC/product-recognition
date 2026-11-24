@@ -201,27 +201,24 @@ function HookProduct_recognitionViewCustompanels()
                             $cw_parts = preg_split('/\s*,\s*/', $pre['colorway_text']) ?: [];
                             $pre['colorway_text'] = (string)($cw_parts[0] ?? '');
                         }
-                        # On a photo with several cutouts the photo-level product and colorway belong to no one bag. The
-                        # visible picker starts from what this cutout's seed says, else what was detected for it, so
-                        # what the person sees is what Save as example posts (the submit listener copies the picker).
-                        $shown_model = (string)$row['model_name'];
+                        # On a photo with several cutouts the photo-level product and colorway belong to no one bag. The seed
+                        # form and the colorway shown in the picker start from this cutout's seed, else what was detected for
+                        # it. The Apply form and its facets stay on the detected model (that default is not this feature's).
+                        $bag_pre = $pre;
                         if ($region_count > 1 && $bag_live && empty($row['fallback'])) {
                             $bag_seed_here = ($bag_panel[(int)$row['region']] ?? ['seed' => null])['seed'];
-                            $pre = $bag_seed_here !== null
+                            $bag_pre = $bag_seed_here !== null
                                 ? ['sku' => '', 'model_text' => (string)$bag_seed_here['product'], 'colorway_text' => (string)$bag_seed_here['colorway']]
                                 : pr_picker_preselect((string)$row['model_name'], (string)$row['colorway'], $catalog);
-                            if (str_contains((string)$pre['colorway_text'], ',')) {
-                                $pre['colorway_text'] = (string)(preg_split('/\s*,\s*/', (string)$pre['colorway_text'])[0] ?? '');
-                            }
-                            if ($bag_seed_here !== null) {
-                                $shown_model = (string)$bag_seed_here['product'];
+                            if (str_contains((string)$bag_pre['colorway_text'], ',')) {
+                                $bag_pre['colorway_text'] = (string)(preg_split('/\s*,\s*/', (string)$bag_pre['colorway_text'])[0] ?? '');
                             }
                         }
                         $picker_id = 'pr-picker-' . (int)$ref . '-' . (int)$row['region'];
                         $confidence_html = $row['confidence'] !== null
                             ? escape(sprintf('%.0f%%', 100 * (float)$row['confidence']))
                             : escape($lang['product_recognition_from_tag']);
-                        $facet_identity = pr_identity_for_reference_label($shown_model);
+                        $facet_identity = pr_identity_for_reference_label((string)$row['model_name']);
                         $facets = $facet_identity !== null
                             ? pr_facets_from_identity($facet_identity)
                             : [
@@ -254,7 +251,8 @@ function HookProduct_recognitionViewCustompanels()
                                 <input type="hidden" name="resource" value="<?php echo (int)$ref; ?>" />
                                 <input type="hidden" name="region" value="<?php echo (int)$row['region']; ?>" />
                                 <input type="hidden" name="model_text"
-                                       value="<?php echo escape($shown_model); ?>" />
+                                       value="<?php echo escape((string)$row['model_name']); ?>"
+                                       data-initial="<?php echo escape((string)$row['model_name']); ?>" />
                                 <?php if ($in_modal) { ?>
                                 <input type="hidden" name="modal" value="true" />
                                 <?php } ?>
@@ -309,15 +307,15 @@ function HookProduct_recognitionViewCustompanels()
                                     $seen_cw[$cw_name] = true;
                                     ?>
                                 <option value="<?php echo escape($cw_name); ?>"
-                                    <?php echo $pre['colorway_text'] === $cw_name ? ' selected' : ''; ?>>
+                                    <?php echo $bag_pre['colorway_text'] === $cw_name ? ' selected' : ''; ?>>
                                     <?php echo escape($cw_name); ?>
                                 </option>
                                     <?php
                                 }
-                                if ($pre['colorway_text'] !== '' && !isset($seen_cw[$pre['colorway_text']])) {
+                                if ($bag_pre['colorway_text'] !== '' && !isset($seen_cw[$bag_pre['colorway_text']])) {
                                     ?>
-                                <option value="<?php echo escape($pre['colorway_text']); ?>" selected>
-                                    <?php echo escape($pre['colorway_text']); ?>
+                                <option value="<?php echo escape($bag_pre['colorway_text']); ?>" selected>
+                                    <?php echo escape($bag_pre['colorway_text']); ?>
                                 </option>
                                     <?php
                                 }
@@ -391,8 +389,7 @@ function HookProduct_recognitionViewCustompanels()
                             </form>
                             <?php if (empty($row['fallback']) && $bag_live) {
                                 $bag_here = $bag_panel[(int)$row['region']] ?? ['seed' => null, 'match' => null];
-                                # The seed form posts what the picker shows (see $shown_model above for several cutouts).
-                                $bag_pre = $pre;
+                                # The seed form posts $bag_pre (see above); the picker's colorway select shows the same value.
                                 ?>
                             <form method="post" action="<?php echo escape($bag_tag); ?>" class="pr-bag-tag"
                                   style="display:inline;"
@@ -404,6 +401,7 @@ function HookProduct_recognitionViewCustompanels()
                                 <input type="hidden" name="bbox" value="<?php echo escape(json_encode($bag_boxes[(int)$row['region']] ?? [])); ?>" />
                                 <input type="hidden" name="model_text"
                                        id="<?php echo escape($picker_id); ?>-bag-model"
+                                       <?php echo $region_count > 1 ? 'data-keep-seed="1"' : ''; ?>
                                        value="<?php echo escape($bag_pre['model_text']); ?>" />
                                 <input type="hidden" name="colorway_text"
                                        id="<?php echo escape($picker_id); ?>-bag-colorway"
@@ -738,7 +736,9 @@ function HookProduct_recognitionViewCustompanels()
                 var model = picker ? picker.querySelector('[name=model_text]') : null;
                 // An empty model means the facets match no product. Post it empty (need_product)
                 // rather than falling back to the detected product.
-                if (model) {
+                // The picker's own model is the detected one (the Apply default). The form keeps its seed/detected value
+                // unless the person changed the facets, which moves the picker's model away from where it started.
+                if (model && (!hidden.hasAttribute('data-keep-seed') || model.value !== model.getAttribute('data-initial'))) {
                     hidden.value = model.value;
                 }
                 var color = document.querySelector('select[name=colorway_text][form="' + pickerId + '"]');

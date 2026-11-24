@@ -113,6 +113,7 @@ function pr_bag_print_match_summary(array $stats, string $indent = ''): void
               'dropped_features' => 'stale feature rows dropped',
               'missing_candidates' => 'candidate cutouts the service had no features for (left out of the scores)',
               'failed_writes' => 'matches not opened, the row was lost before commit',
+              'check_failed' => 'matches not opened, the check before writing could not be made',
               'unverified_features' => 'feature rows kept but not used, their mask cannot be seen or read'] as $key => $what) {
         if ((int)($stats[$key] ?? 0) > 0) {
             printf("%s  %d %s\n", $indent, (int)$stats[$key], $what);
@@ -513,9 +514,9 @@ switch ($mode) {
             exit(1);
         }
         printf("Cutout features%s\n", $dry_run ? ' (would compute)' : '');
-        printf("  computed         %d\n  unusable         %d\n  failed           %d\n  given up (%d tries) %d\n  mask rewritten   %d\n  no mask yet      %d\n  rows kept, mask unseen %d\n  resources scanned %d\n",
+        printf("  computed         %d\n  unusable         %d\n  failed           %d\n  given up (%d tries) %d\n  mask rewritten   %d\n  no mask yet      %d\n  rows kept, mask unseen %d\n  resources scanned %d\n  of which seed cutouts computed first %d\n",
                $stats['computed'], $stats['unusable'], $stats['failed'], PR_BAG_MAX_ATTEMPTS, $stats['given_up'], $stats['stale'],
-               $stats['skipped_no_mask'], $stats['unverified'], $stats['scanned']);
+               $stats['skipped_no_mask'], $stats['unverified'], $stats['scanned'], $stats['seed_computed']);
         if ($stats['service_down']) {
             fwrite(STDERR, "product_recognition: the service did not answer, or kept failing; stopped.\n");
             exit(1);
@@ -626,8 +627,8 @@ switch ($mode) {
                $result['classification']['certain_accepted']);
         $bag_features = $result['bag_features'] ?? [];
         $bag_match = $result['bag_match'] ?? [];
-        printf("bag features computed %d, unusable %d, failed %d%s\n", (int)($bag_features['computed'] ?? 0),
-               (int)($bag_features['unusable'] ?? 0), (int)($bag_features['failed'] ?? 0),
+        printf("bag features computed %d (seed cutouts %d), unusable %d, failed %d%s\n", (int)($bag_features['computed'] ?? 0),
+               (int)($bag_features['seed_computed'] ?? 0), (int)($bag_features['unusable'] ?? 0), (int)($bag_features['failed'] ?? 0),
                empty($bag_features['error']) ? (empty($bag_features['service_down']) ? '' : ' (service did not answer)') : ' (' . $bag_features['error'] . ')');
         if (empty($bag_match['error'])) {
             pr_bag_print_match_summary($bag_match, 'bag match    ');
