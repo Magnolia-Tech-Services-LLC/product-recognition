@@ -315,6 +315,65 @@ function pr_bag_write_plan(array $photo, ?int $name_node, int $colorway_node): a
 }
 
 /**
+ * What the nightly pass does for one cutout, given the service's scores. No I/O.
+ *
+ * The one row a cutout gets is pr_bag_choose(). Against the open row it already has:
+ * nothing to do, close it (it no longer qualifies), update its numbers (same match), or
+ * replace it (a different match). A passing match that the config allows, and that the photo
+ * can take as an add, is marked for auto-apply.
+ *
+ * @param array{photo:array{products:list<int>,colorways:list<int>,cutouts:int},shoot:string} $query
+ * @param array<string,array> $colorway_keys service 'colorway' pool
+ * @param array<string,array> $pair_keys     service 'pair' pool
+ * @param array<int,array{product:int,shoot:string}> $seeds seed ref => seed
+ * @param array{ref:int,name_node:?int,colorway_node:int,seed_ref:int}|null $open the cutout's open row
+ * @param list<int> $rejected colorways rejected or undone for this cutout
+ * @param array<int,true> $withheld never-auto-apply products
+ * @return array{action:string,match:?array,open_ref:int,auto:bool,blocked:string}
+ */
+function pr_bag_decide(array $query, array $colorway_keys, array $pair_keys, array $seeds, ?array $open,
+                       array $rejected, array $cfg, array $withheld = []): array
+{
+    $out = ['action' => 'none', 'match' => null, 'open_ref' => (int)($open['ref'] ?? 0), 'auto' => false, 'blocked' => ''];
+    $choice = pr_bag_choose(pr_bag_pool_result($colorway_keys), pr_bag_pool_result($pair_keys), $cfg, $rejected);
+    $seed = $choice === null ? null : ($seeds[$choice['ref']] ?? null);
+    if ($choice === null || $seed === null) {
+        $out['action'] = $open === null ? 'none' : 'close';
+        return $out;
+    }
+    $same_shoot = $choice['gate'] === 'pair' || ($seed['shoot'] !== '' && $seed['shoot'] === $query['shoot']);
+    $match = [
+        'gate' => $choice['gate'],
+        'seed_ref' => $choice['ref'],
+        'name_node' => $choice['name_node'],
+        'colorway_node' => $choice['colorway_node'],
+        'similarity' => $choice['similarity'],
+        'margin' => $choice['margin'],
+        'same_shoot' => $same_shoot,
+    ];
+    $plan = pr_bag_write_plan($query['photo'], $match['name_node'], $match['colorway_node']);
+    if (in_array($plan['blocked'], ['no_product', 'no_colorway'], true)) {
+        # Product unknown and not inheritable: nothing could ever be written, so nothing is opened.
+        $out['action'] = $open === null ? 'none' : 'close';
+        $out['blocked'] = $plan['blocked'];
+        return $out;
+    }
+    $out['match'] = $match;
+    $out['blocked'] = $plan['blocked'];
+    $out['auto'] = $choice['passes'] && $plan['blocked'] === ''
+        && pr_bag_auto_ok($choice['gate'], $query['photo'], (int)$seed['product'], $same_shoot, $cfg, $withheld);
+    if ($open === null) {
+        $out['action'] = 'insert';
+    } elseif ((int)$open['seed_ref'] === $match['seed_ref'] && (int)$open['colorway_node'] === $match['colorway_node']
+        && ($open['name_node'] === null ? null : (int)$open['name_node']) === $match['name_node']) {
+        $out['action'] = 'update';
+    } else {
+        $out['action'] = 'insert';
+    }
+    return $out;
+}
+
+/**
  * Node ids a match wrote, as stored in name_written / colorway_written.
  *
  * @param list<int> $ids
@@ -339,20 +398,25 @@ function pr_bag_csv_ids(string $csv): array
 
 /**
  * Undo: remove only the nodes this match wrote, and only the ones still on the photo. Anything
- * a person added or kept since is left alone. Only an applied match has anything to undo.
+ * a person added or kept since is left alone, and so is a node another applied match on the
+ * same photo also relies on ($protect). Only an applied match has anything to undo.
  *
  * @param list<int> $present node ids currently on the photo (both fields)
- * @return array{remove:list<int>,already_gone:list<int>}
+ * @param list<int> $protect node ids written by this photo's other applied matches
+ * @return array{remove:list<int>,already_gone:list<int>,protected:list<int>}
  */
-function pr_bag_undo_plan(string $state, string $name_written, string $colorway_written, array $present): array
+function pr_bag_undo_plan(string $state, string $name_written, string $colorway_written, array $present, array $protect = []): array
 {
     if ($state !== 'applied') {
-        return ['remove' => [], 'already_gone' => []];
+        return ['remove' => [], 'already_gone' => [], 'protected' => []];
     }
     $wrote = array_values(array_unique(array_merge(pr_bag_csv_ids($name_written), pr_bag_csv_ids($colorway_written))));
+    $there = array_values(array_intersect($wrote, array_map('intval', $present)));
+    $keep = array_values(array_intersect($there, array_map('intval', $protect)));
     return [
-        'remove' => array_values(array_intersect($wrote, array_map('intval', $present))),
-        'already_gone' => array_values(array_diff($wrote, array_map('intval', $present))),
+        'remove' => array_values(array_diff($there, $keep)),
+        'already_gone' => array_values(array_diff($wrote, $there)),
+        'protected' => $keep,
     ];
 }
 

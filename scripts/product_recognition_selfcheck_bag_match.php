@@ -191,10 +191,56 @@ pr_check("undo: removes only what the match wrote and what is still there",
          $bag_undo['remove'] === [10, 30] && $bag_undo['already_gone'] === [11]);
 pr_check("undo: a person's node the match did not write is untouched",
          pr_bag_undo_plan('applied', '', '30', [30, 31])['remove'] === [30]);
+$bag_undo = pr_bag_undo_plan('applied', '10,11', '30', [10, 30], [10]);
+pr_check("undo: a node another applied match on the photo also wrote stays",
+         $bag_undo['remove'] === [30] && $bag_undo['protected'] === [10]);
 pr_check("undo: only an applied match has anything to undo",
-         pr_bag_undo_plan('open', '10', '30', [10, 30]) === ['remove' => [], 'already_gone' => []]
+         pr_bag_undo_plan('open', '10', '30', [10, 30]) === ['remove' => [], 'already_gone' => [], 'protected' => []]
          && pr_bag_undo_plan('undone', '10', '30', [10, 30])['remove'] === []
          && pr_bag_undo_plan('applied', '', '', [10])['remove'] === []);
+
+
+# --- the nightly decision for one cutout ---------------------------------------------------
+$bag_seeds = [6 => ['product' => 7, 'shoot' => '10,20'], 5 => ['product' => 7, 'shoot' => '10,99']];
+$bag_q = ['photo' => ['products' => [], 'colorways' => [], 'cutouts' => 3], 'shoot' => '10,20'];
+$bag_pair_keys = ['7|3' => ['all' => 0.93, 'seed' => 0.93, 'ref' => 6, 'n' => 1], '7|4' => ['all' => 0.50, 'seed' => 0.50, 'ref' => 6, 'n' => 1]];
+$d = pr_bag_decide($bag_q, [], $bag_pair_keys, $bag_seeds, null, [], $bag_cfg);
+pr_check("decide: a passing pair on a photo with no product is inserted, same shoot, and not auto while the flag is off",
+         $d['action'] === 'insert' && $d['match']['gate'] === 'pair' && $d['match']['name_node'] === 7
+         && $d['match']['colorway_node'] === 3 && $d['match']['same_shoot'] === true && $d['auto'] === false);
+$d = pr_bag_decide($bag_q, [], $bag_pair_keys, $bag_seeds, null, [], $bag_on);
+pr_check("decide: the same match is auto once the product flag is on", $d['auto'] === true && $d['blocked'] === '');
+$d = pr_bag_decide($bag_q, [], $bag_pair_keys, $bag_seeds, null, [], $bag_on, [7 => true]);
+pr_check("decide: a never-auto-apply product stays in review", $d['action'] === 'insert' && $d['auto'] === false);
+$open = ['ref' => 40, 'name_node' => 7, 'colorway_node' => 3, 'seed_ref' => 6];
+$d = pr_bag_decide($bag_q, [], $bag_pair_keys, $bag_seeds, $open, [], $bag_cfg);
+pr_check("decide: the same match against its open row is an update, not a second row",
+         $d['action'] === 'update' && $d['open_ref'] === 40);
+$d = pr_bag_decide($bag_q, [], $bag_pair_keys, $bag_seeds, ['colorway_node' => 9] + $open, [], $bag_cfg);
+pr_check("decide: a different match replaces the open row", $d['action'] === 'insert' && $d['open_ref'] === 40);
+$d = pr_bag_decide($bag_q, [], ['7|3' => ['all' => 0.60, 'seed' => 0.60, 'ref' => 6, 'n' => 1]], $bag_seeds, $open, [], $bag_cfg);
+pr_check("decide: an open row that no longer clears the floor is closed; with no open row, nothing",
+         $d['action'] === 'close'
+         && pr_bag_decide($bag_q, [], [], $bag_seeds, null, [], $bag_cfg)['action'] === 'none');
+$d = pr_bag_decide($bag_q, [], $bag_pair_keys, $bag_seeds, null, [3], $bag_cfg);
+pr_check("decide: a rejected colorway is not offered again", $d['action'] === 'none');
+$bag_q_one = ['photo' => ['products' => [7], 'colorways' => [], 'cutouts' => 1], 'shoot' => '10,77'];
+$bag_cw_keys = ['3' => ['all' => 0.90, 'seed' => 0.90, 'ref' => 6, 'n' => 1], '4' => ['all' => 0.70, 'seed' => 0.70, 'ref' => 5, 'n' => 1]];
+$d = pr_bag_decide($bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_on);
+pr_check("decide: a colorway-only match on a one-cutout photo with that product is auto, from another shoot",
+         $d['match']['gate'] === 'colorway' && $d['match']['name_node'] === null && $d['match']['same_shoot'] === false
+         && $d['auto'] === true);
+$d = pr_bag_decide(['photo' => ['products' => [7], 'colorways' => [], 'cutouts' => 2]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_on);
+pr_check("decide: the colorway-only gate never auto-writes on a multi-cutout photo, it still suggests",
+         $d['action'] === 'insert' && $d['auto'] === false);
+$d = pr_bag_decide(['photo' => ['products' => [7], 'colorways' => [4], 'cutouts' => 1]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_on);
+pr_check("decide: a single-cutout photo with another colorway goes to review, blocked, never auto",
+         $d['action'] === 'insert' && $d['blocked'] === 'other_colorway' && $d['auto'] === false);
+$d = pr_bag_decide(['photo' => ['products' => [], 'colorways' => [], 'cutouts' => 1]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_on);
+pr_check("decide: product unknown and not inheritable opens nothing",
+         $d['action'] === 'none' && $d['match'] === null && $d['blocked'] === 'no_product' && $d['auto'] === false);
+$d = pr_bag_decide($bag_q_one, ['3' => ['all' => 0.90, 'seed' => 0.90, 'ref' => 99, 'n' => 1]], [], $bag_seeds, null, [], $bag_on);
+pr_check("decide: a score for a seed that is no longer there is dropped", $d['action'] === 'none');
 
 # --- importing tags ------------------------------------------------------------------------
 $bag_row = ['resource' => 5, 'region_index' => 0, 'file_checksum' => 'abc', 'bbox' => [.1, .1, .5, .9],
