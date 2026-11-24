@@ -676,8 +676,15 @@ pr_check("wiring: U3 the final row is read back inside the transaction before co
          preg_match('/pr_bag_store_tag_locked\\(.*?pr_bag_require_row\\(.*?catch \\(PrBagRowMissing.*?db_rollback_transaction.*?return false;.*?db_end_transaction/s', $bag_fn('pr_bag_store_tag')) === 1
          && preg_match('/INSERT INTO product_bag_match.*?pr_bag_require_row\\(.*?catch \\(PrBagRowMissing.*?db_rollback_transaction.*?failed_writes.*?return;.*?db_end_transaction/s', $bag_fn('pr_bag_enact')) === 1
          && str_contains($bag_fn('pr_bag_require_row'), 'throw new PrBagRowMissing'));
-pr_check("wiring: U4 a rolled-back claim removes nothing, it only logs the planned nodes that are on the photo",
-         preg_match("/=== 'clean'\\).*?pr_bag_log\\(.*?return 'failed';.*?delete_resource_nodes\\(/s", $bag_recover) === 1);
+pr_check("wiring: a rolled-back claim ('clean') takes back the planned nodes through the same protect set as a reopen, and only a reopen touches the row",
+         !str_contains($bag_recover, "=== 'clean'") && preg_match("/pr_bag_recover_plan\\(.*?delete_resource_nodes\\(.*?\\\$action === 'reopen' && \\\$removed.*?SET state = 'open'/s", $bag_recover) === 1
+         && substr_count($bag_recover, "SET state = 'open'") === 1);
+pr_check("recovery plan: a clean (rolled-back) accept removes its planned nodes that are on the photo, never one another applied match stands on or one it did not plan",
+         pr_bag_accept_recovery(['state' => 'open', 'decided_at_set' => false]) === 'clean'
+         && pr_bag_accept_recovery(null) === 'clean'
+         && pr_bag_recover_plan([278, 282], [278, 282, 5], [])['remove'] === [278, 282]
+         && pr_bag_recover_plan([278, 282], [278, 282], [282])['remove'] === [278]
+         && pr_bag_recover_plan([278, 282], [5], [])['remove'] === []);
 pr_check("wiring: U5 after the commit, and only when a Name was added, Accept fills identity (add on several cutouts, else keep); a failure is logged and flagged, not undone",
          preg_match("/db_end_transaction\\('pr_bag_accept'\\).*?\\\$name_missing !== \\[\\].*?try \\{\\s*pr_write_accept_identity\\(.*?> 1 \\? 'add' : 'keep'\\).*?catch \\(Throwable.*?identity_failed = true;.*?return 'applied';/s", $bag_fn('pr_bag_accept_match')) === 1
          && str_contains($bag_src('pages/review.php'), 'bag_applied_identity') && str_contains($bag_src('install.txt'), 'identity fields'));

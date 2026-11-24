@@ -1725,16 +1725,10 @@ function pr_bag_accept_recover(int $match_ref, int $resource, array $name_planne
         return 'applied';
     }
     $planned = array_values(array_unique(array_merge($name_planned, $colorway_planned)));
-    if ($action === 'clean') {
-        # The claim was rolled back, so nothing proves who wrote a node that is on the photo now: a colleague
-        # may have added the same tag after the lock went. Remove nothing, say which planned nodes are there.
-        $present = $planned === [] ? [] : $step(static fn() => pr_bag_nodes_on_photo($resource, $planned));
-        if ($present !== null && $present !== []) {
-            pr_bag_log('bag match ' . $match_ref . ' accept did not complete and its claim was rolled back; nodes ' . pr_bag_ids_csv($present)
-                       . ' on resource ' . $resource . ' were planned by it and are left as they are, check them by hand');
-        }
-        return 'failed';
-    }
+    # 'clean' (the claim was rolled back) takes the same path as 'reopen' below, minus the reopen: ps_query retries a
+    # failed statement in autocommit after MySQL rolled the transaction back, so the planned nodes (absent before the
+    # claim, planned under the photo's lock) can be on the photo with no claim to say so. The protect set keeps every
+    # node another applied match wrote or stands on.
     $protect = [];
     $others = $step(static fn() => ps_query("SELECT name_node, colorway_node, name_written, colorway_written FROM product_bag_match
                                               WHERE resource = ? AND state = 'applied' AND ref <> ?", ['i', $resource, 'i', $match_ref]));

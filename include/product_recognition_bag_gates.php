@@ -811,8 +811,9 @@ function pr_bag_recover_plan(array $planned, array $present, array $protect): ar
  *  - 'completed': it is applied and decided_at is set, so the last step committed. Leave everything.
  *  - 'reopen':    applied with decided_at empty, the claim committed (an implicit commit) but the
  *                 accept did not finish. Take back the planned nodes, return the row to open.
- *  - 'clean':     the claim was rolled back. Nothing shows who wrote a planned node that is on the photo
- *                 now (a colleague may have added it), so nothing is removed; the nodes are only logged.
+ *  - 'clean':     the claim was rolled back, but a retried node insert can have committed outside it.
+ *                 Take back the planned nodes (those absent before the claim) that no other applied
+ *                 match wrote or stands on; the row is not touched.
  *
  * @param array{state:string,decided_at_set:bool}|null $row
  */
