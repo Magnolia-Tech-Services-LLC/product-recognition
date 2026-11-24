@@ -365,6 +365,12 @@ pr_check("features: another file's row, or a row for a cutout that is gone, is n
 pr_check("features: a box that moved a little (IoU >= 0.9) is still the cutout",
          array_keys(pr_bag_current_features([$bag_feat(0, 'F1', '[0.11,0.1,0.5,0.9]')], $bag_feat_now)) === ['5:0']);
 
+pr_check("features: no answer with the service up skips the cutout; with it down, stop, unless this same cutout was the one running last time",
+         pr_bag_no_answer_action(true, '', '5:0') === 'skip'
+         && pr_bag_no_answer_action(false, '', '5:0') === 'stop'
+         && pr_bag_no_answer_action(false, '4:1', '5:0') === 'stop'
+         && pr_bag_no_answer_action(false, '5:0', '5:0') === 'skip');
+
 # --- the three tables: CREATE statements match dbstruct, and only the CLI writes them ------
 $bag_defs = pr_bag_table_definitions();
 pr_check("tables: exactly the three bag tables, each CREATE TABLE IF NOT EXISTS",

@@ -442,13 +442,18 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
                 }
                 $features = pr_bag_compute_features($mask);
                 if ($features === null) {
-                    if (!pr_bag_service_up()) {
+                    $cutout = $resource . ':' . $index;
+                    $suspect = (string)get_sysvar('product_recognition_bag_feature_suspect', '');
+                    if (pr_bag_no_answer_action(pr_bag_service_up(), $suspect, $cutout) === 'stop') {
                         $stats['service_down'] = true;
                         $cursor = $resource - 1;      # resume at this resource
+                        set_sysvar('product_recognition_bag_feature_suspect', $cutout);
                         break 3;
                     }
-                    # The service is up, so this cutout is what it could not take (a crash, a timeout, a
-                    # mask that vanished). Count it as a failure and move on, or every run stops here.
+                    # The service is up, or this cutout was already the one running when it went down last
+                    # time: it is the cutout it could not take (a crash, a timeout, a mask that vanished).
+                    # Count it as a failure and move on, or every run stops here.
+                    set_sysvar('product_recognition_bag_feature_suspect', '');
                     $features = ['status' => 'error', 'dinov2' => null, 'hist' => null];
                 }
                 if ($features['status'] === 'error') {
@@ -901,6 +906,17 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
         # A feature row can outlive its cutout (regions cut under an older stamp, say). A match for
         # it could never bind, so it would be opened and superseded again every night.
         $fresh = pr_bag_current_features($cuts, pr_bag_current_cutouts(array_map(static fn(array $c): int => (int)$c['resource'], $cuts)));
+        # A row that is not its cutout any more (a re-cut landed while it was being computed) is dropped,
+        # so the feature pass sees the cutout as missing and computes it again.
+        $stale = [];
+        foreach ($cuts as $c) {
+            if (!isset($fresh[(int)$c['resource'] . ':' . (int)$c['region_index']])) {
+                $stale[] = (int)$c['feature_ref'];
+            }
+        }
+        if (!$dry_run && $stale !== []) {
+            ps_query('DELETE FROM product_cutout_feature WHERE ref IN (' . pr_bag_marks($stale) . ')', pr_bag_int_params($stale));
+        }
         $queries = [];
         foreach ($cuts as $c) {
             $key = (int)$c['resource'] . ':' . (int)$c['region_index'];

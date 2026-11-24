@@ -275,6 +275,19 @@ function pr_bag_current_features(array $rows, array $current): array
 }
 
 /**
+ * The feature pass got no answer for a cutout. If the service is up, or this same cutout was
+ * already the one running when it went down last run, the cutout is what it cannot take: skip it.
+ * Otherwise it is the service: stop here and remember the cutout, so a cutout that keeps killing
+ * the service (slower to restart than the wait) is passed on the next run, not retried every night.
+ *
+ * @return 'skip'|'stop'
+ */
+function pr_bag_no_answer_action(bool $service_up, string $suspect, string $cutout): string
+{
+    return ($service_up || ($suspect !== '' && $suspect === $cutout)) ? 'skip' : 'stop';
+}
+
+/**
  * The shoot a photo belongs to: its Folder Path node set, minus the configured copy segments,
  * as one comparable string. Two photos are the same shoot when the strings are equal and not
  * empty. A photo with no Folder Path has no shoot.
