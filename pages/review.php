@@ -47,6 +47,9 @@ if ($action !== '' && enforcePostRequest(false)) {
     $review_params = ['pr_review' => $status];
     if (str_starts_with($status, 'bag_')) {
         $review_params['tab'] = 'bags';
+        if ((int)getval('bagpage', 1) > 1) {
+            $review_params['bagpage'] = (int)getval('bagpage', 1);
+        }
     }
     if ($min_percent > 0) {
         $review_params['min_confidence'] = (string)$min_percent;
@@ -56,8 +59,8 @@ if ($action !== '' && enforcePostRequest(false)) {
 
 include "../../../include/header.php";
 
-$suggestions = pr_open_suggestions(100);
-$leaves = pr_leaf_models();
+$suggestions = $tab === 'bags' ? [] : pr_open_suggestions(100);      # the bags tab does not show them
+$leaves = $tab === 'bags' ? [] : pr_leaf_models();
 natcasesort($leaves);
 $leaf_options = [];
 foreach ($leaves as $node_id => $name) {

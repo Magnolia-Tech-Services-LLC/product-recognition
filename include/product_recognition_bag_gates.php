@@ -297,12 +297,57 @@ function pr_bag_feature_state(?array $row): string
 }
 
 /**
+ * Whether a seed (a product_bag_tag row) is one the matcher can stand behind, and which cutout it is on now.
+ * The one place that decides it: loading the seeds and the check before Accept both use it.
+ *
+ * @param array<string,mixed> $tag the seed row
+ * @param array{file_checksum:string,bboxes:array}|null $now the photo's cutouts now, null when the resource is gone
+ * @param array<string,mixed>|null $feature the current feature row of the cutout the seed binds to
+ * @param array<int,string> $products product leaves
+ * @param array<int,string> $colorways colorway leaves
+ * @return array{reason:string,region:?int} reason is '' when usable, else node_gone, resource_gone, file_changed,
+ *         no_cutout_overlaps, features_pending, features_failed or cutout_unusable
+ */
+function pr_bag_seed_reason(array $tag, ?array $now, ?array $feature, array $products, array $colorways): array
+{
+    $out = static fn(string $reason, ?int $region = null): array => ['reason' => $reason, 'region' => $region];
+    if (!isset($products[(int)$tag['name_node']]) || !isset($colorways[(int)$tag['colorway_node']])) {
+        return $out('node_gone');        # deleted, or no longer a leaf: it would crowd out the answers that are live
+    }
+    if ($now === null) {
+        return $out('resource_gone');
+    }
+    if ((string)$tag['file_checksum'] !== $now['file_checksum']) {
+        return $out('file_changed');
+    }
+    $region = pr_bag_bind_row($tag, $now);
+    if ($region === null) {
+        return $out('no_cutout_overlaps');
+    }
+    $state = pr_bag_feature_state($feature);
+    if ($state === 'retry') {
+        return $out('features_pending', $region);
+    }
+    if ($state === 'given_up') {
+        return $out('features_failed', $region);
+    }
+    return (string)$feature['status'] !== 'ok' ? $out('cutout_unusable', $region) : $out('', $region);
+}
+
+/** Whether Accept may still stand on a seed with this reason: usable, or only waiting for its features. */
+function pr_bag_seed_reason_acceptable(string $reason): bool
+{
+    return $reason === '' || $reason === 'features_pending';
+}
+
+/**
  * The one check before any match is opened or written, on facts read just now (never on what the
  * nightly run read at its start). The caller gathers the facts; this decides.
  *
  *  - 'gone':    the match no longer describes anything true: its cutout is not on the photo, its seed
  *               is gone or was re-answered, the cutout has an answer of its own, the colorway was
- *               rejected for it, or another match for the cutout was already accepted. Close it.
+ *               rejected for it, another match for the cutout was already accepted, or the seed is no
+ *               longer one the matcher would use (pr_bag_seed_reason). Close it.
  *  - 'failed':  the Product is no longer a leaf.
  *  - 'blocked': it cannot be written now (colorway gone, or what the photo has): leave it for review.
  *  - 'ok':      'plan' says what may be added.
@@ -313,7 +358,7 @@ function pr_bag_feature_state(?array $row): string
  * @return array{status:string,reason:string,plan:?array{add_name:bool,add_colorway:bool,blocked:string}}
  */
 function pr_bag_pre_write_verdict(?int $bound, array $match, ?array $seed, bool $own_seed, bool $rejected,
-                                  bool $answered, ?array $photo, bool $name_ok, bool $colorway_ok): array
+                                  bool $answered, bool $seed_usable, ?array $photo, bool $name_ok, bool $colorway_ok): array
 {
     $out = static fn(string $status, string $reason, ?array $plan = null): array => ['status' => $status, 'reason' => $reason, 'plan' => $plan];
     if ($bound === null) {
@@ -325,6 +370,9 @@ function pr_bag_pre_write_verdict(?int $bound, array $match, ?array $seed, bool 
     if ((int)$seed['colorway_node'] !== (int)$match['colorway_node']
         || ($match['name_node'] !== null && (int)$seed['name_node'] !== (int)$match['name_node'])) {
         return $out('gone', 'seed_changed');
+    }
+    if (!$seed_usable) {
+        return $out('gone', 'seed_unusable');
     }
     if ($own_seed) {
         return $out('gone', 'own_seed');
@@ -767,6 +815,38 @@ function pr_bag_import_row_is_object($row): bool
 }
 
 /**
+ * The keys the import (and its store step) read, in the type they are read as: resource, region_index and user
+ * integers (a digit string is fine), name, colorway and file_checksum strings, bbox a list of four numbers.
+ * Nothing else is looked at before this passes, so a row of the wrong shape is a rejected row, never a notice
+ * or a TypeError halfway through a run.
+ *
+ * @return string '' when the row has the right shape, else the reason
+ */
+function pr_bag_import_row_shape(array $row): string
+{
+    $int = static fn($v): bool => (is_int($v) && $v >= 0) || (is_string($v) && preg_match('/^\d+$/', $v) === 1);
+    if (!$int($row['resource'] ?? null) || (int)$row['resource'] <= 0) {
+        return 'no_resource';
+    }
+    foreach (['name', 'colorway', 'file_checksum'] as $key) {
+        if (!is_string($row[$key] ?? null)) {
+            return $key === 'file_checksum' ? 'checksum' : ($key === 'name' ? 'no_product' : 'no_colorway');
+        }
+    }
+    if (!$int($row['region_index'] ?? null)) {
+        return 'no_region_index';
+    }
+    $box = $row['bbox'] ?? null;
+    if (!is_array($box) || !array_is_list($box) || count($box) !== 4 || count(array_filter($box, static fn($v): bool => is_int($v) || is_float($v))) !== 4) {
+        return 'bbox';
+    }
+    if (array_key_exists('user', $row) && !$int($row['user'])) {
+        return 'user';
+    }
+    return '';
+}
+
+/**
  * Validate one --import-bag-tags row against the photo as it is now. Pure: the labels are
  * already resolved to node ids (null = unknown label).
  *
@@ -777,6 +857,10 @@ function pr_bag_import_row_is_object($row): bool
 function pr_bag_import_check(array $row, ?array $current, ?int $name_node, ?int $colorway_node): array
 {
     $fail = static fn(string $why): array => ['ok' => false, 'reason' => $why];
+    $shape = pr_bag_import_row_shape($row);
+    if ($shape !== '') {
+        return $fail($shape);
+    }
     if (trim((string)($row['name'] ?? '')) === '') {
         return $fail('no_product');
     }
@@ -789,7 +873,7 @@ function pr_bag_import_check(array $row, ?array $current, ?int $name_node, ?int 
     if ((string)($row['file_checksum'] ?? '') === '' || (string)$row['file_checksum'] !== (string)$current['file_checksum']) {
         return $fail('checksum');
     }
-    $index = (int)($row['region_index'] ?? 0);
+    $index = (int)$row['region_index'];
     if (!isset($current['bboxes'][$index])) {
         return $fail('no_cutout');
     }

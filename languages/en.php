@@ -165,5 +165,6 @@ $lang["product_recognition_bag_save"] = "Save as seed bag";
 $lang["product_recognition_bag_save_help"] = "Records this Product and Colorway as the answer for this cutout. Other cutouts that look the same are then found and suggested.";
 $lang["product_recognition_bag_is_seed"] = "Seed bag: %s / %s";
 $lang["product_recognition_bag_found"] = "Looks like a seed bag: %s / %s (%s)";
+$lang["product_recognition_bag_blocked_product_gone"] = "Accept is off: the Product for this match was deleted or is no longer a choice in the field.";
 $lang["product_recognition_bag_blocked_colorway_gone"] = "Accept is off: the Colorway for this match was deleted or is no longer a choice in the field.";
 $lang["product_recognition_bag_no_tables"] = "Bag matching is not ready: its database tables have not been created yet. An administrator can create them by running product_recognition_cli.php --cutout-features or --all (see install.txt).";

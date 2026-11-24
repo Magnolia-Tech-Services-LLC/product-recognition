@@ -202,6 +202,23 @@ pr_check("plan: no colorway is no write", pr_bag_write_plan($bag_one, 7, 0)['blo
 pr_check("ids csv: dedupes, drops zero",
          pr_bag_ids_csv([4, 5, 4, 0, -1]) === '4,5' && pr_bag_ids_csv([]) === '');
 
+# --- a seed Accept can still stand on --------------------------------------------------------
+$bag_tag = ['ref' => 5, 'resource' => 5, 'region_index' => 0, 'file_checksum' => 'abc', 'bbox' => '[0.1,0.1,0.5,0.9]', 'name_node' => 7, 'colorway_node' => 3];
+$bag_now_s = ['file_checksum' => 'abc', 'bboxes' => [0 => [.1, .1, .5, .9]]];
+$bag_feat_ok = ['status' => 'ok', 'attempts' => 0];
+$bag_reason = static fn(?array $now, ?array $f, array $tag = [], array $prod = [7 => 'P'], array $cw = [3 => 'C']): string
+    => pr_bag_seed_reason($tag + $bag_tag, $now, $f, $prod, $cw)['reason'];
+pr_check("seed reason: usable is '' with the cutout it binds to; every way a seed stops being usable has its own reason",
+         pr_bag_seed_reason($bag_tag, $bag_now_s, $bag_feat_ok, [7 => 'P'], [3 => 'C']) === ['reason' => '', 'region' => 0]
+         && $bag_reason($bag_now_s, $bag_feat_ok, [], [], [3 => 'C']) === 'node_gone' && $bag_reason($bag_now_s, $bag_feat_ok, [], [7 => 'P'], []) === 'node_gone'
+         && $bag_reason(null, null) === 'resource_gone' && $bag_reason(['file_checksum' => 'new'] + $bag_now_s, null) === 'file_changed'
+         && $bag_reason(['bboxes' => [0 => [.6, .6, .9, .9]]] + $bag_now_s, null) === 'no_cutout_overlaps'
+         && $bag_reason($bag_now_s, null) === 'features_pending' && $bag_reason($bag_now_s, ['status' => 'attempt', 'attempts' => PR_BAG_MAX_ATTEMPTS]) === 'features_failed'
+         && $bag_reason($bag_now_s, ['status' => 'unusable', 'attempts' => 0]) === 'cutout_unusable');
+pr_check("seed reason: Accept stands on a usable seed or one only waiting for its features, on no other",
+         pr_bag_seed_reason_acceptable('') && pr_bag_seed_reason_acceptable('features_pending')
+         && !pr_bag_seed_reason_acceptable('features_failed') && !pr_bag_seed_reason_acceptable('node_gone') && !pr_bag_seed_reason_acceptable('cutout_unusable'));
+
 # --- a blocked preferred row gives way to an acceptable one from the other gate ----------------
 $bag_q_blk = ['photo' => ['products' => [7], 'colorways' => [4], 'cutouts' => 2], 'shoot' => '10,20'];
 $bag_blk_seeds = [6 => ['product' => 7, 'shoot' => '10,20'], 5 => ['product' => 7, 'shoot' => '10,99']];
@@ -345,6 +362,26 @@ pr_check("import: rejects a changed file, a moved box, a missing cutout, unknown
          && pr_bag_import_check($bag_row, null, 7, 3)['reason'] === 'no_resource'
          && pr_bag_import_check(['file_checksum' => ''] + $bag_row, $bag_now, 7, 3)['reason'] === 'checksum');
 
+pr_check("import: a row missing region_index, or with a float, negative, bool or null one, is rejected before anything reads it",
+         pr_bag_import_check(array_diff_key($bag_row, ['region_index' => 1]), $bag_now, 7, 3)['reason'] === 'no_region_index'
+         && pr_bag_import_check(['region_index' => 0.0] + $bag_row, $bag_now, 7, 3)['reason'] === 'no_region_index'
+         && pr_bag_import_check(['region_index' => -1] + $bag_row, $bag_now, 7, 3)['reason'] === 'no_region_index'
+         && pr_bag_import_check(['region_index' => true] + $bag_row, $bag_now, 7, 3)['reason'] === 'no_region_index'
+         && pr_bag_import_check(['region_index' => null] + $bag_row, $bag_now, 7, 3)['reason'] === 'no_region_index'
+         && pr_bag_import_check(['region_index' => '0'] + $bag_row, $bag_now, 7, 3)['ok'] === true);
+pr_check("import: every other key the store step reads is checked the same way (resource, name, colorway, checksum, bbox, user)",
+         pr_bag_import_check(array_diff_key($bag_row, ['resource' => 1]), $bag_now, 7, 3)['reason'] === 'no_resource'
+         && pr_bag_import_check(['resource' => 'x'] + $bag_row, $bag_now, 7, 3)['reason'] === 'no_resource'
+         && pr_bag_import_check(['name' => ['Loma']] + $bag_row, $bag_now, 7, 3)['reason'] === 'no_product'
+         && pr_bag_import_check(['colorway' => 5] + $bag_row, $bag_now, 7, 3)['reason'] === 'no_colorway'
+         && pr_bag_import_check(['file_checksum' => 5] + $bag_row, $bag_now, 7, 3)['reason'] === 'checksum'
+         && pr_bag_import_check(array_diff_key($bag_row, ['bbox' => 1]), $bag_now, 7, 3)['reason'] === 'bbox'
+         && pr_bag_import_check(['bbox' => [.1, .1, .5]] + $bag_row, $bag_now, 7, 3)['reason'] === 'bbox'
+         && pr_bag_import_check(['bbox' => [.1, .1, .5, 'x']] + $bag_row, $bag_now, 7, 3)['reason'] === 'bbox'
+         && pr_bag_import_check(['bbox' => 'abc'] + $bag_row, $bag_now, 7, 3)['reason'] === 'bbox'
+         && pr_bag_import_check(['user' => [1]] + $bag_row, $bag_now, 7, 3)['reason'] === 'user'
+         && pr_bag_import_check(array_diff_key($bag_row, ['user' => 1]), $bag_now, 7, 3)['ok'] === true);
+
 # --- the report and its enable condition ---------------------------------------------------
 pr_check("report halves: deterministic, and both halves are used",
          pr_bag_report_held_out('10,20,30') === pr_bag_report_held_out('10,20,30')
@@ -434,7 +471,7 @@ $bag_pp = ['products' => [7], 'colorways' => [], 'cutouts' => 1];
 $bag_pw = static function (array $o = []) use ($bag_pm, $bag_ps, $bag_pp): array {
     $get = static fn(string $k, $default) => array_key_exists($k, $o) ? $o[$k] : $default;
     return pr_bag_pre_write_verdict($get('bound', 0), $get('match', $bag_pm), $get('seed', $bag_ps), $get('own', false),
-                                    $get('rej', false), $get('answered', false), $get('photo', $bag_pp), $get('name_ok', true), $get('cw_ok', true));
+                                    $get('rej', false), $get('answered', false), $get('usable', true), $get('photo', $bag_pp), $get('name_ok', true), $get('cw_ok', true));
 };
 pr_check("pre-write: everything as it was is ok, with the plan",
          $bag_pw()['status'] === 'ok' && $bag_pw()['plan']['add_colorway'] === true);
@@ -446,6 +483,8 @@ pr_check("pre-write: a cutout no longer on the photo, a seed that is gone or re-
 pr_check("pre-write: a cutout with an answer of its own, or the colorway rejected for it, is gone",
          $bag_pw(['own' => true])['reason'] === 'own_seed' && $bag_pw(['rej' => true])['reason'] === 'rejected'
          && $bag_pw(['own' => true])['status'] === 'gone');
+pr_check("pre-write: a seed that is no longer usable (re-cut away, features failed, node gone) is gone",
+         $bag_pw(['usable' => false])['status'] === 'gone' && $bag_pw(['usable' => false])['reason'] === 'seed_unusable');
 pr_check("pre-write: a cutout another match was already accepted for is gone, so a second Accept or a new suggestion for it is closed",
          $bag_pw(['answered' => true])['status'] === 'gone' && $bag_pw(['answered' => true])['reason'] === 'answered'
          && $bag_pw(['answered' => true])['plan'] === null && $bag_pw(['bound' => null, 'answered' => true])['reason'] === 'cutout');
@@ -576,7 +615,7 @@ pr_check("wiring: Accept checks edit access, then in one transaction locks the p
          && !str_contains($bag_accept, 'pr_bag_gate_passes') && !str_contains($bag_accept, 'manual'));
 pr_check("wiring: Accept turns use_error_exception on and restores it, and every failure (throw, or a last step that matches no row) goes to pr_bag_accept_recover",
          preg_match('/use_error_exception.*?= true;.*?catch \(Throwable \$e\).*?pr_bag_accept_recover.*?finally.*?use_error_exception/s', $bag_accept) === 1
-         && preg_match('/SET decided_at = NOW\(\)\s*WHERE ref = \? AND state = .applied. AND decided_by = \? AND decided_at IS NULL.*?sql_affected_rows\(\) !== 1\)\s*\{\s*return pr_bag_accept_recover/s', $bag_accept) === 1);
+         && preg_match('/SET decided_at = NOW\(\)\s*WHERE ref = \? AND state = .applied. AND decided_by = \? AND decided_at IS NULL.*?sql_affected_rows\(\) !== 1\)\s*\{\s*\$in_flight = false;\s*return pr_bag_accept_recover/s', $bag_accept) === 1);
 $bag_recover = $bag_fn('pr_bag_accept_recover');
 pr_check("wiring: recovery re-reads the row after the rollback, never removes what another accepted match wrote or stands on, and only reopens a claim with no decision time",
          preg_match('/db_rollback_transaction.*?SELECT state, decided_at, decided_by FROM product_bag_match.*?pr_bag_accept_recovery\(/s', $bag_recover) === 1
@@ -612,7 +651,7 @@ pr_check("wiring: matching and the report check /health first; both build candid
 pr_check("wiring: an open row whose seed is only waiting for its features is not closed",
          str_contains($bag_fn('pr_bag_run_match'), "'close' && isset(\$pending_seeds["));
 pr_check("wiring: the feature pass records an attempt before posting, stores only if the mask mtime did not move (stat cache cleared before both reads), skips .fail masks, and has no sysvar or rewind",
-         preg_match('/clearstatcache\(true, \$mask\);\s*\$mtime = .*?pr_bag_store_attempt\(.*?pr_bag_compute_features.*?clearstatcache\(true, \$mask\);\s*if \(\(int\)@filemtime\(\$mask\) !== \$mtime.*?pr_bag_store_features/s', $bag_fn('pr_bag_backfill_features')) === 1
+         preg_match('/\$mtime = pr_bag_mask_stat\(\$mask\);.*?pr_bag_store_attempt\(.*?pr_bag_compute_features.*?pr_bag_mask_stat\(\$mask\) !== \$mtime.*?pr_bag_store_features/s', $bag_fn('pr_bag_backfill_features')) === 1
          && str_contains($bag_fn('pr_bag_backfill_features'), "'.fail'") && !str_contains($bag_match_src, 'feature_suspect'));
 $bag_view_src = $bag_src('include/product_recognition_view.php');
 pr_check("wiring: a region commit clears the cutout features before and after it writes the masks",
@@ -638,6 +677,35 @@ pr_check("wiring: the panel and the review tab compute blocked with the same fun
          && str_contains($bag_src('hooks/view.php'), "\$bag_action === 'bag_accept' && \$bag_here['match']['blocked'] !== ''"));
 pr_check("wiring: the not-ready message names the CLI modes",
          preg_match('/product_recognition_bag_no_tables"\] = "[^"]*--cutout-features or --all/', $bag_src('languages/en.php')) === 1);
+
+pr_check("wiring: Accept sets the flag again before every write and has a shutdown handler that recovers an in-flight claim, disarmed on return",
+         substr_count($bag_accept, '$arm();') >= 10 && str_contains($bag_accept, 'register_shutdown_function(')
+         && preg_match('/if \(\$in_flight\) \{\s*\$in_flight = false;.*?pr_bag_accept_recover\(/s', $bag_accept) === 1
+         && substr_count($bag_accept, '$in_flight = false;') >= 6 && str_contains($bag_accept, "unset(\$GLOBALS['use_error_exception'])"));
+pr_check("wiring: the nightly bag stage sets the flag before each stage, and pr_run_all keeps last_run and the earlier summary for a bag stage that still exits",
+         substr_count($bag_fn('pr_bag_nightly'), "\$GLOBALS['use_error_exception'] = true;") >= 3
+         && preg_match('/set_sysvar\(.product_recognition_last_run.*?register_shutdown_function.*?pr_bag_nightly\(\)/s', $bag_src('include/product_recognition_functions.php')) === 1);
+pr_check("wiring: file reads on the paths this change adds go through pr_bag_quiet or pr_bag_mask_stat, with no @ and no bare filemtime",
+         !preg_match('/@(filemtime|file_get_contents|unlink|filesize|fopen)/', $bag_match_src)
+         && substr_count(preg_replace('/function pr_bag_mask_stat.*?\n}\n/s', '', $bag_match_src), 'filemtime(') === 0
+         && str_contains($bag_fn('pr_bag_mask_stat'), 'clearstatcache(true, $mask)') && str_contains($bag_fn('pr_bag_compute_features'), 'pr_bag_quiet(')
+         && !str_contains($bag_fn('pr_bag_compute_features'), 'pr_png_has_alpha(') && !str_contains($bag_fn('pr_bag_save_tag'), 'pr_png_has_alpha(')
+         && preg_match('/try \{.*?while \(\$budget > 0\).*?\} finally \{.*?set_sysvar\(.product_recognition_bag_feature_position/s', $bag_feat) === 1
+         && substr_count($bag_feat, 'pr_bag_mask_stat(') >= 3);
+pr_check("wiring: saving or importing a seed takes the photo's lock as the first statement of its transaction",
+         preg_match('/db_begin_transaction\(.pr_bag_seed.\);\s*try \{\s*pr_bag_lock_photo\(\$resource\);\s*\$saved = pr_bag_store_tag_locked/', $bag_fn('pr_bag_store_tag')) === 1
+         && str_contains($bag_fn('pr_bag_import_tags'), 'pr_bag_store_tag(') && str_contains($bag_fn('pr_bag_import_tags'), 'pr_bag_import_row_shape($row)'));
+pr_check("wiring: the match pass closes open rows whose seed is gone or ignored for any reason but features_pending; the pre-write check binds the seed",
+         str_contains($bag_fn('pr_bag_run_match'), "!isset(\$seeds[(int)\$r['seed_ref']]) && !isset(\$pending_seeds[(int)\$r['seed_ref']])")
+         && str_contains($bag_fn('pr_bag_pre_write'), 'pr_bag_seed_reason_now(') && str_contains($bag_fn('pr_bag_load_seeds'), 'pr_bag_seed_reason('));
+pr_check("wiring: the bags tab loads the leaf lists and access once, leaves pr_open_suggestions out, and keeps the page through Accept and Reject",
+         str_contains($bag_fn('pr_bag_open_matches'), '$product_leaves = pr_leaf_models()') && str_contains($bag_fn('pr_bag_open_matches'), '$access[$res] ??=')
+         && str_contains($bag_src('pages/review.php'), "\$tab === 'bags' ? [] : pr_open_suggestions(100)")
+         && str_contains($bag_src('pages/review.php'), "review_params['bagpage']") && str_contains($bag_match_src, 'name="bagpage"'));
+pr_check("wiring: the panel hides the seed form and buttons on a photo that is not live, and a multi-cutout photo's seed form does not use the photo-level colorway",
+         str_contains($bag_src('hooks/view.php'), '$bag_live = $bag_cuts !== null') && str_contains($bag_src('hooks/view.php'), "empty(\$row['fallback']) && \$bag_live")
+         && preg_match('/\$region_count > 1\).*?pr_picker_preselect\(\(string\)\$row\[.model_name.\], \(string\)\$row\[.colorway.\], \$catalog\)/s', $bag_src('hooks/view.php')) === 1
+         && preg_match('/name="model_text"\s+id="<\?php echo escape\(\$picker_id\); \?>-bag-model"\s+value="<\?php echo escape\(\$bag_pre\[/', $bag_src('hooks/view.php')) === 1);
 
 # --- forms: the AJAX post never sends the clicked button -----------------------------------
 $bag_view = $bag_src('hooks/view.php');
@@ -677,7 +745,7 @@ foreach (['colorway', 'pair'] as $bag_gate) {
         $bag_missing[] = 'product_recognition_bag_gate_' . $bag_gate;
     }
 }
-foreach (['other_name', 'other_colorway', 'no_product', 'product_changed', 'colorway_gone', 'no_colorway'] as $bag_reason) {
+foreach (['other_name', 'other_colorway', 'no_product', 'product_changed', 'product_gone', 'colorway_gone', 'no_colorway'] as $bag_reason) {
     if (!isset($bag_lang['product_recognition_bag_blocked_' . $bag_reason])) {
         $bag_missing[] = 'product_recognition_bag_blocked_' . $bag_reason;
     }

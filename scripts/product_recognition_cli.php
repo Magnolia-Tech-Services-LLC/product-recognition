@@ -108,6 +108,12 @@ function pr_bag_print_match_summary(array $stats, string $indent = ''): void
         printf("%s  accepted match %d (resource %d) came from seed %d, which has since been re-answered; its tags stay\n",
                $indent, $a['match'], $a['resource'], $a['seed_ref']);
     }
+    foreach (['missing_features' => 'cutouts with no features yet', 'stale' => 'matches not opened, what they said was no longer true',
+              'dropped_features' => 'stale feature rows dropped'] as $key => $what) {
+        if ((int)($stats[$key] ?? 0) > 0) {
+            printf("%s  %d %s\n", $indent, (int)$stats[$key], $what);
+        }
+    }
     pr_bag_print_half_applied((array)($stats['half_applied'] ?? []), $indent);
     if (!empty($stats['service_down'])) {
         printf("%s  the service did not answer; the pass stopped early\n", $indent);
@@ -516,7 +522,7 @@ switch ($mode) {
         break;
 
     case '--import-bag-tags':
-        $json = $import_file !== '' && is_file($import_file) ? json_decode((string)file_get_contents($import_file), true) : null;
+        $json = $import_file !== '' && is_file($import_file) ? json_decode((string)pr_bag_quiet(static fn() => file_get_contents($import_file)), true) : null;
         if (!is_array($json)) {
             fwrite(STDERR, "Usage: --import-bag-tags=FILE (a JSON array of rows) [--dry-run]\n");
             exit(1);

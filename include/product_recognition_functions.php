@@ -2432,11 +2432,28 @@ function pr_run_all(): array
         $classification = pr_classify((int)$product_recognition_classify_batch);
         # Tag-one-bag matching runs after classify so a Name classify just wrote counts. Each
         # part has its own try/catch inside; a throw here must not cost the night its results.
+        # The earlier stages are done. Record the run now, and keep their numbers where the log has them,
+        # so a bag stage that still ends the process (an exit no try/catch sees) costs the night neither.
+        set_sysvar('product_recognition_last_run', (string)time());
+        $earlier = ['sheet' => $sheet, 'studio' => $studio, 'references' => $references, 'backfill' => $backfill,
+                    'calibration' => $calibration, 'classification' => $classification];
+        $bag_finished = false;
+        register_shutdown_function(static function () use (&$bag_finished, $earlier): void {
+            if (!$bag_finished) {
+                $line = 'product_recognition: the bag stage ended the run early; earlier stages: '
+                    . json_encode(array_map(static fn($v) => is_array($v) ? array_filter($v, 'is_scalar') : $v, $earlier));
+                function_exists('logScript') ? logScript($line) : error_log($line);
+                if (PHP_SAPI === 'cli') {
+                    fwrite(STDERR, $line . "\n");
+                }
+            }
+        });
         try {
             $bag = pr_bag_nightly();
         } catch (Throwable $e) {
             $bag = ['features' => ['error' => 'bag nightly threw: ' . $e->getMessage()], 'match' => []];
         }
+        $bag_finished = true;
         return [
             'sheet' => $sheet,
             'studio' => $studio,

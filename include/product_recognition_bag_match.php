@@ -338,11 +338,13 @@ function pr_bag_post_json(string $path, array $body, int $timeout = 600): ?array
 function pr_bag_compute_features(string $mask): ?array
 {
     # A plain-rectangle crop of the scene (no alpha) is not the bag. Unusable, without a call.
-    if (!pr_png_has_alpha($mask)) {
+    if (!pr_bag_png_has_alpha($mask)) {
         return ['status' => 'unusable', 'dinov2' => null, 'hist' => null];
     }
     $http_status = 0;
-    $response = pr_service_post('/cutout_features', [], $mask, 180, 5, $http_status);
+    $response = pr_bag_quiet(static function () use ($mask, &$http_status) {
+        return pr_service_post('/cutout_features', [], $mask, 180, 5, $http_status);
+    });
     if ($response === null) {
         # No HTTP answer, or a proxy saying there is none, is the service being down. Any other
         # answer is about this cutout, and must not stop the ones behind it.
@@ -392,11 +394,44 @@ function pr_bag_store_attempt(int $resource, int $region, string $checksum, arra
     );
 }
 
+/**
+ * Run one file read with PHP's warnings swallowed. ResourceSpace's errorhandler() acts on a warning even
+ * under @ (PHP 8 no longer silences it), and with use_error_exception on it throws: so a mask that vanishes
+ * between is_file() and the read would end the run. The handler is scoped to this call.
+ *
+ * @template T
+ * @param callable():T $read
+ * @return T
+ */
+function pr_bag_quiet(callable $read)
+{
+    set_error_handler(static fn(): bool => true);
+    try {
+        return $read();
+    } finally {
+        restore_error_handler();
+    }
+}
+
+/** The mask file's mtime as it is now (never a cached stat), null when the mask is not there or cannot be read. */
+function pr_bag_mask_stat(string $mask): ?int
+{
+    clearstatcache(true, $mask);
+    $time = pr_bag_quiet(static fn() => is_file($mask) ? filemtime($mask) : false);
+    return $time === false ? null : (int)$time;
+}
+
+/** Whether a mask PNG has an alpha channel, false when it cannot be read. Same test as pr_png_has_alpha(), without its warning. */
+function pr_bag_png_has_alpha(string $path): bool
+{
+    $head = pr_bag_quiet(static fn() => file_get_contents($path, false, null, 0, 26));
+    return is_string($head) && strlen($head) === 26 && in_array(ord($head[25]), [4, 6], true);
+}
+
 /** The mask file's mtime for a feature row, null when the mask is not there. */
 function pr_bag_mask_mtime(array $row): ?int
 {
-    $mask = pr_mask_file((int)$row['resource'], (string)$row['file_checksum'], (int)$row['region_index']);
-    return is_file($mask) ? (int)filemtime($mask) : null;
+    return pr_bag_mask_stat(pr_mask_file((int)$row['resource'], (string)$row['file_checksum'], (int)$row['region_index']));
 }
 
 /**
@@ -500,15 +535,15 @@ function pr_bag_service_up(): bool
 /** Post the fixed synthetic cutout: does the service answer a good one? Asked afresh at each failure, never cached. */
 function pr_bag_probe_service(): bool
 {
-    $path = tempnam(sys_get_temp_dir(), 'prbagprobe');
+    $path = pr_bag_quiet(static fn() => tempnam(sys_get_temp_dir(), 'prbagprobe'));
     if ($path === false) {
         return false;
     }
     try {
-        file_put_contents($path, pr_bag_probe_png());
+        pr_bag_quiet(static fn() => file_put_contents($path, pr_bag_probe_png()));
         $features = pr_bag_compute_features($path);
     } finally {
-        @unlink($path);
+        pr_bag_quiet(static fn() => unlink($path));
     }
     return $features !== null && $features['status'] === 'ok';
 }
@@ -554,110 +589,115 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
              WHERE pr.resource > ? AND pr.bbox <> ''
                AND pr.checksum LIKE CONCAT(r.file_checksum, ':%')
              ORDER BY pr.resource LIMIT 500";
-    while ($budget > 0) {
-        $rows = ps_query($sql, ['i', $cursor]);
-        if ($rows === []) {
-            if (!$wrapped && $cursor > 0) {
-                $wrapped = true;
-                $cursor = 0;
-                continue;
-            }
-            break;
-        }
-        $page_resources = array_map(static fn(array $r): int => (int)$r['resource'], $rows);
-        $stored_by_resource = [];
-        foreach (ps_query(
-            'SELECT ref, resource, region_index, file_checksum, bbox, mask_mtime, status, attempts FROM product_cutout_feature
-              WHERE resource IN (' . pr_bag_marks($page_resources) . ')',
-            pr_bag_int_params($page_resources)
-        ) as $f) {
-            $stored_by_resource[(int)$f['resource']][] = $f;
-        }
-        foreach ($rows as $row) {
-            $resource = (int)$row['resource'];
-            $checksum = (string)$row['file_checksum'];
-            $cursor = $resource;
-            if (isset($done[$resource])) {
-                continue;
-            }
-            $done[$resource] = true;
-            $stats['scanned']++;
-            if ((string)$row['stamp'] !== pr_region_stamp($checksum)) {
-                continue;
-            }
-            $boxes = pr_decode_bboxes((string)$row['bbox']);
-            # A stored row counts only if it is this cutout: file checksum, box and mask file as it is
-            # now (mtime). Anything else is a leftover and is replaced here, with its tries.
-            $stored = $stored_by_resource[$resource] ?? [];
-            foreach ($stored as $f) {
-                clearstatcache(true, pr_mask_file($resource, (string)$f['file_checksum'], (int)$f['region_index']));
-            }
-            $current = pr_bag_current_features($stored, [$resource => ['file_checksum' => $checksum, 'bboxes' => $boxes]], 'pr_bag_mask_mtime');
-            if (!$dry_run) {
-                pr_bag_drop_stale_features($stored, $current);
-            }
-            foreach ($boxes as $index => $bbox) {
-                $mine = $current[$resource . ':' . $index] ?? null;
-                $state = pr_bag_feature_state($mine);
-                if ($state === 'done') {
+    try {
+        while ($budget > 0) {
+            $rows = ps_query($sql, ['i', $cursor]);
+            if ($rows === []) {
+                if (!$wrapped && $cursor > 0) {
+                    $wrapped = true;
+                    $cursor = 0;
                     continue;
                 }
-                $mask = pr_mask_file($resource, $checksum, (int)$index);
-                if (!is_file($mask) || is_file($mask . '.fail')) {
-                    $stats['skipped_no_mask']++;
+                break;
+            }
+            $page_resources = array_map(static fn(array $r): int => (int)$r['resource'], $rows);
+            $stored_by_resource = [];
+            foreach (ps_query(
+                'SELECT ref, resource, region_index, file_checksum, bbox, mask_mtime, status, attempts FROM product_cutout_feature
+                  WHERE resource IN (' . pr_bag_marks($page_resources) . ')',
+                pr_bag_int_params($page_resources)
+            ) as $f) {
+                $stored_by_resource[(int)$f['resource']][] = $f;
+            }
+            foreach ($rows as $row) {
+                $resource = (int)$row['resource'];
+                $checksum = (string)$row['file_checksum'];
+                $cursor = $resource;
+                if (isset($done[$resource])) {
                     continue;
                 }
-                if ($state === 'given_up') {
+                $done[$resource] = true;
+                $stats['scanned']++;
+                if ((string)$row['stamp'] !== pr_region_stamp($checksum)) {
                     continue;
                 }
-                if ($budget <= 0) {
-                    $cursor = $resource - 1;      # resume at this resource
-                    break 3;
+                $boxes = pr_decode_bboxes((string)$row['bbox']);
+                # A stored row counts only if it is this cutout: file checksum, box and mask file as it is
+                # now (mtime). Anything else is a leftover and is replaced here, with its tries.
+                $stored = $stored_by_resource[$resource] ?? [];
+                $current = pr_bag_current_features($stored, [$resource => ['file_checksum' => $checksum, 'bboxes' => $boxes]], 'pr_bag_mask_mtime');
+                if (!$dry_run) {
+                    pr_bag_drop_stale_features($stored, $current);
                 }
-                $budget--;
-                if ($dry_run) {
-                    $stats['computed']++;
-                    continue;
-                }
-                clearstatcache(true, $mask);
-                $mtime = (int)filemtime($mask);
-                $tried = ['resource' => $resource, 'region' => (int)$index, 'checksum' => $checksum, 'bbox' => $bbox, 'mtime' => $mtime,
-                          'before' => (int)($mine['attempts'] ?? 0)];
-                pr_bag_store_attempt($resource, (int)$index, $checksum, $bbox, $mtime, $tried['before'] + 1);
-                $features = pr_bag_compute_features($mask);
-                $no_answer = $features === null;
-                $back = true;
-                if ($no_answer) {
-                    # No answer: the service is down, or it died on this cutout. Wait for it.
-                    $back = pr_bag_service_up();
-                    $features = ['status' => 'error', 'dinov2' => null, 'hist' => null];
-                }
-                if ($features['status'] === 'error') {
-                    $stats['failed']++;
-                    $plan = pr_bag_failure_plan($no_answer, $back, $no_answer || pr_bag_probe_service());
-                    if (!$plan['keep_try']) {
-                        pr_bag_give_back_attempts([$tried]);
+                foreach ($boxes as $index => $bbox) {
+                    $mine = $current[$resource . ':' . $index] ?? null;
+                    $state = pr_bag_feature_state($mine);
+                    if ($state === 'done') {
+                        continue;
                     }
-                    if ($plan['stop']) {
-                        $stats['service_down'] = true;
-                        $cursor = $plan['cursor'] === 'past' ? $resource : $resource - 1;
+                    $mask = pr_mask_file($resource, $checksum, (int)$index);
+                    if (pr_bag_mask_stat($mask) === null || is_file($mask . '.fail')) {
+                        $stats['skipped_no_mask']++;
+                        continue;
+                    }
+                    if ($state === 'given_up') {
+                        continue;
+                    }
+                    if ($budget <= 0) {
+                        $cursor = $resource - 1;      # resume at this resource
                         break 3;
                     }
-                    continue;
+                    $budget--;
+                    if ($dry_run) {
+                        $stats['computed']++;
+                        continue;
+                    }
+                    $mtime = pr_bag_mask_stat($mask);
+                    if ($mtime === null) {
+                        $stats['skipped_no_mask']++;      # gone since the check above
+                        continue;
+                    }
+                    $tried = ['resource' => $resource, 'region' => (int)$index, 'checksum' => $checksum, 'bbox' => $bbox, 'mtime' => $mtime,
+                              'before' => (int)($mine['attempts'] ?? 0)];
+                    pr_bag_store_attempt($resource, (int)$index, $checksum, $bbox, $mtime, $tried['before'] + 1);
+                    $features = pr_bag_compute_features($mask);
+                    if (pr_bag_mask_stat($mask) !== $mtime) {
+                        # The mask was rewritten or removed while the service worked, so whatever it
+                        # answered, or failed to, is about the old one. The row is replaced on the next pass.
+                        $stats['stale']++;
+                        continue;
+                    }
+                    $no_answer = $features === null;
+                    $back = true;
+                    if ($no_answer) {
+                        # No answer: the service is down, or it died on this cutout. Wait for it.
+                        $back = pr_bag_service_up();
+                        $features = ['status' => 'error', 'dinov2' => null, 'hist' => null];
+                    }
+                    if ($features['status'] === 'error') {
+                        $stats['failed']++;
+                        $plan = pr_bag_failure_plan($no_answer, $back, $no_answer || pr_bag_probe_service());
+                        if (!$plan['keep_try']) {
+                            pr_bag_give_back_attempts([$tried]);
+                        }
+                        if ($plan['stop']) {
+                            $stats['service_down'] = true;
+                            $cursor = $plan['cursor'] === 'past' ? $resource : $resource - 1;
+                            break 3;
+                        }
+                        continue;
+                    }
+                    pr_bag_store_features($resource, (int)$index, $checksum, $bbox, $mtime, $features);
+                    $stats[$features['status'] === 'ok' ? 'computed' : 'unusable']++;
                 }
-                clearstatcache(true, $mask);
-                if ((int)@filemtime($mask) !== $mtime) {
-                    $stats['stale']++;        # the mask was rewritten while the service worked: this answer is for the old one
-                    continue;
-                }
-                pr_bag_store_features($resource, (int)$index, $checksum, $bbox, $mtime, $features);
-                $stats[$features['status'] === 'ok' ? 'computed' : 'unusable']++;
             }
         }
-    }
-    $stats['last'] = $cursor;
-    if (!$dry_run) {
-        set_sysvar('product_recognition_bag_feature_position', (string)max(0, $cursor));
+    } finally {
+        # Wherever the loop ended, an exit from a throw included, the next run resumes from here.
+        $stats['last'] = $cursor;
+        if (!$dry_run) {
+            set_sysvar('product_recognition_bag_feature_position', (string)max(0, $cursor));
+        }
     }
     return $stats;
 }
@@ -675,6 +715,23 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
  * (--bag-match lists them).
  */
 function pr_bag_store_tag(int $resource, int $region, string $checksum, array $bbox, int $name_node, int $colorway_node, int $user): bool
+{
+    # One seed per cutout holds under concurrent saves: the photo's lock is the first statement, so a second
+    # save waits for the first and then finds its row. A person's save and an import take the same lock.
+    db_begin_transaction('pr_bag_seed');
+    try {
+        pr_bag_lock_photo($resource);
+        $saved = pr_bag_store_tag_locked($resource, $region, $checksum, $bbox, $name_node, $colorway_node, $user);
+    } catch (Throwable $e) {
+        db_rollback_transaction('pr_bag_seed');
+        throw $e;
+    }
+    db_end_transaction('pr_bag_seed');
+    return $saved;
+}
+
+/** The body of pr_bag_store_tag(), run inside its transaction with the photo locked. */
+function pr_bag_store_tag_locked(int $resource, int $region, string $checksum, array $bbox, int $name_node, int $colorway_node, int $user): bool
 {
     $now = pr_bag_current_cutouts([$resource])[$resource] ?? null;
     $boxes = ($now !== null && $now['file_checksum'] === $checksum) ? $now['bboxes'] : [];
@@ -795,7 +852,7 @@ function pr_bag_save_tag(int $resource, int $region, string $model_text, string 
         return 'need_cutout';
     }
     $mask = pr_mask_file($resource, $current['file_checksum'], $region);
-    if (!is_file($mask) || !pr_png_has_alpha($mask)) {
+    if (!pr_bag_png_has_alpha($mask)) {
         return 'need_cutout';
     }
     return pr_bag_store_tag($resource, $region, $current['file_checksum'], $current['bboxes'][$region], $name_node, $colorway_node, $user)
@@ -835,30 +892,11 @@ function pr_bag_load_seeds(?array $cfg = null): array
         $ref = (int)$tag['ref'];
         $resource = (int)$tag['resource'];
         $now = $cutouts[$resource] ?? null;
-        $reason = '';
-        $region = null;
-        if (!isset($products[(int)$tag['name_node']]) || !isset($colorways[(int)$tag['colorway_node']])) {
-            $reason = 'node_gone';        # deleted, or no longer a leaf: it would crowd out the answers that are live
-        } elseif ($now === null) {
-            $reason = 'resource_gone';
-        } elseif ((string)$tag['file_checksum'] !== $now['file_checksum']) {
-            $reason = 'file_changed';
-        } else {
-            $region = pr_bag_bind_row($tag, $now);
-            if ($region === null) {
-                $reason = 'no_cutout_overlaps';
-            } else {
-                $f = $features[$resource . ':' . $region] ?? null;
-                $state = pr_bag_feature_state($f);
-                if ($state === 'retry') {
-                    $reason = 'features_pending';
-                } elseif ($state === 'given_up') {
-                    $reason = 'features_failed';
-                } elseif ((string)$f['status'] !== 'ok') {
-                    $reason = 'cutout_unusable';
-                }
-            }
-        }
+        $bound_at = $now === null || (string)$tag['file_checksum'] !== $now['file_checksum'] ? null : pr_bag_bind_row($tag, $now);
+        $feature_key = $bound_at === null ? null : $resource . ':' . $bound_at;
+        $seen = pr_bag_seed_reason($tag, $now, $feature_key === null ? null : ($features[$feature_key] ?? null), $products, $colorways);
+        $reason = $seen['reason'];
+        $region = $seen['region'];
         if ($reason !== '') {
             $ignored[] = ['ref' => $ref, 'resource' => $resource, 'reason' => $reason];
             continue;
@@ -876,6 +914,23 @@ function pr_bag_load_seeds(?array $cfg = null): array
         ];
     }
     return ['usable' => $usable, 'ignored' => $ignored];
+}
+
+/**
+ * Why one seed is not usable right now ('' when it is), read from the database as it is. For the check
+ * before Accept; pr_bag_load_seeds() does the same for all seeds at once.
+ */
+function pr_bag_seed_reason_now(array $tag): string
+{
+    $resource = (int)$tag['resource'];
+    $now = pr_bag_current_cutouts([$resource])[$resource] ?? null;
+    $feature = null;
+    if ($now !== null && (string)$tag['file_checksum'] === $now['file_checksum'] && ($region = pr_bag_bind_row($tag, $now)) !== null) {
+        $rows = ps_query('SELECT ref, resource, region_index, file_checksum, bbox, mask_mtime, status, attempts FROM product_cutout_feature WHERE resource = ?',
+                         ['i', $resource]);
+        $feature = pr_bag_current_features($rows, [$resource => $now], 'pr_bag_mask_mtime')[$resource . ':' . $region] ?? null;
+    }
+    return pr_bag_seed_reason($tag, $now, $feature, pr_leaf_models(), pr_field_leaves((int)($GLOBALS['product_recognition_colorway_field'] ?? 0)))['reason'];
 }
 
 /**
@@ -906,11 +961,16 @@ function pr_bag_import_tags(array $rows, bool $dry_run = false): array
             $stats['rejected'][] = ['row' => (int)$at, 'resource' => 0, 'reason' => 'not_object'];
             continue;
         }
-        $resource = (int)($row['resource'] ?? 0);
-        $name = trim((string)($row['name'] ?? ''));
+        $shape = pr_bag_import_row_shape($row);
+        if ($shape !== '') {
+            $stats['rejected'][] = ['row' => (int)$at, 'resource' => is_scalar($row['resource'] ?? null) ? (int)$row['resource'] : 0, 'reason' => $shape];
+            continue;
+        }
+        $resource = (int)$row['resource'];
+        $name = trim($row['name']);
         $bind = pr_product_field_is_flat() ? pr_reference_label($name) : $name;
         $name_node = $name === '' ? null : pr_bind_catalog_model($bind, $leaves);
-        $colorway_node = pr_bind_catalog_colorway(trim((string)($row['colorway'] ?? '')), $colorways);
+        $colorway_node = pr_bind_catalog_colorway(trim($row['colorway']), $colorways);
         $check = pr_bag_import_check($row, $current[$resource] ?? null, $name_node, $colorway_node);
         if (!$check['ok']) {
             $stats['rejected'][] = ['row' => (int)$at, 'resource' => $resource, 'reason' => $check['reason']];
@@ -919,8 +979,8 @@ function pr_bag_import_tags(array $rows, bool $dry_run = false): array
         $stats['accepted']++;
         if (!$dry_run) {
             pr_bag_store_tag(
-                $resource, (int)$row['region_index'], (string)$row['file_checksum'],
-                array_map('floatval', (array)$row['bbox']), (int)$name_node, (int)$colorway_node,
+                $resource, (int)$row['region_index'], $row['file_checksum'],
+                array_map('floatval', $row['bbox']), (int)$name_node, (int)$colorway_node,
                 (int)($row['user'] ?? 0)
             );
         }
@@ -988,9 +1048,6 @@ function pr_bag_drop_stale_pass(): int
     $dropped = 0;
     while (($cuts = pr_bag_load_cutout_page($after, 500)) !== []) {
         $after = (int)$cuts[count($cuts) - 1]['feature_ref'];
-        foreach ($cuts as $c) {
-            clearstatcache(true, pr_mask_file((int)$c['resource'], (string)$c['file_checksum'], (int)$c['region_index']));
-        }
         $fresh = pr_bag_current_features($cuts, pr_bag_current_cutouts(array_map(static fn(array $c): int => (int)$c['resource'], $cuts)), 'pr_bag_mask_mtime');
         $dropped += pr_bag_drop_stale_features($cuts, $fresh);
     }
@@ -1121,6 +1178,10 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
             continue;
         }
         $key = (int)$r['resource'] . ':' . (int)$r['bound'];
+        if ($state === 'open' && !isset($seeds[(int)$r['seed_ref']]) && !isset($pending_seeds[(int)$r['seed_ref']])) {
+            $drop[] = (int)$r['ref'];      # its seed is gone, or ignored for a reason other than waiting for features
+            continue;
+        }
         if ($state === 'applied') {
             $applied[$key . ':' . $r['file_checksum']] = true;
         } elseif ($state === 'open') {
@@ -1356,7 +1417,8 @@ function pr_bag_pre_write(array $m, bool $locking = false): array
     $resource = (int)$m['resource'];
     $now = pr_bag_current_cutouts([$resource])[$resource] ?? null;
     $bound = pr_bag_bind_row($m, $now);
-    $seed = ps_query('SELECT name_node, colorway_node FROM product_bag_tag WHERE ref = ?', ['i', (int)$m['seed_ref']])[0] ?? null;
+    $seed = ps_query('SELECT * FROM product_bag_tag WHERE ref = ?', ['i', (int)$m['seed_ref']])[0] ?? null;
+    $seed_usable = $seed !== null && pr_bag_seed_reason_acceptable(pr_bag_seed_reason_now($seed));
     $own_seed = false;
     $rejected = false;
     $answered = false;
@@ -1375,7 +1437,7 @@ function pr_bag_pre_write(array $m, bool $locking = false): array
     $name_node = $m['name_node'] === null ? null : (int)$m['name_node'];
     $photo = pr_bag_load_photo_states([$resource])[$resource] ?? null;
     $verdict = pr_bag_pre_write_verdict(
-        $bound, ['name_node' => $name_node, 'colorway_node' => (int)$m['colorway_node']], $seed, $own_seed, $rejected, $answered, $photo,
+        $bound, ['name_node' => $name_node, 'colorway_node' => (int)$m['colorway_node']], $seed, $own_seed, $rejected, $answered, $seed_usable, $photo,
         $name_node === null || pr_is_leaf_model($name_node), pr_bag_colorway_valid((int)$m['colorway_node'])
     );
     return $verdict + ['photo' => $photo, 'seed' => $seed];
@@ -1420,31 +1482,55 @@ function pr_bag_accept_match(int $match_ref, int $user): string
     $cw_field = (int)$GLOBALS['product_recognition_colorway_field'];
     $had_exception_flag = array_key_exists('use_error_exception', $GLOBALS);
     $exception_flag = $GLOBALS['use_error_exception'] ?? null;
-    $GLOBALS['use_error_exception'] = true;
+    # ResourceSpace helpers (debug() with logging, a cached ps_query, set_sysvar, try_unlink) unset the flag, so
+    # it is set again before every write instead of once.
+    $arm = static function (): void {
+        $GLOBALS['use_error_exception'] = true;
+    };
+    $arm();
     $name_missing = [];
     $colorway_missing = [];
+    # If the request ends in the middle (an exit nothing can catch), the shutdown handler does what the catch
+    # below would have done. It is disarmed when this call returns, so it never runs after a normal end.
+    $in_flight = false;
+    register_shutdown_function(static function () use (&$in_flight, $match_ref, $resource, &$name_missing, &$colorway_missing): void {
+        if ($in_flight) {
+            $in_flight = false;
+            $GLOBALS['use_error_exception'] = true;
+            pr_bag_accept_recover($match_ref, $resource, $name_missing, $colorway_missing);
+        }
+    });
     try {
+        $in_flight = true;
+        $arm();
         db_begin_transaction('pr_bag_accept');
+        $arm();
         pr_bag_lock_photo($resource);
+        $arm();
         $check = pr_bag_pre_write($m, true);
         if ($check['status'] !== 'ok') {
             db_rollback_transaction('pr_bag_accept');
+            $arm();
             if ($check['status'] === 'gone') {
                 ps_query("UPDATE product_bag_match SET state = 'superseded', decided_at = NOW() WHERE ref = ? AND state = 'open'",
                          ['i', $match_ref]);
             }
+            $in_flight = false;
             return $check['status'];
         }
         $plan = $check['plan'];
+        $arm();
         $name_missing = $plan['add_name'] && $name_node !== null
             ? array_values(array_diff(pr_nodes_to_apply($name_node), pr_resource_field_nodes($resource, pr_product_field()))) : [];
         $colorway_missing = $plan['add_colorway']
             ? array_values(array_diff(pr_model_nodes_with_ancestors($colorway_node), pr_resource_field_nodes($resource, $cw_field))) : [];
+        $arm();
         ps_query("UPDATE product_bag_match SET state = 'applied', decided_by = ?, decided_at = NULL, name_written = ?, colorway_written = ?
                    WHERE ref = ? AND state = 'open'",
                  ['i', $user, 's', pr_bag_ids_csv($name_missing), 's', pr_bag_ids_csv($colorway_missing), 'i', $match_ref]);
         if (sql_affected_rows() !== 1) {
             db_rollback_transaction('pr_bag_accept');
+            $in_flight = false;
             return 'gone';
         }
         $note = sprintf(
@@ -1454,25 +1540,36 @@ function pr_bag_accept_match(int $match_ref, int $user): string
             $name_node === null ? 'colorway' : 'product+colorway'
         );
         if ($name_missing !== []) {
+            $arm();
             add_resource_nodes($resource, $name_missing, false, false);
+            $arm();
             resource_log($resource, LOG_CODE_EDITED, pr_product_field(), $note);
         }
         if ($colorway_missing !== []) {
+            $arm();
             add_resource_nodes($resource, $colorway_missing, false, false);
+            $arm();
             resource_log($resource, LOG_CODE_EDITED, $cw_field, $note);
         }
+        $arm();
         ps_query("UPDATE product_bag_match SET decided_at = NOW()
                    WHERE ref = ? AND state = 'applied' AND decided_by = ? AND decided_at IS NULL",
                  ['i', $match_ref, 'i', $user]);
         if (sql_affected_rows() !== 1) {
+            $in_flight = false;
             return pr_bag_accept_recover($match_ref, $resource, $name_missing, $colorway_missing);
         }
+        $arm();
         db_end_transaction('pr_bag_accept');
+        $in_flight = false;
         return 'applied';
     } catch (Throwable $e) {
+        $in_flight = false;
+        $arm();
         pr_bag_log('bag match ' . $match_ref . ' accept failed: ' . $e->getMessage());
         return pr_bag_accept_recover($match_ref, $resource, $name_missing, $colorway_missing);
     } finally {
+        $in_flight = false;
         if ($had_exception_flag) {
             $GLOBALS['use_error_exception'] = $exception_flag;
         } else {
@@ -1492,17 +1589,20 @@ function pr_bag_accept_match(int $match_ref, int $user): string
  */
 function pr_bag_accept_recover(int $match_ref, int $resource, array $name_planned, array $colorway_planned): string
 {
+    $GLOBALS['use_error_exception'] = true;
     try {
         db_rollback_transaction('pr_bag_accept');
     } catch (Throwable $e) {
         # nothing open any more (an implicit commit ended it): the re-read below says what is left
     }
     try {
+        $GLOBALS['use_error_exception'] = true;
         $row = ps_query('SELECT state, decided_at, decided_by FROM product_bag_match WHERE ref = ?', ['i', $match_ref])[0] ?? null;
         $action = pr_bag_accept_recovery($row === null ? null : ['state' => (string)$row['state'], 'decided_at_set' => $row['decided_at'] !== null]);
         if ($action === 'completed') {
             return 'applied';
         }
+        $GLOBALS['use_error_exception'] = true;
         $planned = array_values(array_unique(array_merge($name_planned, $colorway_planned)));
         $protect = [];
         foreach (ps_query("SELECT name_node, colorway_node, name_written, colorway_written FROM product_bag_match
@@ -1513,13 +1613,17 @@ function pr_bag_accept_recover(int $match_ref, int $resource, array $name_planne
                 pr_model_nodes_with_ancestors((int)$other['colorway_node'])
             );
         }
+        $GLOBALS['use_error_exception'] = true;
         $undo = pr_bag_recover_plan($planned, $planned === [] ? [] : pr_bag_nodes_on_photo($resource, $planned), $protect);
         if ($undo['remove'] !== []) {
+            $GLOBALS['use_error_exception'] = true;
             delete_resource_nodes($resource, $undo['remove'], false);
+            $GLOBALS['use_error_exception'] = true;
             resource_log($resource, LOG_CODE_EDITED, 0, sprintf('Product recognition bag match %d: accept did not complete, removed nodes %s',
                                                                 $match_ref, pr_bag_ids_csv($undo['remove'])));
         }
         if ($action === 'reopen') {
+            $GLOBALS['use_error_exception'] = true;
             ps_query("UPDATE product_bag_match SET state = 'open', decided_by = NULL, decided_at = NULL, name_written = '', colorway_written = ''
                        WHERE ref = ? AND state = 'applied' AND decided_at IS NULL", ['i', $match_ref]);
         }
@@ -1668,17 +1772,21 @@ function pr_bag_nightly(): array
     $features = [];
     $match = [];
     # ResourceSpace's ps_query ends a CLI run with exit() on a SQL error, which no try/catch sees and
-    # which loses the night's summary. With use_error_exception it throws instead (errorhandler()).
+    # which loses the night's summary. With use_error_exception it throws instead (errorhandler()). Some
+    # ResourceSpace helpers unset the flag, so it is set again before each stage; pr_run_all() also keeps
+    # the earlier stages' summary and last_run for a bag stage that still ends the process.
     $had_exception_flag = array_key_exists('use_error_exception', $GLOBALS);
     $exception_flag = $GLOBALS['use_error_exception'] ?? null;
     $GLOBALS['use_error_exception'] = true;
     try {
         try {
+            $GLOBALS['use_error_exception'] = true;
             $features = pr_bag_backfill_features($cfg['batch']);
         } catch (Throwable $e) {
             $features = ['error' => 'bag features threw: ' . $e->getMessage()];
         }
         try {
+            $GLOBALS['use_error_exception'] = true;
             $match = pr_bag_run_match();
         } catch (Throwable $e) {
             $match = ['error' => 'bag match threw: ' . $e->getMessage()];
@@ -1699,15 +1807,25 @@ function pr_bag_nightly(): array
 
 /**
  * Why an open match cannot be accepted on its photo as it is now, or '' when it can: the write plan's
- * reason, or 'colorway_gone' when its Colorway is not a choice any more. The review tab and the panel
+ * reason, or 'product_gone' / 'colorway_gone' when its Product or Colorway is not a leaf choice any more.
+ * The leaf lists can be passed in, so a page of rows loads them once. The review tab and the panel
  * both use it, so neither offers Accept on a row that Accept would refuse.
  *
  * @param array{products:list<int>,colorways:list<int>,cutouts:int} $photo
  */
-function pr_bag_match_blocked(array $photo, ?int $name_node, int $colorway_node, int $seed_name_node): string
+function pr_bag_match_blocked(array $photo, ?int $name_node, int $colorway_node, int $seed_name_node,
+                              ?array $product_leaves = null, ?array $colorway_leaves = null): string
 {
+    $product_leaves ??= pr_leaf_models();
+    $colorway_leaves ??= pr_field_leaves((int)($GLOBALS['product_recognition_colorway_field'] ?? 0));
     $blocked = pr_bag_write_plan($photo, $name_node, $colorway_node, $seed_name_node)['blocked'];
-    return $blocked === '' && !pr_bag_colorway_valid($colorway_node) ? 'colorway_gone' : $blocked;
+    if ($blocked !== '') {
+        return $blocked;
+    }
+    if ($name_node !== null && !isset($product_leaves[$name_node])) {
+        return 'product_gone';
+    }
+    return isset($colorway_leaves[$colorway_node]) ? '' : 'colorway_gone';
 }
 
 /**
@@ -1786,9 +1904,14 @@ function pr_bag_open_matches(int $limit = 100, int $offset = 0): array
     # Only matches whose cutout (file checksum + box) is still on the photo; shown at its current index.
     $match_cuts = pr_bag_current_cutouts($resources);
     $visible = [];
+    $access = [];      # one answer per photo, not per row
     foreach (pr_bag_bind_rows($rows, $match_cuts) as $r) {
-        if ($r['bound'] === null || !$r['newest']
-            || (function_exists('get_resource_access') && get_resource_access((int)$r['resource']) > 1)) {
+        if ($r['bound'] === null || !$r['newest']) {
+            continue;
+        }
+        $res = (int)$r['resource'];
+        $access[$res] ??= !function_exists('get_resource_access') || get_resource_access($res) <= 1;
+        if (!$access[$res]) {
             continue;
         }
         $r['region_index'] = $r['bound'];
@@ -1797,9 +1920,11 @@ function pr_bag_open_matches(int $limit = 100, int $offset = 0): array
     $states = pr_bag_load_photo_states(array_values(array_unique(array_map(static fn(array $r): int => (int)$r['resource'], $visible))));
     $good = [];
     $blocked = [];
+    $product_leaves = pr_leaf_models();
+    $colorway_leaves = pr_field_leaves((int)($GLOBALS['product_recognition_colorway_field'] ?? 0));
     foreach ($visible as $r) {
         $r['blocked'] = pr_bag_match_blocked($states[(int)$r['resource']], $r['name_node'] === null ? null : (int)$r['name_node'],
-                                             (int)$r['colorway_node'], (int)$r['seed_name_node']);
+                                             (int)$r['colorway_node'], (int)$r['seed_name_node'], $product_leaves, $colorway_leaves);
         if ($r['blocked'] === '') {
             $good[] = $r;
         } else {
@@ -1861,14 +1986,13 @@ function pr_bag_render_review(): void
     };
     foreach ($rows as $r) {
         $resource = (int)$r['resource'];
-        $cut = pr_bag_current_cutouts([$resource])[$resource] ?? ['file_checksum' => '', 'bboxes' => []];
         $product = (string)($r['product'] ?? '') !== '' ? (string)$r['product'] : $lang['product_recognition_bag_product_on_photo'];
         ?>
         <div class="ListviewStyle" style="margin-bottom:1em;">
             <div style="display:flex;gap:1em;align-items:flex-start;flex-wrap:wrap;">
                 <figure style="margin:0;">
                     <a href="<?php echo escape($baseurl . '/pages/view.php?ref=' . $resource); ?>" target="_blank">
-                        <img src="<?php echo escape($mask_url($resource, (int)$r['region_index'], $cut['file_checksum'])); ?>"
+                        <img src="<?php echo escape($mask_url($resource, (int)$r['region_index'], (string)$r['file_checksum'])); ?>"
                              alt="" style="max-height:180px;max-width:220px;" loading="lazy" />
                     </a>
                     <figcaption><?php echo escape($lang['product_recognition_bag_this_cutout']); ?></figcaption>
@@ -1900,6 +2024,7 @@ function pr_bag_render_review(): void
                     <form method="post" action="<?php echo escape($review); ?>" style="display:inline;">
                         <?php generateFormToken('pr_bag_review'); ?>
                         <input type="hidden" name="tab" value="bags" />
+                        <input type="hidden" name="bagpage" value="<?php echo (int)$page_now; ?>" />
                         <input type="hidden" name="match" value="<?php echo (int)$r['ref']; ?>" />
                         <?php if ($r['blocked'] === '') { ?>
                         <button type="submit" name="action" value="bag_accept"><?php echo escape($lang['product_recognition_accept']); ?></button>

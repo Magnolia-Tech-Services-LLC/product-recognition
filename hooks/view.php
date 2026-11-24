@@ -35,8 +35,12 @@ function HookProduct_recognitionViewCustompanels()
     $pin = $baseurl . '/plugins/product_recognition/pages/pin.php';
     $find = $baseurl . '/plugins/product_recognition/pages/find.php';
     $bag_tag = $baseurl . '/plugins/product_recognition/pages/bag_tag.php';
-    $bag_panel = ($can_decide && pr_bag_enabled()) ? pr_bag_panel_state((int)$ref, $checksum) : [];
-    $bag_boxes = ($can_decide && pr_bag_enabled()) ? (pr_bag_current_cutouts([(int)$ref])[(int)$ref]['bboxes'] ?? []) : [];
+    # The seed form and the match buttons only for a photo that is live (not deleted, not pending): its
+    # cutouts are then known to pr_bag_current_cutouts, which leaves any other state out.
+    $bag_cuts = ($can_decide && pr_bag_enabled()) ? (pr_bag_current_cutouts([(int)$ref])[(int)$ref] ?? null) : null;
+    $bag_live = $bag_cuts !== null;
+    $bag_panel = $bag_live ? pr_bag_panel_state((int)$ref, $checksum) : [];
+    $bag_boxes = $bag_cuts['bboxes'] ?? [];
     $bag_status = getval('pr_bag', '');
     $catalog = $can_decide ? pr_catalog_picker_rows() : [];
     $catalog_empty = $can_decide && $catalog === [];
@@ -369,8 +373,19 @@ function HookProduct_recognitionViewCustompanels()
                                 <?php } ?>
                                 <button type="submit"><?php echo escape($lang['product_recognition_find_other']); ?></button>
                             </form>
-                            <?php if (empty($row['fallback']) && pr_bag_enabled()) {
+                            <?php if (empty($row['fallback']) && $bag_live) {
                                 $bag_here = $bag_panel[(int)$row['region']] ?? ['seed' => null, 'match' => null];
+                                # The seed form starts from what was detected or saved for THIS cutout. On a photo with
+                                # several cutouts the photo-level product and colorway belong to no one bag, so they are not used.
+                                $bag_pre = $pre;
+                                if ($region_count > 1) {
+                                    $bag_pre = $bag_here['seed'] !== null
+                                        ? ['model_text' => $bag_here['seed']['product'], 'colorway_text' => $bag_here['seed']['colorway']]
+                                        : pr_picker_preselect((string)$row['model_name'], (string)$row['colorway'], $catalog);
+                                    if (str_contains((string)$bag_pre['colorway_text'], ',')) {
+                                        $bag_pre['colorway_text'] = (string)(preg_split('/\s*,\s*/', (string)$bag_pre['colorway_text'])[0] ?? '');
+                                    }
+                                }
                                 ?>
                             <form method="post" action="<?php echo escape($bag_tag); ?>" class="pr-bag-tag"
                                   style="display:inline;"
@@ -382,10 +397,10 @@ function HookProduct_recognitionViewCustompanels()
                                 <input type="hidden" name="bbox" value="<?php echo escape(json_encode($bag_boxes[(int)$row['region']] ?? [])); ?>" />
                                 <input type="hidden" name="model_text"
                                        id="<?php echo escape($picker_id); ?>-bag-model"
-                                       value="<?php echo escape($pre['model_text']); ?>" />
+                                       value="<?php echo escape($bag_pre['model_text']); ?>" />
                                 <input type="hidden" name="colorway_text"
                                        id="<?php echo escape($picker_id); ?>-bag-colorway"
-                                       value="<?php echo escape($pre['colorway_text']); ?>" />
+                                       value="<?php echo escape($bag_pre['colorway_text']); ?>" />
                                 <?php if ($in_modal) { ?>
                                 <input type="hidden" name="modal" value="true" />
                                 <?php } ?>
