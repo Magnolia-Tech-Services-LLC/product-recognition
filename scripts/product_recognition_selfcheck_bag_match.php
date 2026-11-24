@@ -202,6 +202,90 @@ pr_check("plan: no colorway is no write", pr_bag_write_plan($bag_one, 7, 0)['blo
 pr_check("ids csv: dedupes, drops zero",
          pr_bag_ids_csv([4, 5, 4, 0, -1]) === '4,5' && pr_bag_ids_csv([]) === '');
 
+# --- a blocked preferred row gives way to an acceptable one from the other gate ----------------
+$bag_q_blk = ['photo' => ['products' => [7], 'colorways' => [4], 'cutouts' => 2], 'shoot' => '10,20'];
+$bag_blk_seeds = [6 => ['product' => 7, 'shoot' => '10,20'], 5 => ['product' => 7, 'shoot' => '10,99']];
+# colorway gate would pick colorway 3 from seed 5 but the colorway-only plan is fine here; make the colorway row blocked instead
+$bag_q_one_blk = ['photo' => ['products' => [7], 'colorways' => [4], 'cutouts' => 1], 'shoot' => '10,20'];
+$d = pr_bag_decide($bag_q_one_blk, ['3' => ['all' => 0.90, 'seed' => 0.90, 'ref' => 6, 'n' => 1], '4' => ['all' => 0.5, 'seed' => 0.5, 'ref' => 6, 'n' => 1]],
+                   ['7|3' => ['all' => 0.93, 'seed' => 0.93, 'ref' => 6, 'n' => 1]], $bag_blk_seeds, null, [], $bag_cfg);
+pr_check("decide: with the photo already on another colorway, both gates are blocked, and the blocked row is still kept for a person",
+         $d['action'] === 'insert' && $d['blocked'] === 'other_colorway');
+$bag_q_other = ['photo' => ['products' => [9], 'colorways' => [], 'cutouts' => 1], 'shoot' => '10,20'];
+$d = pr_bag_decide($bag_q_other, ['3' => ['all' => 0.90, 'seed' => 0.90, 'ref' => 6, 'n' => 1]],
+                   ['7|3' => ['all' => 0.93, 'seed' => 0.93, 'ref' => 6, 'n' => 1]], $bag_blk_seeds, null, [], $bag_cfg);
+pr_check("decide: the preferred pair row would add a Name the one-cutout photo contradicts (blocked), the colorway-only row can be written, so it wins",
+         $d['action'] === 'insert' && $d['blocked'] === '' && $d['match']['gate'] === 'colorway');
+$d = pr_bag_decide($bag_q_other, [], ['7|3' => ['all' => 0.93, 'seed' => 0.93, 'ref' => 6, 'n' => 1]], $bag_blk_seeds, null, [], $bag_cfg);
+pr_check("decide: a blocked row alone is kept (blocked), so the person sees why", $d['action'] === 'insert' && $d['blocked'] === 'other_name');
+
+# --- what the feature pass does when a cutout fails ---------------------------------------------
+pr_check("failure plan: no answer and no service afterwards keeps the try, stops, and moves past the cutout",
+         pr_bag_failure_plan(true, false, true) === ['keep_try' => true, 'stop' => true, 'cursor' => 'past']);
+pr_check("failure plan: no answer but the service came back (it died on this cutout) keeps the try and goes on",
+         pr_bag_failure_plan(true, true, true) === ['keep_try' => true, 'stop' => false, 'cursor' => 'stay']);
+pr_check("failure plan: an error answer with a failing probe is the service's: give the try back, stop, retry this cutout first",
+         pr_bag_failure_plan(false, true, false) === ['keep_try' => false, 'stop' => true, 'cursor' => 'retry']);
+pr_check("failure plan: an error answer with a working probe is the cutout's: keep the try, go on (a poison cutout cannot stop the run)",
+         pr_bag_failure_plan(false, true, true) === ['keep_try' => true, 'stop' => false, 'cursor' => 'stay']);
+# the same decision over a night: tries a run of cutouts end up with
+$bag_night = static function (array $outcomes): array {
+    $tries = [];
+    foreach ($outcomes as $i => $o) {                  # o: [no_answer, back, probe_ok]
+        $plan = pr_bag_failure_plan($o[0], $o[1], $o[2]);
+        $tries[$i] = $plan['keep_try'] ? 1 : 0;
+        if ($plan['stop']) {
+            break;
+        }
+    }
+    return $tries;
+};
+pr_check("failure plan: a model-failure night (every error answer, probe failing) gives back the first try and stops, however many cutouts follow",
+         $bag_night(array_fill(0, 20, [false, true, false])) === [0]);
+pr_check("failure plan: three poison cutouts among good ones keep their tries and the run reaches the end",
+         $bag_night([[false, true, true], [false, true, true], [false, true, true], [false, true, true]]) === [1, 1, 1, 1]);
+$bag_png = pr_bag_probe_png();
+$bag_ihdr = unpack('Nw/Nh/Cdepth/Ctype', substr($bag_png, 16, 10));
+$bag_idat_len = unpack('N', substr($bag_png, 33, 4))[1];
+$bag_pix = (string)gzuncompress(substr($bag_png, 41, $bag_idat_len));
+$bag_opaque = 0;
+for ($bag_y = 0; $bag_y < 64; $bag_y++) {
+    for ($bag_x = 0; $bag_x < 64; $bag_x++) {
+        $bag_opaque += ord($bag_pix[$bag_y * (1 + 64 * 4) + 1 + $bag_x * 4 + 3]) > 128 ? 1 : 0;
+    }
+}
+pr_check("probe png: a valid 64 x 64 RGBA file (color type 6) with at least 1500 pixels of alpha > 128, the same bytes every time, crc checked",
+         str_starts_with($bag_png, "\x89PNG\r\n\x1a\n") && $bag_ihdr['w'] === 64 && $bag_ihdr['h'] === 64 && $bag_ihdr['depth'] === 8 && $bag_ihdr['type'] === 6
+         && strlen($bag_pix) === 64 * (1 + 64 * 4) && $bag_opaque >= 1500 && $bag_opaque < 64 * 64
+         && $bag_png === pr_bag_probe_png() && unpack('N', substr($bag_png, 29, 4))[1] === crc32(substr($bag_png, 12, 17))
+         && ord($bag_png[25]) === 6 && str_ends_with($bag_png, "\0\0\0\0IEND\xaeB`\x82"));
+
+# --- UNIQUE keys on tables RS created -----------------------------------------------------------
+$bag_idx = static fn(string $name, int $non_unique, array $cols): array => array_map(
+    static fn(int $i, string $c): array => ['INDEX_NAME' => $name, 'NON_UNIQUE' => (string)$non_unique, 'SEQ_IN_INDEX' => (string)($i + 1), 'COLUMN_NAME' => $c],
+    array_keys($cols), $cols);
+$bag_pk = $bag_idx('PRIMARY', 0, ['ref']);
+pr_check("unique key: present (any name, exact columns, unique) is ok; none is added; a non-unique index of the same name is replaced",
+         pr_bag_unique_key_action(array_merge($bag_pk, $bag_idx('cutout_feature_key', 0, ['resource', 'region_index'])), 'cutout_feature_key', ['resource', 'region_index']) === 'ok'
+         && pr_bag_unique_key_action(array_merge($bag_pk, $bag_idx('other', 0, ['resource', 'region_index'])), 'cutout_feature_key', ['resource', 'region_index']) === 'ok'
+         && pr_bag_unique_key_action($bag_pk, 'cutout_feature_key', ['resource', 'region_index']) === 'add'
+         && pr_bag_unique_key_action(array_merge($bag_pk, $bag_idx('cutout_feature_key', 1, ['resource', 'region_index'])), 'cutout_feature_key', ['resource', 'region_index']) === 'replace'
+         && pr_bag_unique_key_action(array_merge($bag_pk, $bag_idx('cutout_feature_key', 0, ['resource'])), 'cutout_feature_key', ['resource', 'region_index']) === 'replace'
+         && pr_bag_unique_key_action(array_merge($bag_pk, $bag_idx('x', 0, ['region_index', 'resource'])), 'cutout_feature_key', ['resource', 'region_index']) === 'add');
+
+# --- a failed Accept: what is taken back ---------------------------------------------------------
+pr_check("recover plan: only planned nodes that are on the photo now, never one another accepted match wrote or stands on",
+         pr_bag_recover_plan([10, 11, 30], [10, 30, 99], []) === ['remove' => [10, 30], 'kept' => []]
+         && pr_bag_recover_plan([10, 11, 30], [10, 30, 99], [30]) === ['remove' => [10], 'kept' => [30]]
+         && pr_bag_recover_plan([], [10], [])['remove'] === [] && pr_bag_recover_plan([10], [], [])['remove'] === []
+         && pr_bag_recover_plan([10], [10, 99], [])['remove'] === [10]);       # 99 was never planned: untouched
+pr_check("accept recovery: read the row after the failure: finished stays; a claim left behind is reopened; a rolled-back claim only has stray nodes taken back",
+         pr_bag_accept_recovery(['state' => 'applied', 'decided_at_set' => true]) === 'completed'
+         && pr_bag_accept_recovery(['state' => 'applied', 'decided_at_set' => false]) === 'reopen'
+         && pr_bag_accept_recovery(['state' => 'open', 'decided_at_set' => false]) === 'clean'
+         && pr_bag_accept_recovery(['state' => 'superseded', 'decided_at_set' => true]) === 'clean'
+         && pr_bag_accept_recovery(null) === 'clean');
+
 # --- the nightly decision for one cutout ---------------------------------------------------
 $bag_seeds = [6 => ['product' => 7, 'shoot' => '10,20'], 5 => ['product' => 7, 'shoot' => '10,99']];
 $bag_q = ['photo' => ['products' => [], 'colorways' => [], 'cutouts' => 3], 'shoot' => '10,20'];
@@ -486,13 +570,22 @@ $bag_fn = static function (string $name) use ($bag_match_src): string {
     return substr($bag_match_src, $at, ($end === false ? strlen($bag_match_src) : $end) - $at);
 };
 $bag_accept = $bag_fn('pr_bag_accept_match');
-pr_check("wiring: Accept checks edit access, then locks the photo first, claims, and runs pr_bag_pre_write (locking) inside the transaction",
+pr_check("wiring: Accept checks edit access, then in one transaction locks the photo first, checks (locking), claims with the planned nodes, and only then adds nodes",
          str_contains($bag_accept, 'pr_can_edit_resource($resource)')
-         && preg_match('/db_begin_transaction.*?pr_bag_lock_photo\(\$resource\).*?UPDATE product_bag_match SET state = .applied..*?pr_bag_pre_write\(\$m, true\).*?add_resource_nodes.*?db_end_transaction/s', $bag_accept) === 1
+         && preg_match('/db_begin_transaction.*?pr_bag_lock_photo\(\$resource\).*?pr_bag_pre_write\(\$m, true\).*?SET state = .applied., decided_by = \?, decided_at = NULL, name_written = \?, colorway_written = \?.*?add_resource_nodes.*?db_end_transaction/s', $bag_accept) === 1
          && !str_contains($bag_accept, 'pr_bag_gate_passes') && !str_contains($bag_accept, 'manual'));
-pr_check("wiring: Accept's last step needs the claim to still stand (state applied, decided_at empty, one row) or it takes its nodes back and fails",
-         preg_match('/decided_at = NOW\(\)\s*WHERE ref = \? AND state = .applied. AND decided_by = \? AND decided_at IS NULL.*?sql_affected_rows\(\) !== 1.*?take_back\(\);\s*return .failed./s', $bag_accept) === 1
-         && str_contains($bag_accept, 'decided_at = NULL') && str_contains($bag_accept, 'delete_resource_nodes('));
+pr_check("wiring: Accept turns use_error_exception on and restores it, and every failure (throw, or a last step that matches no row) goes to pr_bag_accept_recover",
+         preg_match('/use_error_exception.*?= true;.*?catch \(Throwable \$e\).*?pr_bag_accept_recover.*?finally.*?use_error_exception/s', $bag_accept) === 1
+         && preg_match('/SET decided_at = NOW\(\)\s*WHERE ref = \? AND state = .applied. AND decided_by = \? AND decided_at IS NULL.*?sql_affected_rows\(\) !== 1\)\s*\{\s*return pr_bag_accept_recover/s', $bag_accept) === 1);
+$bag_recover = $bag_fn('pr_bag_accept_recover');
+pr_check("wiring: recovery re-reads the row after the rollback, never removes what another accepted match wrote or stands on, and only reopens a claim with no decision time",
+         preg_match('/db_rollback_transaction.*?SELECT state, decided_at, decided_by FROM product_bag_match.*?pr_bag_accept_recovery\(/s', $bag_recover) === 1
+         && str_contains($bag_recover, "state = 'applied' AND ref <> ?") && str_contains($bag_recover, 'pr_bag_recover_plan(')
+         && str_contains($bag_recover, "SET state = 'open'") && str_contains($bag_recover, 'decided_at IS NULL'));
+pr_check("wiring: half-applied accepts are counted (never repaired) in the match pass and in --bag-match-report",
+         str_contains($bag_fn('pr_bag_half_applied'), "state = 'applied' AND decided_at IS NULL")
+         && str_contains($bag_fn('pr_bag_run_match'), 'pr_bag_half_applied()') && str_contains($bag_fn('pr_bag_report'), 'pr_bag_half_applied()')
+         && !str_contains($bag_fn('pr_bag_half_applied'), 'UPDATE') && !str_contains($bag_fn('pr_bag_half_applied'), 'delete_resource_nodes'));
 pr_check("wiring: a rejected row that someone else already decided is 'gone', not 'rejected'",
          preg_match('/state = .rejected.*?return sql_affected_rows\(\) === 1 \? .rejected. : .gone./s', $bag_fn('pr_bag_reject_match')) === 1);
 pr_check("wiring: opening a suggestion takes the photo's lock, checks pr_bag_pre_write locking, then inserts, in one transaction",
@@ -512,7 +605,7 @@ pr_check("wiring: the nightly bag stage turns on use_error_exception and restore
 pr_check("wiring: an open row is checked with pr_bag_pre_write before it is inserted",
          preg_match('/pr_bag_pre_write\(\$row\).*?INSERT INTO product_bag_match/s', $bag_fn('pr_bag_enact')) === 1);
 pr_check("wiring: matching and the report check /health first; both build candidates with pr_bag_build_candidates and load competitors",
-         preg_match('/pr_bag_enabled\(\)\)\s*\{.*?\}\s*if \(!pr_service_health\(\)\)/s', $bag_fn('pr_bag_run_match')) === 1
+         preg_match('/pr_bag_enabled\(\)\)\s*\{.*?pr_bag_drop_stale_pass\(\).*?if \(!pr_service_health\(\)\)/s', $bag_fn('pr_bag_run_match')) === 1
          && str_contains($bag_fn('pr_bag_run_match'), 'pr_bag_build_candidates(') && str_contains($bag_fn('pr_bag_report'), 'pr_bag_build_candidates(')
          && str_contains($bag_fn('pr_bag_report'), 'pr_bag_load_competitors(') && str_contains($bag_fn('pr_bag_report'), 'pr_service_health()')
          && !str_contains($bag_fn('pr_bag_report'), 'hide_product'));
@@ -524,10 +617,25 @@ pr_check("wiring: the feature pass records an attempt before posting, stores onl
 $bag_view_src = $bag_src('include/product_recognition_view.php');
 pr_check("wiring: a region commit clears the cutout features before and after it writes the masks",
          preg_match('/function pr_commit_regions.*?pr_bag_forget_cutouts\(\$ref\);.*?pr_write_mask_bytes.*?pr_bag_forget_cutouts\(\$ref\);\s*\}/s', $bag_view_src) === 1);
-pr_check("wiring: the feature pass checks the service before its first attempt, and gives the tries back on an outage or a service-wide streak",
-         preg_match('/pr_bag_service_up\(\)\)\s*\{\s*\$stats\[.service_down.\] = true;\s*return.*?pr_bag_store_attempt\(/s', $bag_fn('pr_bag_backfill_features')) === 1
-         && substr_count($bag_fn('pr_bag_backfill_features'), 'pr_bag_give_back_attempts(') === 2
-         && str_contains($bag_fn('pr_bag_backfill_features'), 'pr_bag_count_given_up()'));
+$bag_feat = $bag_fn('pr_bag_backfill_features');
+pr_check("wiring: the feature pass checks the service before its first attempt, scans every resource with regions (no prefilter on stored rows), and has no streak",
+         preg_match('/pr_bag_service_up\(\)\)\s*\{\s*\$stats\[.service_down.\] = true;\s*return.*?pr_bag_store_attempt\(/s', $bag_feat) === 1
+         && !str_contains($bag_feat, 'streak') && !str_contains($bag_feat, 'COUNT(*) FROM product_cutout_feature')
+         && str_contains($bag_feat, 'pr_bag_count_given_up()') && !str_contains($bag_feat, "\$stats['given_up']++"));
+pr_check("wiring: a failing cutout is judged by pr_bag_failure_plan, probing the service only for an error answer; the try is given back only when the plan says so",
+         preg_match('/pr_bag_failure_plan\(\$no_answer, \$back, \$no_answer \|\| pr_bag_probe_service\(\)\).*?keep_try.*?pr_bag_give_back_attempts\(\[\$tried\]\)/s', $bag_feat) === 1
+         && substr_count($bag_feat, 'pr_bag_give_back_attempts(') === 1 && str_contains($bag_fn('pr_bag_probe_service'), 'pr_bag_probe_png()'));
+pr_check("wiring: the match pass drops stale feature rows before it looks for seeds, so a night with no seeds still does",
+         preg_match('/pr_bag_drop_stale_pass\(\).*?pr_bag_load_seeds\(/s', $bag_fn('pr_bag_run_match')) === 1);
+pr_check("wiring: every writing CLI mode creates the tables and checks the UNIQUE keys first; seeds, queries and competitors skip resources in the deletion state",
+         substr_count($bag_match_src, 'pr_bag_prepare_tables();') === 3 && str_contains($bag_fn('pr_bag_ensure_unique_keys'), 'ADD UNIQUE KEY')
+         && !str_contains($bag_fn('pr_bag_ensure_unique_keys'), 'DELETE')
+         && str_contains($bag_fn('pr_bag_current_cutouts'), 'pr_bag_live_sql') && str_contains($bag_fn('pr_bag_load_competitors'), 'pr_bag_live_sql')
+         && str_contains($bag_fn('pr_bag_load_cutout_page'), 'pr_bag_live_sql') && str_contains($bag_feat, 'pr_bag_live_sql'));
+pr_check("wiring: the panel and the review tab compute blocked with the same function, the panel hides Accept on a blocked match, and the tab cuts its page after blocked is known",
+         str_contains($bag_fn('pr_bag_panel_state'), 'pr_bag_match_blocked(') && str_contains($bag_fn('pr_bag_open_matches'), 'pr_bag_match_blocked(')
+         && preg_match('/pr_bag_match_blocked\(.*?array_slice\(array_merge\(\$good, \$blocked\)/s', $bag_fn('pr_bag_open_matches')) === 1
+         && str_contains($bag_src('hooks/view.php'), "\$bag_action === 'bag_accept' && \$bag_here['match']['blocked'] !== ''"));
 pr_check("wiring: the not-ready message names the CLI modes",
          preg_match('/product_recognition_bag_no_tables"\] = "[^"]*--cutout-features or --all/', $bag_src('languages/en.php')) === 1);
 

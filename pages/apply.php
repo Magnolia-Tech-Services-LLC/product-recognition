@@ -15,8 +15,6 @@ if ($resource <= 0 || !get_edit_access($resource)) {
     exit($lang["error-permissiondenied"]);
 }
 $status = "none";
-$model_text = "";
-$colorway_text = "";
 if (enforcePostRequest(false)) {
     $model_text = trim(getval("model_text", ""));
     $colorway_text = trim(getval("colorway_text", ""));

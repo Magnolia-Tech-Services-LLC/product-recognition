@@ -71,6 +71,19 @@ $pr_cli_run = function (callable $fn) use ($dry_run) {
 };
 
 /**
+ * Accepts that claimed a match and did not finish. Counted, never repaired: a person looks at each.
+ *
+ * @param list<int> $refs
+ */
+function pr_bag_print_half_applied(array $refs, string $indent = '', $out = STDOUT): void
+{
+    if ($refs !== []) {
+        fprintf($out, "%s  %d half-applied accept(s), match ref %s: applied with no decision time. Check the photo's tags and the row by hand; nothing is repaired automatically\n",
+                $indent, count($refs), implode(', ', array_slice($refs, 0, 10)) . (count($refs) > 10 ? ', ...' : ''));
+    }
+}
+
+/**
  * @param array<string,mixed> $stats pr_bag_run_match() result
  */
 function pr_bag_print_match_summary(array $stats, string $indent = ''): void
@@ -95,6 +108,7 @@ function pr_bag_print_match_summary(array $stats, string $indent = ''): void
         printf("%s  accepted match %d (resource %d) came from seed %d, which has since been re-answered; its tags stay\n",
                $indent, $a['match'], $a['resource'], $a['seed_ref']);
     }
+    pr_bag_print_half_applied((array)($stats['half_applied'] ?? []), $indent);
     if (!empty($stats['service_down'])) {
         printf("%s  the service did not answer; the pass stopped early\n", $indent);
     }
@@ -554,6 +568,7 @@ switch ($mode) {
                 $row['margin'] === null ? '' : sprintf('%.4f', $row['margin'])], "\t");
         });
         fwrite(STDERR, sprintf("Usable seeds %d, ignored %d\n", $report['seeds'], count($report['ignored'])));
+        pr_bag_print_half_applied($report['half_applied'] ?? [], '', STDERR);
         foreach ($report['ignored'] as $i) {
             fwrite(STDERR, sprintf("  ignored seed %d (resource %d): %s\n", $i['ref'], $i['resource'], $i['reason']));
         }

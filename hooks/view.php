@@ -403,7 +403,13 @@ function HookProduct_recognitionViewCustompanels()
                                 $bag_here['match']['colorway'],
                                 sprintf('%.0f%%', 100 * $bag_here['match']['similarity']))); ?></span>
                             <?php /* One form per button, the action in a hidden field: the AJAX post serializes the form, which never includes the clicked button. */
-                            foreach (['bag_accept' => 'product_recognition_accept', 'bag_reject' => 'product_recognition_reject'] as $bag_action => $bag_label) { ?>
+                            if ($bag_here['match']['blocked'] !== '') { ?>
+                            <div><?php echo escape($lang['product_recognition_bag_blocked_' . $bag_here['match']['blocked']] ?? $lang['product_recognition_bag_blocked']); ?></div>
+                            <?php }
+                            foreach (['bag_accept' => 'product_recognition_accept', 'bag_reject' => 'product_recognition_reject'] as $bag_action => $bag_label) {
+                                if ($bag_action === 'bag_accept' && $bag_here['match']['blocked'] !== '') {
+                                    continue;
+                                } ?>
                             <form method="post" action="<?php echo escape($review); ?>" style="display:inline;"
                                   onsubmit="return <?php echo $post_js; ?>(this, true);">
                                 <?php generateFormToken('pr_bag_review'); ?>

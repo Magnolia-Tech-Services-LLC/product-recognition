@@ -49,7 +49,16 @@ the tables are missing instead of claiming there is no colorway field.
 Feature pass: before a cutout is sent to the service an attempt is recorded for its file checksum,
 box and mask file. A cutout that fails, or that takes the service down, is retried on the next
 runs and left alone after 3 tries, until its file, box or mask changes. --cutout-features shows
-how many were given up on. --bag-match checks the service is up before it starts.
+how many were given up on. --bag-match checks the service is up before it starts. When a cutout fails, the pass posts a
+known-good test cutout: if that fails too, the service is at fault, the try is given back and the
+pass stops; if it works, the cutout is at fault and the pass goes on. A rewritten mask is noticed
+on the next pass and recomputed with its tries reset.
+
+The CLI writing modes also make sure product_cutout_feature has its UNIQUE key (ResourceSpace
+ignores the flag when it creates the table from dbstruct/). If duplicate rows exist the mode
+stops and says so; it never deletes rows. --bag-match and --bag-match-report list any accepted
+match that was left half-applied (applied with no decision time); they are never repaired
+automatically.
 --bag-match-report needs at least
 $product_recognition_bag_report_min_hidden (default 50) hidden-colorway queries with a margin
 before the enable condition can pass.

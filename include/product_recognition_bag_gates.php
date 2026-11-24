@@ -17,9 +17,6 @@
  *  - photo     ['products' => list<int> leaf ids, 'colorways' => list<int>, 'cutouts' => int]
  */
 
-/** Cutouts in a row the service may fail on before the feature pass treats it as down. */
-const PR_BAG_MAX_FEATURE_FAILURES = 5;
-
 /** Tries the feature pass gives one cutout (same file checksum and box) before it leaves it alone. */
 const PR_BAG_MAX_ATTEMPTS = 3;
 
@@ -601,15 +598,23 @@ function pr_bag_decide(array $query, array $colorway_keys, array $pair_keys, arr
                 || ($plan['blocked'] === '' && !$plan['add_name'] && !$plan['add_colorway']),
         ];
     };
-    # The usual preference, falling to either gate on its own if the preferred row is void.
+    # The usual preference, falling to either gate on its own if the preferred row is void. A row that
+    # cannot be written (blocked) gives way to one from the other gate that can; a blocked row is
+    # kept only when neither can be written.
     $picked = null;
+    $blocked_pick = null;
     foreach ([pr_bag_choose($by_colorway, $by_pair, $cfg), pr_bag_choose(null, $by_pair, $cfg), pr_bag_choose($by_colorway, null, $cfg)] as $choice) {
         $one = $assess($choice);
-        if ($one !== null && !$one['void']) {
+        if ($one === null || $one['void']) {
+            continue;
+        }
+        if ($one['blocked'] === '') {
             $picked = $one;
             break;
         }
+        $blocked_pick ??= $one;
     }
+    $picked ??= $blocked_pick;
     if ($picked === null) {
         $out['action'] = $open === null ? 'none' : 'close';
         return $out;
@@ -635,6 +640,124 @@ function pr_bag_ids_csv(array $ids): string
 {
     $ids = array_values(array_unique(array_filter(array_map('intval', $ids), static fn(int $n): bool => $n > 0)));
     return implode(',', $ids);
+}
+
+/**
+ * What the feature pass does when a cutout fails. No I/O; the caller probes and checks the service.
+ *
+ *  - no answer and the service did not come back: it died on this cutout, or is down. The try stands
+ *    (a cutout that keeps killing it is left alone after PR_BAG_MAX_ATTEMPTS), the run stops, and the
+ *    cursor moves past the cutout.
+ *  - no answer but the service came back: it died on this cutout and restarted. The try stands, go on.
+ *  - an error answer: the service is probed with a cutout that is known to be good. If that fails
+ *    too, the fault is the service's: the try is given back, the run stops, and this cutout is
+ *    retried first next time. If it succeeds, the fault is the cutout's: the try stands, go on.
+ *
+ * @return array{keep_try:bool,stop:bool,cursor:string} cursor is 'past' (resume after this resource),
+ *         'retry' (resume at this resource) or 'stay'
+ */
+function pr_bag_failure_plan(bool $no_answer, bool $service_back, bool $probe_ok): array
+{
+    if ($no_answer) {
+        return $service_back
+            ? ['keep_try' => true, 'stop' => false, 'cursor' => 'stay']
+            : ['keep_try' => true, 'stop' => true, 'cursor' => 'past'];
+    }
+    return $probe_ok
+        ? ['keep_try' => true, 'stop' => false, 'cursor' => 'stay']
+        : ['keep_try' => false, 'stop' => true, 'cursor' => 'retry'];
+}
+
+/**
+ * A fixed synthetic cutout (RGBA PNG, 64 x 64, a colored disc of about 2460 opaque pixels) that
+ * passes the service's own checks (alpha, at least 1500 pixels with alpha > 128), so it reaches the
+ * DINOv2 step. The feature pass posts it to tell a failing service from a failing cutout.
+ */
+function pr_bag_probe_png(): string
+{
+    $size = 64;
+    $raw = '';
+    for ($y = 0; $y < $size; $y++) {
+        $raw .= "\0";
+        for ($x = 0; $x < $size; $x++) {
+            $inside = (($x - 32) ** 2 + ($y - 32) ** 2) <= 28 * 28;
+            $raw .= chr(($x * 4) & 255) . chr(($y * 4) & 255) . chr((($x + $y) * 2) & 255) . chr($inside ? 255 : 0);
+        }
+    }
+    $chunk = static fn(string $type, string $data): string => pack('N', strlen($data)) . $type . $data . pack('N', crc32($type . $data));
+    return "\x89PNG\r\n\x1a\n" . $chunk('IHDR', pack('NNCCCCC', $size, $size, 8, 6, 0, 0, 0))
+        . $chunk('IDAT', (string)gzcompress($raw, 9)) . $chunk('IEND', '');
+}
+
+/**
+ * Whether a table has a UNIQUE index on exactly these columns, from information_schema.STATISTICS rows.
+ * ResourceSpace ignores the unique flag in dbstruct index files, so a table it created may lack one.
+ *
+ * @param list<array{INDEX_NAME:string,NON_UNIQUE:int|string,SEQ_IN_INDEX:int|string,COLUMN_NAME:string}> $index_rows
+ * @param list<string> $columns
+ * @return 'ok'|'add'|'replace' replace = an index of that name exists but is not unique
+ */
+function pr_bag_unique_key_action(array $index_rows, string $name, array $columns): string
+{
+    $by = [];
+    foreach ($index_rows as $r) {
+        $by[(string)$r['INDEX_NAME']][(int)$r['SEQ_IN_INDEX']] = [(string)$r['COLUMN_NAME'], (int)$r['NON_UNIQUE']];
+    }
+    foreach ($by as $parts) {
+        ksort($parts);
+        if (array_column($parts, 0) === $columns && array_sum(array_column($parts, 1)) === 0) {
+            return 'ok';
+        }
+    }
+    return isset($by[$name]) ? 'replace' : 'add';
+}
+
+/**
+ * Which planned nodes a failed Accept may take back: only ones that are on the photo now, and never one
+ * another accepted match on the photo wrote or stands on ($protect). Planned nodes were absent from the
+ * photo when the plan was made, so nothing the photo had before is on the list.
+ *
+ * @param list<int> $planned nodes the Accept meant to add
+ * @param list<int> $present node ids on the photo now
+ * @param list<int> $protect nodes written or relied on by the photo's other accepted matches
+ * @return array{remove:list<int>,kept:list<int>}
+ */
+function pr_bag_recover_plan(array $planned, array $present, array $protect): array
+{
+    $there = array_values(array_intersect(array_map('intval', $planned), array_map('intval', $present)));
+    $kept = array_values(array_intersect($there, array_map('intval', $protect)));
+    return ['remove' => array_values(array_diff($there, $kept)), 'kept' => $kept];
+}
+
+/**
+ * What a failed Accept does, from the match row as it reads after the failure (never assume the
+ * rollback worked):
+ *  - 'completed': it is applied and decided_at is set, so the last step committed. Leave everything.
+ *  - 'reopen':    applied with decided_at empty, the claim committed (an implicit commit) but the
+ *                 accept did not finish. Take back the planned nodes, return the row to open.
+ *  - 'clean':     the claim was rolled back, but planned nodes may have been committed outside it.
+ *                 Take back the planned nodes; the row is not touched.
+ *
+ * @param array{state:string,decided_at_set:bool}|null $row
+ */
+function pr_bag_accept_recovery(?array $row): string
+{
+    if ($row !== null && $row['state'] === 'applied') {
+        return $row['decided_at_set'] ? 'completed' : 'reopen';
+    }
+    return 'clean';
+}
+
+/** @return list<int> */
+function pr_bag_csv_ids(string $csv): array
+{
+    $out = [];
+    foreach (explode(',', $csv) as $part) {
+        if ((int)$part > 0) {
+            $out[(int)$part] = (int)$part;
+        }
+    }
+    return array_values($out);
 }
 
 /** An --import-bag-tags row must be a JSON object. A number, a string, null or a list is a rejected row. */
