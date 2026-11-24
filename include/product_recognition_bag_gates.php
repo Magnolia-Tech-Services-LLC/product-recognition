@@ -255,26 +255,46 @@ function pr_bag_bind_rows(array $rows, array $current): array
 }
 
 /**
- * Feature rows that describe the cutout now at their index: the file is the current file and the
- * stored box overlaps the current box (the service reads a cutout's features by index, so a row
- * at another index is no use to it), and the mask file is the one it was computed from
- * (mask_mtime). Anything else is a leftover from before a re-cut.
+ * Sort stored feature rows by what can be said about them now. 'current' rows describe the cutout now at
+ * their index: the file is the current file, the stored box overlaps the current box (the service reads a
+ * cutout's features by index, so a row at another index is no use to it), and the mask file is the one it
+ * was computed from (mask_mtime). 'stale' rows are provably not the cutout: another file or box, or a mask
+ * that was read and has another mtime. 'unverified' rows have a mask that could not be seen or read (gone
+ * mount, I/O error): absence proves nothing, so they are neither used nor deleted.
  *
- * @param list<array<string,mixed>> $rows resource, region_index, file_checksum, bbox, mask_mtime, ...
+ * @param list<array<string,mixed>> $rows ref or feature_ref, resource, region_index, file_checksum, bbox, mask_mtime, ...
  * @param array<int,array{file_checksum:string,bboxes:array<int,array<int,float>>}> $current by resource
- * @param callable(array):?int|null $mtime the row's mask file mtime now, null when there is no mask; null skips the check
+ * @param callable(array):?int|null $mtime the row's mask file mtime now, null when it cannot be seen or read; null skips the check
+ * @return array{current:array<string,array<string,mixed>>,stale:list<int>,unverified:list<int>} current is "resource:index" => row
+ */
+function pr_bag_split_features(array $rows, array $current, ?callable $mtime = null): array
+{
+    $out = ['current' => [], 'stale' => [], 'unverified' => []];
+    foreach ($rows as $row) {
+        $ref = (int)($row['ref'] ?? $row['feature_ref'] ?? 0);
+        if (pr_bag_bind_row($row, $current[(int)$row['resource']] ?? null) !== (int)$row['region_index']) {
+            $out['stale'][] = $ref;
+        } elseif ($mtime === null) {
+            $out['current'][(int)$row['resource'] . ':' . (int)$row['region_index']] = $row;
+        } elseif (($now = $mtime($row)) === null) {
+            $out['unverified'][] = $ref;
+        } elseif ((int)$row['mask_mtime'] === $now) {
+            $out['current'][(int)$row['resource'] . ':' . (int)$row['region_index']] = $row;
+        } else {
+            $out['stale'][] = $ref;
+        }
+    }
+    return $out;
+}
+
+/**
+ * The 'current' part of pr_bag_split_features(): what seeds, competitors and queries may use.
+ *
  * @return array<string,array<string,mixed>> "resource:index" => row
  */
 function pr_bag_current_features(array $rows, array $current, ?callable $mtime = null): array
 {
-    $out = [];
-    foreach ($rows as $row) {
-        if (pr_bag_bind_row($row, $current[(int)$row['resource']] ?? null) === (int)$row['region_index']
-            && ($mtime === null || ($now = $mtime($row)) !== null && (int)$row['mask_mtime'] === $now)) {
-            $out[(int)$row['resource'] . ':' . (int)$row['region_index']] = $row;
-        }
-    }
-    return $out;
+    return pr_bag_split_features($rows, $current, $mtime)['current'];
 }
 
 /**
@@ -348,7 +368,7 @@ function pr_bag_seed_reason_acceptable(string $reason): bool
  *               is gone or was re-answered, the cutout has an answer of its own, the colorway was
  *               rejected for it, another match for the cutout was already accepted, or the seed is no
  *               longer one the matcher would use (pr_bag_seed_reason). Close it.
- *  - 'failed':  the Product is no longer a leaf.
+ *  - 'failed':  the Product is no longer a leaf, or the cutout's mask cannot be read right now (it stays open).
  *  - 'blocked': it cannot be written now (colorway gone, or what the photo has): leave it for review.
  *  - 'ok':      'plan' says what may be added.
  *
@@ -358,7 +378,8 @@ function pr_bag_seed_reason_acceptable(string $reason): bool
  * @return array{status:string,reason:string,plan:?array{add_name:bool,add_colorway:bool,blocked:string}}
  */
 function pr_bag_pre_write_verdict(?int $bound, array $match, ?array $seed, bool $own_seed, bool $rejected,
-                                  bool $answered, bool $seed_usable, ?array $photo, bool $name_ok, bool $colorway_ok): array
+                                  bool $answered, bool $seed_usable, ?array $photo, bool $name_ok, bool $colorway_ok,
+                                  bool $cutout_verified = true): array
 {
     $out = static fn(string $status, string $reason, ?array $plan = null): array => ['status' => $status, 'reason' => $reason, 'plan' => $plan];
     if ($bound === null) {
@@ -382,6 +403,9 @@ function pr_bag_pre_write_verdict(?int $bound, array $match, ?array $seed, bool 
     }
     if ($answered) {
         return $out('gone', 'answered');
+    }
+    if (!$cutout_verified) {
+        return $out('failed', 'cutout_unverified');      # its mask cannot be read right now: not proof of a change, so it stays open
     }
     if ($photo === null || !$name_ok) {
         return $out('failed', 'photo_or_product');

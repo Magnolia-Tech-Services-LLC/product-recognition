@@ -457,6 +457,29 @@ pr_check("features: a mask rewritten since (mtime differs) or gone makes the row
          array_keys(pr_bag_current_features([$bag_feat(0, 'F1', '[0.1,0.1,0.5,0.9]') + ['mask_mtime' => 100]], $bag_feat_now, static fn(array $r): ?int => 100)) === ['5:0']
          && pr_bag_current_features([$bag_feat(0, 'F1', '[0.1,0.1,0.5,0.9]') + ['mask_mtime' => 100]], $bag_feat_now, static fn(array $r): ?int => 101) === []
          && pr_bag_current_features([$bag_feat(0, 'F1', '[0.1,0.1,0.5,0.9]') + ['mask_mtime' => 100]], $bag_feat_now, static fn(array $r): ?int => null) === []);
+$bag_row_mt = $bag_feat(0, 'F1', '[0.1,0.1,0.5,0.9]') + ['mask_mtime' => 100];
+$bag_split_gone = pr_bag_split_features([$bag_row_mt, $bag_feat(1, 'F1', '[0.1,0.1,0.5,0.9]') + ['mask_mtime' => 100]], $bag_feat_now, static fn(array $r): ?int => null);
+pr_check("features: a mask that cannot be seen or read leaves the row unverified, never stale: kept, and not current (no seed, rival or query)",
+         $bag_split_gone['stale'] === [2] && $bag_split_gone['unverified'] === [1] && $bag_split_gone['current'] === []);
+$bag_split_mix = pr_bag_split_features([
+    $bag_row_mt,                                                                       # mask read, same mtime: current
+    ['ref' => 7] + $bag_feat(0, 'F1', '[0.1,0.1,0.5,0.9]') + ['mask_mtime' => 100],    # (same cutout twice is not a case here)
+], $bag_feat_now, static fn(array $r): ?int => 100);
+pr_check("features: a mask that was read with the same mtime is current",
+         array_keys($bag_split_mix['current']) === ['5:0'] && $bag_split_mix['stale'] === [] && $bag_split_mix['unverified'] === []);
+pr_check("features: a mask that was read with another mtime, another file or a moved box is stale (deleted), even when the mask is missing for a row that is also a leftover",
+         pr_bag_split_features([$bag_row_mt], $bag_feat_now, static fn(array $r): ?int => 101)['stale'] === [1]
+         && pr_bag_split_features([$bag_feat(0, 'OLD', '[0.1,0.1,0.5,0.9]') + ['mask_mtime' => 100]], $bag_feat_now, static fn(array $r): ?int => null)['stale'] === [1]
+         && pr_bag_split_features([$bag_feat(3, 'F1', '[0.1,0.1,0.5,0.9]') + ['mask_mtime' => 100]], [], static fn(array $r): ?int => null)['stale'] === [4]);
+pr_check("features: a whole storage outage (every mask unreadable) deletes nothing",
+         (static function () use ($bag_feat, $bag_feat_now): bool {
+             $rows = [];
+             for ($i = 0; $i < 50; $i++) {
+                 $rows[] = ['ref' => $i + 1, 'resource' => 5, 'region_index' => 0, 'file_checksum' => 'F1', 'bbox' => '[0.1,0.1,0.5,0.9]', 'mask_mtime' => 100];
+             }
+             $split = pr_bag_split_features($rows, $bag_feat_now, static fn(array $r): ?int => null);
+             return $split['stale'] === [] && count($split['unverified']) === 50 && $split['current'] === [];
+         })());
 pr_check("features: no row is retried; a finished row is done; an attempt is retried until " . PR_BAG_MAX_ATTEMPTS . " tries, then left alone",
          pr_bag_feature_state(null) === 'retry'
          && pr_bag_feature_state(['status' => 'ok', 'attempts' => 0]) === 'done'
@@ -627,6 +650,23 @@ pr_check("wiring: recovery reopens the row before it logs, every step is its own
          && strpos($bag_recover, 'delete_resource_nodes(') < strpos($bag_recover, "SET state = 'open'")
          && str_contains($bag_recover, '$step = static function') && substr_count($bag_recover, '$step(') >= 6
          && preg_match('/\$step = static function.*?use_error_exception.*?catch \(Throwable \$e\).*?pr_bag_log/s', $bag_recover) === 1);
+pr_check("accept: a cutout whose mask cannot be verified is refused as 'failed' (stays open), not closed as gone",
+         pr_bag_pre_write_verdict(0, $bag_pm, $bag_ps, false, false, false, true, $bag_pp, true, true, false)['reason'] === 'cutout_unverified'
+         && pr_bag_pre_write_verdict(0, $bag_pm, $bag_ps, false, false, false, true, $bag_pp, true, true, false)['status'] === 'failed'
+         && pr_bag_pre_write_verdict(0, $bag_pm, $bag_ps, false, false, false, true, $bag_pp, true, true, true)['status'] === 'ok'
+         && str_contains($bag_fn('pr_bag_pre_write'), "'pr_bag_mask_mtime'"));
+$bag_drop = $bag_fn('pr_bag_drop_stale_features');
+pr_check("wiring: nothing is deleted for a missing or unreadable mask: the drop takes only the stale refs, no folder guard stands in for the proof, and the unverified rows are counted and printed",
+         !str_contains($bag_drop, 'is_dir') && !str_contains($bag_drop, 'pr_mask_dir') && str_contains($bag_drop, 'DELETE FROM product_cutout_feature')
+         && substr_count($bag_match_src, "pr_bag_drop_stale_features(\$split['stale'])") === 3
+         && !preg_match('/pr_bag_drop_stale_features\(\$(?!split\[.stale.\])/', $bag_match_src)
+         && str_contains($bag_fn('pr_bag_drop_stale_pass'), "count(\$split['unverified'])")
+         && str_contains($bag_fn('pr_bag_run_match'), "pr_bag_drop_stale_pass(\$stats['unverified_features'])")
+         && str_contains(file_get_contents(__DIR__ . '/product_recognition_cli.php'), 'unverified_features')
+         && str_contains($bag_fn('pr_bag_backfill_features'), "\$stats['unverified'] += count(\$split['unverified'])"));
+pr_check("wiring: a cutout whose mask cannot be seen is skipped without a try, and Accept still refuses it (its check reads the feature with the mask mtime)",
+         preg_match('/pr_bag_mask_stat\(\$mask\) === null.*?skipped_no_mask.*?continue;.*?pr_bag_store_attempt\(/s', $bag_fn('pr_bag_backfill_features')) === 1
+         && str_contains($bag_fn('pr_bag_seed_reason_now'), "'pr_bag_mask_mtime'"));
 pr_check("wiring: half-applied accepts are counted (never repaired) in the match pass and in --bag-match-report",
          str_contains($bag_fn('pr_bag_half_applied'), "state = 'applied' AND decided_at IS NULL")
          && str_contains($bag_fn('pr_bag_run_match'), 'pr_bag_half_applied()') && str_contains($bag_fn('pr_bag_report'), 'pr_bag_half_applied()')
@@ -650,7 +690,7 @@ pr_check("wiring: the nightly bag stage turns on use_error_exception and restore
 pr_check("wiring: an open row is checked with pr_bag_pre_write before it is inserted",
          preg_match('/pr_bag_pre_write\(\$row\).*?INSERT INTO product_bag_match/s', $bag_fn('pr_bag_enact')) === 1);
 pr_check("wiring: matching and the report check /health first; both build candidates with pr_bag_build_candidates and load competitors",
-         preg_match('/pr_bag_enabled\(\)\)\s*\{.*?pr_bag_drop_stale_pass\(\).*?if \(!pr_service_health\(\)\)/s', $bag_fn('pr_bag_run_match')) === 1
+         preg_match('/pr_bag_enabled\(\)\)\s*\{.*?pr_bag_drop_stale_pass\(.*?if \(!pr_service_health\(\)\)/s', $bag_fn('pr_bag_run_match')) === 1
          && str_contains($bag_fn('pr_bag_run_match'), 'pr_bag_build_candidates(') && str_contains($bag_fn('pr_bag_report'), 'pr_bag_build_candidates(')
          && str_contains($bag_fn('pr_bag_report'), 'pr_bag_load_competitors(') && str_contains($bag_fn('pr_bag_report'), 'pr_service_health()')
          && !str_contains($bag_fn('pr_bag_report'), 'hide_product'));
@@ -671,7 +711,7 @@ pr_check("wiring: a failing cutout is judged by pr_bag_failure_plan, probing the
          preg_match('/pr_bag_failure_plan\(\$no_answer, \$back, \$no_answer \|\| pr_bag_probe_service\(\)\).*?keep_try.*?pr_bag_give_back_attempts\(\[\$tried\]\)/s', $bag_feat) === 1
          && substr_count($bag_feat, 'pr_bag_give_back_attempts(') === 1 && str_contains($bag_fn('pr_bag_probe_service'), 'pr_bag_probe_png()'));
 pr_check("wiring: the match pass drops stale feature rows before it looks for seeds, so a night with no seeds still does",
-         preg_match('/pr_bag_drop_stale_pass\(\).*?pr_bag_load_seeds\(/s', $bag_fn('pr_bag_run_match')) === 1);
+         preg_match('/pr_bag_drop_stale_pass\(.*?pr_bag_load_seeds\(/s', $bag_fn('pr_bag_run_match')) === 1);
 pr_check("wiring: every writing CLI mode creates the tables and checks the UNIQUE keys first; seeds, queries and competitors skip resources in the deletion state",
          substr_count($bag_match_src, 'pr_bag_prepare_tables();') === 3 && str_contains($bag_fn('pr_bag_ensure_unique_keys'), 'ADD UNIQUE KEY')
          && !str_contains($bag_fn('pr_bag_ensure_unique_keys'), 'DELETE')

@@ -435,23 +435,14 @@ function pr_bag_mask_mtime(array $row): ?int
 }
 
 /**
- * Delete feature rows that are not current (re-cut leftovers). Not when the mask folder itself cannot
- * be seen: a missing mount must not wipe every vector.
+ * Delete the feature rows pr_bag_split_features() proved are not their cutout (re-cut leftovers, a mask
+ * read with another mtime). A row whose mask cannot be seen or read stays: a missing mount or an I/O error
+ * is not a change, and must not wipe every vector.
  *
- * @param list<array<string,mixed>> $rows rows with ref
- * @param array<string,array<string,mixed>> $current pr_bag_current_features of those rows
+ * @param list<int> $stale refs from pr_bag_split_features()['stale']
  */
-function pr_bag_drop_stale_features(array $rows, array $current): int
+function pr_bag_drop_stale_features(array $stale): int
 {
-    if (!is_dir(pr_mask_dir())) {
-        return 0;
-    }
-    $stale = [];
-    foreach ($rows as $row) {
-        if (!isset($current[(int)$row['resource'] . ':' . (int)$row['region_index']])) {
-            $stale[] = (int)($row['ref'] ?? $row['feature_ref']);
-        }
-    }
     foreach (array_chunk($stale, 500) as $chunk) {
         ps_query('DELETE FROM product_cutout_feature WHERE ref IN (' . pr_bag_marks($chunk) . ')', pr_bag_int_params($chunk));
     }
@@ -562,11 +553,11 @@ function pr_bag_probe_service(): bool
  * back and stops the run; a working one means the cutout is at fault and the run goes on), and a
  * service that died on a cutout and did not come back keeps that try and stops the run past it.
  *
- * @return array{computed:int,unusable:int,failed:int,skipped_no_mask:int,given_up:int,stale:int,service_down:bool,scanned:int,last:int}
+ * @return array{computed:int,unusable:int,failed:int,skipped_no_mask:int,unverified:int,given_up:int,stale:int,service_down:bool,scanned:int,last:int}
  */
 function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
 {
-    $stats = ['computed' => 0, 'unusable' => 0, 'failed' => 0, 'skipped_no_mask' => 0, 'given_up' => 0, 'stale' => 0, 'service_down' => false,
+    $stats = ['computed' => 0, 'unusable' => 0, 'failed' => 0, 'skipped_no_mask' => 0, 'unverified' => 0, 'given_up' => 0, 'stale' => 0, 'service_down' => false,
               'scanned' => 0, 'last' => 0];
     if (!$dry_run) {
         pr_bag_prepare_tables();
@@ -625,9 +616,11 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
                 # A stored row counts only if it is this cutout: file checksum, box and mask file as it is
                 # now (mtime). Anything else is a leftover and is replaced here, with its tries.
                 $stored = $stored_by_resource[$resource] ?? [];
-                $current = pr_bag_current_features($stored, [$resource => ['file_checksum' => $checksum, 'bboxes' => $boxes]], 'pr_bag_mask_mtime');
+                $split = pr_bag_split_features($stored, [$resource => ['file_checksum' => $checksum, 'bboxes' => $boxes]], 'pr_bag_mask_mtime');
+                $current = $split['current'];
+                $stats['unverified'] += count($split['unverified']);
                 if (!$dry_run) {
-                    pr_bag_drop_stale_features($stored, $current);
+                    pr_bag_drop_stale_features($split['stale']);
                 }
                 foreach ($boxes as $index => $bbox) {
                     $mine = $current[$resource . ':' . $index] ?? null;
@@ -1042,14 +1035,16 @@ function pr_bag_load_competitors(array $seed_resources, array $cfg): array
  * Drop every stored feature row that is not its cutout any more (mask rewritten, box moved). Runs
  * before the match pass looks for seeds, so a night with no seeds still clears them.
  */
-function pr_bag_drop_stale_pass(): int
+function pr_bag_drop_stale_pass(?int &$unverified = null): int
 {
     $after = 0;
     $dropped = 0;
+    $unverified = 0;
     while (($cuts = pr_bag_load_cutout_page($after, 500)) !== []) {
         $after = (int)$cuts[count($cuts) - 1]['feature_ref'];
-        $fresh = pr_bag_current_features($cuts, pr_bag_current_cutouts(array_map(static fn(array $c): int => (int)$c['resource'], $cuts)), 'pr_bag_mask_mtime');
-        $dropped += pr_bag_drop_stale_features($cuts, $fresh);
+        $split = pr_bag_split_features($cuts, pr_bag_current_cutouts(array_map(static fn(array $c): int => (int)$c['resource'], $cuts)), 'pr_bag_mask_mtime');
+        $dropped += pr_bag_drop_stale_features($split['stale']);
+        $unverified += count($split['unverified']);
     }
     return $dropped;
 }
@@ -1101,7 +1096,7 @@ function pr_bag_build_candidates(array $seeds, array $competitors): array
 function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
 {
     $stats = ['seeds' => 0, 'ignored_seeds' => [], 'competitors' => 0, 'considered' => 0, 'opened' => 0,
-              'updated' => 0, 'closed' => 0, 'blocked' => 0, 'stale' => 0, 'missing_features' => 0,
+              'updated' => 0, 'closed' => 0, 'blocked' => 0, 'stale' => 0, 'missing_features' => 0, 'unverified_features' => 0,
               'service_down' => false, 'disabled' => false];
     if (!$dry_run) {
         pr_bag_prepare_tables();
@@ -1112,7 +1107,7 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
         return $stats;
     }
     if (!$dry_run) {
-        $stats['dropped_features'] = pr_bag_drop_stale_pass();
+        $stats['dropped_features'] = pr_bag_drop_stale_pass($stats['unverified_features']);
     }
     $stats['half_applied'] = pr_bag_half_applied();
     if (!pr_service_health()) {
@@ -1213,11 +1208,13 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
         $after = (int)$cuts[count($cuts) - 1]['feature_ref'];
         # A feature row can outlive its cutout (regions cut under an older stamp, say). A match for
         # it could never bind, so it would be opened and superseded again every night.
-        $fresh = pr_bag_current_features($cuts, pr_bag_current_cutouts(array_map(static fn(array $c): int => (int)$c['resource'], $cuts)), 'pr_bag_mask_mtime');
+        $split = pr_bag_split_features($cuts, pr_bag_current_cutouts(array_map(static fn(array $c): int => (int)$c['resource'], $cuts)), 'pr_bag_mask_mtime');
+        $fresh = $split['current'];
         # A row that is not its cutout any more (a re-cut landed while it was being computed) is dropped,
-        # so the feature pass sees the cutout as missing and computes it again.
+        # so the feature pass sees the cutout as missing and computes it again. One whose mask cannot be
+        # seen is kept and unused this run.
         if (!$dry_run) {
-            pr_bag_drop_stale_features($cuts, $fresh);
+            pr_bag_drop_stale_features($split['stale']);
         }
         $queries = [];
         foreach ($cuts as $c) {
@@ -1422,7 +1419,11 @@ function pr_bag_pre_write(array $m, bool $locking = false): array
     $own_seed = false;
     $rejected = false;
     $answered = false;
+    $verified = false;
     if ($bound !== null) {
+        $feature_rows = ps_query('SELECT ref, resource, region_index, file_checksum, bbox, mask_mtime, status, attempts FROM product_cutout_feature WHERE resource = ?',
+                                 ['i', $resource]);
+        $verified = isset(pr_bag_current_features($feature_rows, [$resource => $now], 'pr_bag_mask_mtime')[$resource . ':' . $bound]);
         $tags = ps_query('SELECT ref, resource, region_index, file_checksum, bbox FROM product_bag_tag WHERE resource = ?', ['i', $resource]);
         $own_seed = array_filter(pr_bag_bind_rows($tags, [$resource => $now]), static fn(array $r): bool => $r['bound'] === $bound) !== [];
         $gone = ps_query("SELECT ref, resource, region_index, file_checksum, bbox FROM product_bag_match
@@ -1438,7 +1439,7 @@ function pr_bag_pre_write(array $m, bool $locking = false): array
     $photo = pr_bag_load_photo_states([$resource])[$resource] ?? null;
     $verdict = pr_bag_pre_write_verdict(
         $bound, ['name_node' => $name_node, 'colorway_node' => (int)$m['colorway_node']], $seed, $own_seed, $rejected, $answered, $seed_usable, $photo,
-        $name_node === null || pr_is_leaf_model($name_node), pr_bag_colorway_valid((int)$m['colorway_node'])
+        $name_node === null || pr_is_leaf_model($name_node), pr_bag_colorway_valid((int)$m['colorway_node']), $verified
     );
     return $verdict + ['photo' => $photo, 'seed' => $seed];
 }

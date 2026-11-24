@@ -109,7 +109,8 @@ function pr_bag_print_match_summary(array $stats, string $indent = ''): void
                $indent, $a['match'], $a['resource'], $a['seed_ref']);
     }
     foreach (['missing_features' => 'cutouts with no features yet', 'stale' => 'matches not opened, what they said was no longer true',
-              'dropped_features' => 'stale feature rows dropped'] as $key => $what) {
+              'dropped_features' => 'stale feature rows dropped',
+              'unverified_features' => 'feature rows kept but not used, their mask cannot be seen or read'] as $key => $what) {
         if ((int)($stats[$key] ?? 0) > 0) {
             printf("%s  %d %s\n", $indent, (int)$stats[$key], $what);
         }
@@ -509,9 +510,9 @@ switch ($mode) {
             exit(1);
         }
         printf("Cutout features%s\n", $dry_run ? ' (would compute)' : '');
-        printf("  computed         %d\n  unusable         %d\n  failed           %d\n  given up (%d tries) %d\n  mask rewritten   %d\n  no mask yet      %d\n  resources scanned %d\n",
+        printf("  computed         %d\n  unusable         %d\n  failed           %d\n  given up (%d tries) %d\n  mask rewritten   %d\n  no mask yet      %d\n  rows kept, mask unseen %d\n  resources scanned %d\n",
                $stats['computed'], $stats['unusable'], $stats['failed'], PR_BAG_MAX_ATTEMPTS, $stats['given_up'], $stats['stale'],
-               $stats['skipped_no_mask'], $stats['scanned']);
+               $stats['skipped_no_mask'], $stats['unverified'], $stats['scanned']);
         if ($stats['service_down']) {
             fwrite(STDERR, "product_recognition: the service did not answer, or kept failing; stopped.\n");
             exit(1);
