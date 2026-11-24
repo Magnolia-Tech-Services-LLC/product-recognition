@@ -1589,46 +1589,55 @@ function pr_bag_accept_match(int $match_ref, int $user): string
  */
 function pr_bag_accept_recover(int $match_ref, int $resource, array $name_planned, array $colorway_planned): string
 {
-    $GLOBALS['use_error_exception'] = true;
-    try {
-        db_rollback_transaction('pr_bag_accept');
-    } catch (Throwable $e) {
-        # nothing open any more (an implicit commit ended it): the re-read below says what is left
+    # Every step stands alone: one that fails is logged and the next still runs. The log line comes last, so
+    # a failing log write can never leave the row applied with its nodes gone.
+    $step = static function (callable $do) use ($match_ref) {
+        $GLOBALS['use_error_exception'] = true;
+        try {
+            return $do();
+        } catch (Throwable $e) {
+            pr_bag_log('bag match ' . $match_ref . ' accept recovery step failed, check the row by hand: ' . $e->getMessage());
+            return null;
+        }
+    };
+    # Nothing to roll back when an implicit commit ended the transaction: the re-read says what is left.
+    $step(static fn() => db_rollback_transaction('pr_bag_accept'));
+    $read = $step(static fn() => ps_query('SELECT state, decided_at, decided_by FROM product_bag_match WHERE ref = ?', ['i', $match_ref]));
+    if ($read === null) {
+        return 'failed';      # cannot tell what state the row is in: touch nothing
     }
-    try {
-        $GLOBALS['use_error_exception'] = true;
-        $row = ps_query('SELECT state, decided_at, decided_by FROM product_bag_match WHERE ref = ?', ['i', $match_ref])[0] ?? null;
-        $action = pr_bag_accept_recovery($row === null ? null : ['state' => (string)$row['state'], 'decided_at_set' => $row['decided_at'] !== null]);
-        if ($action === 'completed') {
-            return 'applied';
-        }
-        $GLOBALS['use_error_exception'] = true;
-        $planned = array_values(array_unique(array_merge($name_planned, $colorway_planned)));
-        $protect = [];
-        foreach (ps_query("SELECT name_node, colorway_node, name_written, colorway_written FROM product_bag_match
-                            WHERE resource = ? AND state = 'applied' AND ref <> ?", ['i', $resource, 'i', $match_ref]) as $other) {
-            $protect = array_merge(
-                $protect, pr_bag_csv_ids((string)$other['name_written']), pr_bag_csv_ids((string)$other['colorway_written']),
-                $other['name_node'] === null ? [] : pr_nodes_to_apply((int)$other['name_node']),
-                pr_model_nodes_with_ancestors((int)$other['colorway_node'])
-            );
-        }
-        $GLOBALS['use_error_exception'] = true;
-        $undo = pr_bag_recover_plan($planned, $planned === [] ? [] : pr_bag_nodes_on_photo($resource, $planned), $protect);
-        if ($undo['remove'] !== []) {
-            $GLOBALS['use_error_exception'] = true;
-            delete_resource_nodes($resource, $undo['remove'], false);
-            $GLOBALS['use_error_exception'] = true;
-            resource_log($resource, LOG_CODE_EDITED, 0, sprintf('Product recognition bag match %d: accept did not complete, removed nodes %s',
-                                                                $match_ref, pr_bag_ids_csv($undo['remove'])));
-        }
-        if ($action === 'reopen') {
-            $GLOBALS['use_error_exception'] = true;
-            ps_query("UPDATE product_bag_match SET state = 'open', decided_by = NULL, decided_at = NULL, name_written = '', colorway_written = ''
-                       WHERE ref = ? AND state = 'applied' AND decided_at IS NULL", ['i', $match_ref]);
-        }
-    } catch (Throwable $e) {
-        pr_bag_log('bag match ' . $match_ref . ' accept recovery failed, check the row by hand: ' . $e->getMessage());
+    $row = $read[0] ?? null;
+    $action = pr_bag_accept_recovery($row === null ? null : ['state' => (string)$row['state'], 'decided_at_set' => $row['decided_at'] !== null]);
+    if ($action === 'completed') {
+        return 'applied';
+    }
+    $planned = array_values(array_unique(array_merge($name_planned, $colorway_planned)));
+    $protect = [];
+    $others = $step(static fn() => ps_query("SELECT name_node, colorway_node, name_written, colorway_written FROM product_bag_match
+                                              WHERE resource = ? AND state = 'applied' AND ref <> ?", ['i', $resource, 'i', $match_ref]));
+    foreach ($others ?? [] as $other) {
+        $protect = array_merge(
+            $protect, pr_bag_csv_ids((string)$other['name_written']), pr_bag_csv_ids((string)$other['colorway_written']),
+            $other['name_node'] === null ? [] : pr_nodes_to_apply((int)$other['name_node']),
+            pr_model_nodes_with_ancestors((int)$other['colorway_node'])
+        );
+    }
+    $remove = [];
+    if ($others !== null && $planned !== []) {
+        $present = $step(static fn() => pr_bag_nodes_on_photo($resource, $planned));
+        $remove = $present === null ? [] : pr_bag_recover_plan($planned, $present, $protect)['remove'];
+    }
+    $removed = $remove === [] || $step(static function () use ($resource, $remove) {
+        delete_resource_nodes($resource, $remove, false);
+        return true;
+    }) === true;
+    if ($action === 'reopen' && $removed) {
+        $step(static fn() => ps_query("UPDATE product_bag_match SET state = 'open', decided_by = NULL, decided_at = NULL, name_written = '', colorway_written = ''
+                                        WHERE ref = ? AND state = 'applied' AND decided_at IS NULL", ['i', $match_ref]));
+    }
+    if ($remove !== [] && $removed) {
+        $step(static fn() => resource_log($resource, LOG_CODE_EDITED, 0, sprintf('Product recognition bag match %d: accept did not complete, removed nodes %s',
+                                                                                    $match_ref, pr_bag_ids_csv($remove))));
     }
     return 'failed';
 }

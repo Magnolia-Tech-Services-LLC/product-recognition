@@ -621,6 +621,12 @@ pr_check("wiring: recovery re-reads the row after the rollback, never removes wh
          preg_match('/db_rollback_transaction.*?SELECT state, decided_at, decided_by FROM product_bag_match.*?pr_bag_accept_recovery\(/s', $bag_recover) === 1
          && str_contains($bag_recover, "state = 'applied' AND ref <> ?") && str_contains($bag_recover, 'pr_bag_recover_plan(')
          && str_contains($bag_recover, "SET state = 'open'") && str_contains($bag_recover, 'decided_at IS NULL'));
+pr_check("wiring: recovery reopens the row before it logs, every step is its own guarded step, and a failed log cannot undo or skip the reopen",
+         strpos($bag_recover, "SET state = 'open'") !== false && strpos($bag_recover, 'resource_log(') !== false
+         && strpos($bag_recover, "SET state = 'open'") < strpos($bag_recover, 'resource_log(')
+         && strpos($bag_recover, 'delete_resource_nodes(') < strpos($bag_recover, "SET state = 'open'")
+         && str_contains($bag_recover, '$step = static function') && substr_count($bag_recover, '$step(') >= 6
+         && preg_match('/\$step = static function.*?use_error_exception.*?catch \(Throwable \$e\).*?pr_bag_log/s', $bag_recover) === 1);
 pr_check("wiring: half-applied accepts are counted (never repaired) in the match pass and in --bag-match-report",
          str_contains($bag_fn('pr_bag_half_applied'), "state = 'applied' AND decided_at IS NULL")
          && str_contains($bag_fn('pr_bag_run_match'), 'pr_bag_half_applied()') && str_contains($bag_fn('pr_bag_report'), 'pr_bag_half_applied()')
