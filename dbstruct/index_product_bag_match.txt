@@ -1,0 +1,4 @@
+product_bag_match,1,bag_match_cutout,1,resource,A,0,,,,BTREE,
+product_bag_match,1,bag_match_cutout,2,region_index,A,0,,,,BTREE,
+product_bag_match,1,bag_match_state,1,state,A,0,,,,BTREE,
+product_bag_match,1,bag_match_seed,1,seed_ref,A,0,,,,BTREE,

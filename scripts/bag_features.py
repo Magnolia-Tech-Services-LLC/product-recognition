@@ -124,12 +124,15 @@ def _per_key(sims, kinds, keys):
     return out
 
 
-def match_queries(queries, cands, mix=MIX):
+def match_queries(queries, cands, mix=MIX, near_copy=None):
     """Score query cutouts against seed and competitor cutouts. Gates are not applied here.
 
-    queries: list of dicts {dino, hist, resource, checksum, shoot, products}
+    queries: list of dicts {dino, hist, resource, checksum, shoot, products[, hide_colorway,
+        hide_product]}
         products: iterable of product node ids on the query's photo (may be empty)
         shoot: string, '' when the photo has no Folder Path
+        hide_*: report only. Drops candidates of that colorway (colorway pool) or of that
+        product and colorway (pair pool), so a tag found is a tag that is wrong.
     cands: list of dicts {dino, hist, resource, checksum, kind, product, colorway, shoot, ref}
         kind: 'seed' or 'competitor'; ref: the seed's id (0 for a competitor)
 
@@ -137,6 +140,9 @@ def match_queries(queries, cands, mix=MIX):
     checksum (a duplicate file). Per query two pools are reduced to a best score per key:
       colorway  candidates whose product is one of the query photo's products; key = colorway
       pair      candidates on the query's shoot (never when the shoot is ''); key = product|colorway
+    near_copy: report only (prop3.py). A candidate whose photo holds a cutout with DINOv2 cosine
+    above this to ANY cutout of the query's photo is dropped with its whole photo. Production
+    matching leaves it None: it drops only the seed's own photo and checksum duplicates.
     Each entry is {'all': best over seeds and competitors, 'seed': best over seeds or None,
     'ref': the seed that scored it, 'n': candidates in the key}. 'all' is what a rival key is
     judged by; only 'seed' can be a match.
@@ -145,9 +151,14 @@ def match_queries(queries, cands, mix=MIX):
         return [{'colorway': {}, 'pair': {}} for _ in queries]
     sims = pair_scores([q['dino'] for q in queries], [q['hist'] for q in queries],
                        [c['dino'] for c in cands], [c['hist'] for c in cands], mix)
+    cos = None
+    if near_copy is not None:
+        cos = np.asarray([q['dino'] for q in queries], dtype=np.float64) \
+            @ np.asarray([c['dino'] for c in cands], dtype=np.float64).T
     c_res = np.array([c['resource'] for c in cands])
     c_chk = np.array([c['checksum'] for c in cands], dtype=object)
     c_prod = np.array([c['product'] for c in cands])
+    c_color = np.array([c['colorway'] for c in cands])
     c_shoot = np.array([c['shoot'] for c in cands], dtype=object)
     kinds = [c['kind'] for c in cands]
     out = []
@@ -155,9 +166,18 @@ def match_queries(queries, cands, mix=MIX):
         ok = c_res != q['resource']
         if q['checksum']:
             ok &= c_chk != q['checksum']
+        if cos is not None:
+            same_photo = [j for j, other in enumerate(queries) if other['resource'] == q['resource']]
+            near = set(c_res[(cos[same_photo] > near_copy).any(0)].tolist())
+            if near:
+                ok &= ~np.isin(c_res, list(near))
+        hide_cw = int(q.get('hide_colorway') or 0)
+        hide_pr = int(q.get('hide_product') or 0)
         res = {'colorway': {}, 'pair': {}}
         prods = set(int(p) for p in q['products'])
         pool = ok & np.isin(c_prod, list(prods)) if prods else np.zeros(len(cands), bool)
+        if hide_cw:
+            pool &= c_color != hide_cw
         idx = np.where(pool)[0]
         if len(idx):
             keys = [str(cands[i]['colorway']) for i in idx]
@@ -166,7 +186,10 @@ def match_queries(queries, cands, mix=MIX):
                                         'ref': int(cands[idx[at]]['ref']) if at >= 0 else 0,
                                         'n': keys.count(key)}
         if q['shoot']:
-            idx = np.where(ok & (c_shoot == q['shoot']))[0]
+            same = ok & (c_shoot == q['shoot'])
+            if hide_cw:
+                same &= ~((c_prod == hide_pr) & (c_color == hide_cw))
+            idx = np.where(same)[0]
             if len(idx):
                 keys = ['%d|%d' % (cands[i]['product'], cands[i]['colorway']) for i in idx]
                 for key, (best_all, best_seed, at) in _per_key(sims[qi, idx], [kinds[i] for i in idx], keys).items():

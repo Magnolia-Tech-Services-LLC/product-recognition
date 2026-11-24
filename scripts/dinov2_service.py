@@ -512,8 +512,9 @@ def match_bags(payload: dict = Body(...)):
     job, as /calibrate leaves thresholds to PHP. Features are read from
     product_cutout_feature, so the request carries ids, not vectors:
 
-      {db, mix?,
-       queries:    [{resource, region_index, checksum, shoot, products:[node,...]}],
+      {db, mix?, near_copy?,
+       queries:    [{resource, region_index, checksum, shoot, products:[node,...],
+                     hide_colorway?, hide_product?}],
        candidates: [{resource, region_index, checksum, kind: seed|competitor,
                      product, colorway, shoot, ref}]}
 
@@ -526,6 +527,8 @@ def match_bags(payload: dict = Body(...)):
     if not db_name or not isinstance(queries, list) or not isinstance(candidates, list):
         raise HTTPException(status_code=400, detail="Provide db, queries and candidates")
     mix = float(payload.get("mix", bag_features.MIX))
+    near_copy = payload.get("near_copy")
+    near_copy = None if near_copy is None else float(near_copy)
     try:
         wanted = {}
         for row in queries + candidates:
@@ -551,8 +554,10 @@ def match_bags(payload: dict = Body(...)):
         present.append(at)
         qs.append({"dino": found[0], "hist": found[1], "resource": int(row["resource"]),
                    "checksum": found[2], "shoot": str(row.get("shoot") or ""),
-                   "products": [int(p) for p in row.get("products") or []]})
-    scored = bag_features.match_queries(qs, cands, mix)
+                   "products": [int(p) for p in row.get("products") or []],
+                   "hide_colorway": int(row.get("hide_colorway") or 0),
+                   "hide_product": int(row.get("hide_product") or 0)})
+    scored = bag_features.match_queries(qs, cands, mix, near_copy)
     results = [None] * len(queries)
     for at, res in zip(present, scored):
         results[at] = res

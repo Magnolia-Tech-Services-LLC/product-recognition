@@ -195,5 +195,33 @@ check('a key with only competitors has a score but no seed', entry['seed'] is No
 check('no queries or no candidates is an empty answer, not an error',
       bf.match_queries([], cands) == [] and bf.match_queries(queries[:1], []) == [{'colorway': {}, 'pair': {}}])
 
+# ---- report-only options: near-copy removal (prop3 nd) and hidden colorway -----------------
+# Reference: prop3's nd = photos holding a cutout with DINOv2 cosine > .95 to any cutout of the
+# query photo, removed whole; hidden = candidates of the query's true colorway removed.
+cd2 = cd.copy(); cd2[7] = qd[0] * .99 + cd[7] * .01; cd2[7] /= np.linalg.norm(cd2[7])   # near copy of query 0
+c_res2 = c_res.copy(); c_res2[8] = c_res2[7]                                            # candidate 8 is on the same photo as 7
+cands2 = [dict(c, dino=cd2[i], resource=int(c_res2[i])) for i, c in enumerate(cands)]
+q0 = dict(queries[0], products={7, 8}, shoot='', hide_colorway=0)
+plain = bf.match_queries([q0], cands2)[0]['colorway']
+dropped = bf.match_queries([q0], cands2, near_copy=.95)[0]['colorway']
+SD2 = qd[:1] @ cd2.T
+nd = set(c_res2[(SD2 > .95).any(0)].tolist())
+keep = np.array([r not in nd and r != q_res[0] and ck != q_chk[0] for r, ck in zip(c_res2, c_chk)]) & np.isin(c_prod, [7, 8])
+SIM2 = .5*SD2 + .5*(qh[:1] @ ch.T)
+want = {str(k): float(SIM2[0, np.where(keep & (c_color == k))[0]].max()) for k in set(c_color[keep])}
+check('near_copy drops a candidate whose photo holds a >.95 DINOv2 near copy, whole photo',
+      nd == {int(c_res2[7])} and {k: v['all'] for k, v in dropped.items()} == want
+      and {k: v['all'] for k, v in plain.items()} != want)
+hidden = bf.match_queries([dict(q0, hide_colorway=2, hide_product=7)], cands)[0]
+check('hide_colorway removes that colorway from the colorway pool',
+      '2' not in hidden['colorway'] and '2' in bf.match_queries([q0], cands)[0]['colorway'])
+q_same = dict(q0, shoot='A')
+full = bf.match_queries([q_same], cands)[0]['pair']
+victim = sorted(full)[0]
+vp, vc = (int(n) for n in victim.split('|'))
+hp = bf.match_queries([dict(q_same, hide_colorway=vc, hide_product=vp)], cands)[0]['pair']
+check('hide removes only that product|colorway key from the pair pool',
+      len(full) > 1 and victim not in hp and set(hp) == set(full) - {victim})
+
 print('\nFAILED %d' % fails if fails else '\nall checks passed')
 sys.exit(1 if fails else 0)
