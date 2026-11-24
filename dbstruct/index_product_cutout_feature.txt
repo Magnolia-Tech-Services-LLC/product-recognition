@@ -1,0 +1,2 @@
+product_cutout_feature,0,cutout_feature_key,1,resource,A,0,,,,BTREE,
+product_cutout_feature,0,cutout_feature_key,2,region_index,A,0,,,,BTREE,

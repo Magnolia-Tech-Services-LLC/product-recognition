@@ -2355,6 +2355,14 @@ function pr_with_lock(callable $fn): array
         return ['locked' => true];
     }
     set_process_lock($lock);
+    # A SQL error with use_error_exception off ends the process inside errorhandler(), past every finally. The
+    # shutdown function frees the lock then, so the next run does not find a lock nobody holds.
+    $held = true;
+    register_shutdown_function(static function () use (&$held, $lock): void {
+        if ($held) {
+            clear_process_lock($lock);
+        }
+    });
     try {
         $out = $fn();
         if (!is_array($out)) {
@@ -2363,6 +2371,7 @@ function pr_with_lock(callable $fn): array
         $out['locked'] = false;
         return $out;
     } finally {
+        $held = false;
         clear_process_lock($lock);
     }
 }
@@ -2380,7 +2389,8 @@ function pr_cron_due(): bool
 
 /**
  * The nightly pass: sheet import, studio seed, references, then a bounded embedding
- * slice, then calibration, then classification. One lock across the whole pass.
+ * slice, then calibration, then classification, then cutout features and bag matches.
+ * One lock across the whole pass.
  *
  * product-recognition.timer runs this through CLI --all; the cron.php hook no longer
  * does. A successful pass still records product_recognition_last_run.
@@ -2427,13 +2437,41 @@ function pr_run_all(): array
         $backfill = pr_backfill((int)$product_recognition_batch);
         # STDERR here, before calibrate and classify, so a kill mid-pass still has the line.
         pr_report_backfill_slice($backfill);
+        $calibration = pr_calibrate();
+        $classification = pr_classify((int)$product_recognition_classify_batch);
+        # Tag-one-bag matching runs after classify so a Name classify just wrote counts. Each
+        # part has its own try/catch inside; a throw here must not cost the night its results.
+        # The earlier stages are done. Record the run now, and keep their numbers where the log has them,
+        # so a bag stage that still ends the process (an exit no try/catch sees) costs the night neither.
+        set_sysvar('product_recognition_last_run', (string)time());
+        $earlier = ['sheet' => $sheet, 'studio' => $studio, 'references' => $references, 'backfill' => $backfill,
+                    'calibration' => $calibration, 'classification' => $classification];
+        $bag_finished = false;
+        register_shutdown_function(static function () use (&$bag_finished, $earlier): void {
+            if (!$bag_finished) {
+                $line = 'product_recognition: the bag stage ended the run early; earlier stages: '
+                    . json_encode(array_map(static fn($v) => is_array($v) ? array_filter($v, 'is_scalar') : $v, $earlier));
+                function_exists('logScript') ? logScript($line) : error_log($line);
+                if (PHP_SAPI === 'cli') {
+                    fwrite(STDERR, $line . "\n");
+                }
+            }
+        });
+        try {
+            $bag = pr_bag_nightly();
+        } catch (Throwable $e) {
+            $bag = ['features' => ['error' => 'bag nightly threw: ' . $e->getMessage()], 'match' => []];
+        }
+        $bag_finished = true;
         return [
             'sheet' => $sheet,
             'studio' => $studio,
             'references' => $references,
             'backfill' => $backfill,
-            'calibration' => pr_calibrate(),
-            'classification' => pr_classify((int)$product_recognition_classify_batch),
+            'calibration' => $calibration,
+            'classification' => $classification,
+            'bag_features' => $bag['features'],
+            'bag_match' => $bag['match'],
         ];
     });
     if (empty($out['locked']) && empty($out['unconfigured'])) {
@@ -3843,3 +3881,4 @@ function pr_picker_preselect(string $model_name, string $colorway, array $catalo
 include_once __DIR__ . '/product_recognition_view.php';
 include_once __DIR__ . '/product_recognition_colorway_report.php';
 include_once __DIR__ . '/product_recognition_colorway_color.php';
+include_once __DIR__ . '/product_recognition_bag_match.php';

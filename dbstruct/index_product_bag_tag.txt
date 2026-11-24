@@ -1,0 +1,2 @@
+product_bag_tag,1,bag_tag_resource,1,resource,A,0,,,,BTREE,
+product_bag_tag,1,bag_tag_resource,2,file_checksum,A,0,,,,BTREE,

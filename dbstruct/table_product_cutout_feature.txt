@@ -1,0 +1,11 @@
+ref,int(11),NO,PRI,,auto_increment
+resource,int(11),NO,,,
+region_index,int(11),NO,,0,
+file_checksum,varchar(64),NO,,'',
+bbox,varchar(255),NO,,'',
+mask_mtime,int(11),NO,,0,
+dinov2,blob,YES,,,
+hist,blob,YES,,,
+status,varchar(10),NO,,'ok',
+created,datetime,YES,,CURRENT_TIMESTAMP,
+attempts,int(11),NO,,0,

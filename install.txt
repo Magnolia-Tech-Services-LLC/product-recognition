@@ -28,3 +28,39 @@ choose the product field. --migrate-family remaps those rows. Do not pick Family
 
 Auto-apply is off until you turn it on. Suggestions never overwrite a product tag that
 is already on the resource.
+
+Tag one bag, find the same bag: on a photo's panel, set Product and Colorway on one cutout and
+press "Save as seed bag". The nightly pass (--all, or --cutout-features then --bag-match) finds
+the same bag on other cutouts and lists them under Product suggestions > Bag matches, with the
+strict gate each one passes. Nothing is written to a photo until a person presses Accept, and
+Accept only adds a Name or Colorway the photo lacks. When it adds a Name it also fills the photo's
+empty identity fields (family, category and the rest), as the other accept paths do; on a photo with
+several cutouts it adds beside what is there. --bag-match-report (read-only) measures the
+gates on the saved seeds. The panel's Apply button does not save a seed; only "Save as seed bag"
+does.
+
+Database structure: the feature adds three tables (product_bag_tag, product_cutout_feature,
+product_bag_match). They are created by the CLI writing modes (--cutout-features,
+--import-bag-tags, --bag-match, --all), the first time one runs after deploying this plugin
+version, with CREATE TABLE IF NOT EXISTS statements that match dbstruct/ (the same way the sheet
+tables are made). A web request never creates them and never runs ResourceSpace's structure
+check for them. Until the tables exist the panel and the Bag matches tab say "Bag matching is
+not ready" and touch no table, and --bag-match-report and the dry runs say
+the tables are missing instead of claiming there is no colorway field.
+
+Feature pass: before a cutout is sent to the service an attempt is recorded for its file checksum,
+box and mask file. A cutout that fails, or that takes the service down, is retried on the next
+runs and left alone after 3 tries, until its file, box or mask changes. --cutout-features shows
+how many were given up on. --bag-match checks the service is up before it starts. When a cutout fails, the pass posts a
+known-good test cutout: if that fails too, the service is at fault, the try is given back and the
+pass stops; if it works, the cutout is at fault and the pass goes on. A rewritten mask is noticed
+on the next pass and recomputed with its tries reset.
+
+The CLI writing modes also make sure product_cutout_feature has its UNIQUE key (ResourceSpace
+ignores the flag when it creates the table from dbstruct/). If duplicate rows exist the mode
+stops and says so; it never deletes rows. --bag-match and --bag-match-report list any accepted
+match that was left half-applied (applied with no decision time); they are never repaired
+automatically.
+--bag-match-report needs at least
+$product_recognition_bag_report_min_hidden (default 50) hidden-colorway queries with a margin
+before the enable condition can pass.

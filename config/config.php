@@ -61,3 +61,29 @@ $product_recognition_segment_classes = "product";
 # Optional substring match against the title field to find a PDF product sheet for
 # --catalog. Empty disables discovery (catalog ingest is then --resource=N only).
 $product_recognition_catalog_title_match = "";
+
+# Tag one bag, find the same bag (#34). A person sets Product and Colorway on one cutout; the
+# nightly pass finds the same bag on other cutouts and suggests it on the review page. Nothing
+# is written to a photo until a person presses Accept. The cutoffs below mark a suggestion as
+# passing the strict gate (shown on the review page, and measured by `product_recognition_cli.php
+# --bag-match-report`).
+#
+# Colorway only: compared within the photo's products. Similarity and margin are measured on
+# the 0.5 DINOv2 + 0.5 Lab-histogram score.
+$product_recognition_bag_colorway_min_similarity = 0.85;
+$product_recognition_bag_colorway_min_margin = 0.10;
+# Product + colorway: same shoot only.
+$product_recognition_bag_product_min_similarity = 0.90;
+$product_recognition_bag_product_min_margin = 0.10;
+# Anything at or above this that does not pass goes to the review page as an open match.
+$product_recognition_bag_review_floor = 0.75;
+# Same shoot = identical Folder Path node set. Folder names (comma-separated) to leave out of
+# that set, for copies of a shoot. Re-measure with --bag-match-report before filling this in.
+$product_recognition_bag_copy_segments = "";
+# Folder Path field.
+$product_recognition_bag_shoot_field = 200;
+# Cutouts whose features are computed per nightly pass.
+$product_recognition_bag_batch = 2000;
+# --bag-match-report passes the enable condition only with at least this many held-out
+# hidden-colorway queries that had a margin to test (ones with no margin are counted apart).
+$product_recognition_bag_report_min_hidden = 50;

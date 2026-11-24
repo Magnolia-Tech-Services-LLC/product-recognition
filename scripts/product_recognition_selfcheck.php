@@ -987,6 +987,7 @@ if (function_exists('imagecreatetruecolor')) {
 
 require __DIR__ . '/product_recognition_selfcheck_identity.php';
 require __DIR__ . '/product_recognition_selfcheck_colorway.php';
+require __DIR__ . '/product_recognition_selfcheck_bag_match.php';
 
 # --- no live row points at a deleted product node -----------------------------------------
 # The failure this guards is silent by construction: pr_open_suggestions() INNER JOINs `node`,
