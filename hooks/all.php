@@ -48,7 +48,8 @@ function HookProduct_recognitionAllAfterpreviewcreation(int $resource, int $alte
 }
 
 /**
- * Deleting a resource takes its vector, its reference row and its suggestions with it.
+ * Deleting a resource takes its vector, its reference row, its suggestions and its bag-match
+ * seeds, features and matches with it.
  * A vector for a resource that no longer exists is a neighbour that can never be inspected.
  */
 function HookProduct_recognitionAllBeforedeleteresourcefromdb($ref)
@@ -58,6 +59,8 @@ function HookProduct_recognitionAllBeforedeleteresourcefromdb($ref)
     ps_query('DELETE FROM product_suggestion WHERE resource = ?', ['i', $ref]);
     ps_query('DELETE FROM product_region WHERE resource = ?', ['i', $ref]);
     pr_purge_masks((int)$ref);
+    # Seeds, cutout features and bag matches of this resource; open matches found from its seeds close.
+    pr_bag_forget_resource((int)$ref);
 }
 
 /**

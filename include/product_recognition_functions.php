@@ -2380,7 +2380,8 @@ function pr_cron_due(): bool
 
 /**
  * The nightly pass: sheet import, studio seed, references, then a bounded embedding
- * slice, then calibration, then classification. One lock across the whole pass.
+ * slice, then calibration, then classification, then cutout features and bag matches.
+ * One lock across the whole pass.
  *
  * product-recognition.timer runs this through CLI --all; the cron.php hook no longer
  * does. A successful pass still records product_recognition_last_run.
@@ -2427,13 +2428,24 @@ function pr_run_all(): array
         $backfill = pr_backfill((int)$product_recognition_batch);
         # STDERR here, before calibrate and classify, so a kill mid-pass still has the line.
         pr_report_backfill_slice($backfill);
+        $calibration = pr_calibrate();
+        $classification = pr_classify((int)$product_recognition_classify_batch);
+        # Tag-one-bag matching runs after classify so a Name classify just wrote counts. Each
+        # part has its own try/catch inside; a throw here must not cost the night its results.
+        try {
+            $bag = pr_bag_nightly();
+        } catch (Throwable $e) {
+            $bag = ['features' => ['error' => 'bag nightly threw: ' . $e->getMessage()], 'match' => []];
+        }
         return [
             'sheet' => $sheet,
             'studio' => $studio,
             'references' => $references,
             'backfill' => $backfill,
-            'calibration' => pr_calibrate(),
-            'classification' => pr_classify((int)$product_recognition_classify_batch),
+            'calibration' => $calibration,
+            'classification' => $classification,
+            'bag_features' => $bag['features'],
+            'bag_match' => $bag['match'],
         ];
     });
     if (empty($out['locked']) && empty($out['unconfigured'])) {
@@ -3843,3 +3855,4 @@ function pr_picker_preselect(string $model_name, string $colorway, array $catalo
 include_once __DIR__ . '/product_recognition_view.php';
 include_once __DIR__ . '/product_recognition_colorway_report.php';
 include_once __DIR__ . '/product_recognition_colorway_color.php';
+include_once __DIR__ . '/product_recognition_bag_match.php';

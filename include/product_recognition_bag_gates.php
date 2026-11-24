@@ -358,6 +358,11 @@ function pr_bag_decide(array $query, array $colorway_keys, array $pair_keys, arr
         $out['blocked'] = $plan['blocked'];
         return $out;
     }
+    if ($plan['blocked'] === '' && !$plan['add_name'] && !$plan['add_colorway']) {
+        # The photo already says exactly this. Nothing to suggest, nothing to write.
+        $out['action'] = $open === null ? 'none' : 'close';
+        return $out;
+    }
     $out['match'] = $match;
     $out['blocked'] = $plan['blocked'];
     $out['auto'] = $choice['passes'] && $plan['blocked'] === ''

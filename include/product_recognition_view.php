@@ -671,6 +671,8 @@ function pr_cached_regions(int $ref): array
  */
 function pr_commit_regions(int $ref, string $checksum, array $boxes, array $pngs, ?string $path): void
 {
+    # A re-cut (or a replaced file) makes the photo's cutout features and open bag matches stale.
+    pr_bag_forget_cutouts($ref);
     $stored = $boxes === [] ? '' : json_encode($boxes);
     ps_query(
         'INSERT INTO product_region (resource, bbox, checksum) VALUES (?,?,?) AS new

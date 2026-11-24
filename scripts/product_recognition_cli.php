@@ -20,7 +20,16 @@
  *   php product_recognition_cli.php --accept-certain [--dry-run]
  *   php product_recognition_cli.php --sheet [--dry-run]
  *   php product_recognition_cli.php --studio-seed [--dry-run]
+ *   php product_recognition_cli.php --cutout-features [--limit=N] [--dry-run]
+ *   php product_recognition_cli.php --import-bag-tags=FILE [--dry-run]   # JSON rows, see below
+ *   php product_recognition_cli.php --bag-match [--dry-run]
+ *   php product_recognition_cli.php --bag-match-report                   # read-only
+ *   php product_recognition_cli.php --undo-bag-matches [--resource=N] [--dry-run]
  *   php product_recognition_cli.php --all
+ *
+ * Bag tags (#34): FILE is a JSON array of {resource, region_index, file_checksum, bbox, name,
+ * colorway, user}. A row is taken only if its file checksum and cutout box (overlap >= 0.9)
+ * still match, both labels exist, and it has a product.
  */
 include_once "/var/www/html/include/boot.php";
 include_once "/var/www/html/plugins/product_recognition/include/product_recognition_functions.php";
@@ -29,6 +38,12 @@ command_line_only();
 $modes = array_slice($argv, 1);
 $dry_run = in_array('--dry-run', $modes, true);
 $mode = $modes[0] ?? '--help';
+# --import-bag-tags=FILE carries its argument in the mode itself.
+$import_file = '';
+if (str_starts_with($mode, '--import-bag-tags=')) {
+    $import_file = substr($mode, strlen('--import-bag-tags='));
+    $mode = '--import-bag-tags';
+}
 
 if (!in_array($mode, ['--help', '-h', '--catalog', '--migrate-family'], true) && !pr_is_configured()) {
     fwrite(STDERR, "product_recognition: Name field is not available and no recognition field is bound\n");
@@ -55,6 +70,29 @@ $pr_cli_run = function (callable $fn) use ($dry_run) {
     }
     return $out['result'];
 };
+
+/**
+ * @param array<string,mixed> $stats pr_bag_run_match() result
+ */
+function pr_bag_print_match_summary(array $stats, string $indent = ''): void
+{
+    if (!empty($stats['disabled'])) {
+        printf("%sbag match: no colorway field set, skipped\n", $indent);
+        return;
+    }
+    $ignored = (array)($stats['ignored_seeds'] ?? []);
+    printf("%sseeds %d (ignored %d), competitors %d, cutouts scored %d\n", $indent, (int)($stats['seeds'] ?? 0),
+           count($ignored), (int)($stats['competitors'] ?? 0), (int)($stats['considered'] ?? 0));
+    printf("%s  opened %d, updated %d, closed %d, auto-applied %d, blocked %d (auto-apply is OFF unless a bag flag is set)\n",
+           $indent, (int)($stats['opened'] ?? 0), (int)($stats['updated'] ?? 0), (int)($stats['closed'] ?? 0),
+           (int)($stats['auto_applied'] ?? 0), (int)($stats['blocked'] ?? 0));
+    foreach ($ignored as $i) {
+        printf("%s  ignored seed %d (resource %d): %s\n", $indent, $i['ref'], $i['resource'], $i['reason']);
+    }
+    if (!empty($stats['service_down'])) {
+        printf("%s  the service did not answer; the pass stopped early\n", $indent);
+    }
+}
 
 switch ($mode) {
     case '--migrate-family':
@@ -425,6 +463,120 @@ switch ($mode) {
         }
         break;
 
+    case '--cutout-features':
+        $limit = (int)pr_bag_config()['batch'];
+        foreach ($modes as $m) {
+            if (strpos($m, '--limit=') === 0) {
+                if (!preg_match('/^--limit=(\d+)$/', $m, $lm)) {
+                    fwrite(STDERR, "Invalid --limit: use --limit=N (digits)\n");
+                    exit(1);
+                }
+                $limit = (int)$lm[1];
+            }
+        }
+        $stats = $pr_cli_run(fn() => pr_bag_backfill_features($limit, $dry_run));
+        if ($stats === null) {
+            exit(0);
+        }
+        printf("Cutout features%s\n", $dry_run ? ' (would compute)' : '');
+        printf("  computed         %d\n  unusable         %d\n  no mask yet      %d\n  resources scanned %d\n",
+               $stats['computed'], $stats['unusable'], $stats['skipped_no_mask'], $stats['scanned']);
+        if ($stats['service_down']) {
+            fwrite(STDERR, "product_recognition: the service did not answer; stopped.\n");
+            exit(1);
+        }
+        if ($dry_run) {
+            echo "\nDRY RUN - nothing written.\n";
+        }
+        break;
+
+    case '--import-bag-tags':
+        $json = $import_file !== '' && is_file($import_file) ? json_decode((string)file_get_contents($import_file), true) : null;
+        if (!is_array($json)) {
+            fwrite(STDERR, "Usage: --import-bag-tags=FILE (a JSON array of rows) [--dry-run]\n");
+            exit(1);
+        }
+        $stats = $pr_cli_run(fn() => pr_bag_import_tags(array_values($json), $dry_run));
+        if ($stats === null) {
+            exit(0);
+        }
+        printf("Bag tags: %d accepted, %d rejected%s\n", $stats['accepted'], count($stats['rejected']),
+               $dry_run ? ' (dry run)' : '');
+        foreach ($stats['rejected'] as $r) {
+            printf("  row %d resource %d: %s\n", $r['row'], $r['resource'], $r['reason']);
+        }
+        if ($dry_run) {
+            echo "\nDRY RUN - nothing written.\n";
+        }
+        break;
+
+    case '--bag-match':
+        $stats = $pr_cli_run(fn() => pr_bag_run_match($dry_run));
+        if ($stats === null) {
+            exit(0);
+        }
+        if (!empty($stats['disabled'])) {
+            fwrite(STDERR, "product_recognition: needs a colorway field (setup page); nothing to do.\n");
+            exit(1);
+        }
+        pr_bag_print_match_summary($stats);
+        if (!empty($stats['service_down'])) {
+            fwrite(STDERR, "product_recognition: the service did not answer; stopped.\n");
+            exit(1);
+        }
+        if ($dry_run) {
+            echo "\nDRY RUN - nothing written.\n";
+        }
+        break;
+
+    case '--bag-match-report':
+        # Read-only (a lock is for writers). One row per seed, gate and mode; the summary is the
+        # held-out half only.
+        fputcsv(STDOUT, ['resource', 'region', 'held_out', 'mode', 'gate', 'outcome', 'key', 'similarity', 'margin'], "\t");
+        $report = pr_bag_report(function (array $row) {
+            fputcsv(STDOUT, [$row['resource'], $row['region'], $row['held_out'] ? 1 : 0, $row['mode'], $row['gate'],
+                $row['outcome'], $row['key'], $row['similarity'] === null ? '' : sprintf('%.4f', $row['similarity']),
+                $row['margin'] === null ? '' : sprintf('%.4f', $row['margin'])], "\t");
+        });
+        fwrite(STDERR, sprintf("Usable seeds %d, ignored %d\n", $report['seeds'], count($report['ignored'])));
+        foreach ($report['ignored'] as $i) {
+            fwrite(STDERR, sprintf("  ignored seed %d (resource %d): %s\n", $i['ref'], $i['resource'], $i['reason']));
+        }
+        if ($report['error'] !== null) {
+            fwrite(STDERR, "Report stopped: {$report['error']}\n");
+        }
+        fwrite(STDERR, "Held-out half (leave-one-out, then true colorway hidden):\n");
+        foreach ($report['tally'] as $name => $t) {
+            fwrite(STDERR, sprintf("  %-16s right %d, wrong %d, not tagged %d\n", $name, $t['right'], $t['wrong'], $t['none']));
+        }
+        fwrite(STDERR, $report['verdict']['ok']
+            ? "Enable condition MET on the held-out half.\n"
+            : "Enable condition NOT met:\n");
+        foreach ($report['verdict']['reasons'] as $why) {
+            fwrite(STDERR, "  $why\n");
+        }
+        fwrite(STDERR, "Nothing written (read-only).\n");
+        exit($report['error'] === null ? 0 : 1);
+
+    case '--undo-bag-matches':
+        $only = null;
+        foreach ($modes as $arg) {
+            if (preg_match('/^--resource=(\d+)$/', $arg, $m)) {
+                $only = (int)$m[1];
+            }
+        }
+        $stats = $pr_cli_run(fn() => pr_bag_undo_matches($dry_run, $only));
+        if ($stats === null) {
+            exit(0);
+        }
+        printf("Bag matches %s: %d\n  nodes removed   %d\n  already gone    %d\n  kept (shared)   %d\n",
+               $dry_run ? 'to undo' : 'undone', $stats['matches'], $stats['nodes_removed'],
+               $stats['already_gone'], $stats['protected']);
+        if ($dry_run) {
+            echo "\nDRY RUN - nothing written.\n";
+        }
+        break;
+
     case '--all':
         $result = pr_run_all();
         if (!empty($result['locked'])) {
@@ -451,6 +603,16 @@ switch ($mode) {
         printf("classify     suggested %d, auto-applied %d, certain %d\n",
                $result['classification']['suggested'], $result['classification']['auto_applied'],
                $result['classification']['certain_accepted']);
+        $bag_features = $result['bag_features'] ?? [];
+        $bag_match = $result['bag_match'] ?? [];
+        printf("bag features computed %d, unusable %d%s\n", (int)($bag_features['computed'] ?? 0),
+               (int)($bag_features['unusable'] ?? 0),
+               empty($bag_features['error']) ? (empty($bag_features['service_down']) ? '' : ' (service did not answer)') : ' (' . $bag_features['error'] . ')');
+        if (empty($bag_match['error'])) {
+            pr_bag_print_match_summary($bag_match, 'bag match    ');
+        } else {
+            printf("bag match    %s\n", $bag_match['error']);
+        }
         if (pr_pending_tree_field() > 0) {
             fwrite(STDERR, "product_recognition: leftover Model-tree or Family references. "
                 . "--all does not migrate. Run --migrate-family --dry-run, then --migrate-family.\n");
@@ -459,7 +621,7 @@ switch ($mode) {
 
     case '--help':
     case '-h':
-        fwrite(STDOUT, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--colorway-color|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
+        fwrite(STDOUT, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--colorway-color|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed|--cutout-features|--import-bag-tags=FILE|--bag-match|--bag-match-report|--undo-bag-matches [--dry-run]\n");
         break;
 
     case '--sheet':
@@ -517,6 +679,6 @@ switch ($mode) {
 
     default:
         fwrite(STDERR, "Unknown mode: $mode\n");
-        fwrite(STDERR, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--colorway-color|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed [--dry-run]\n");
+        fwrite(STDERR, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--colorway-color|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed|--cutout-features|--import-bag-tags=FILE|--bag-match|--bag-match-report|--undo-bag-matches [--dry-run]\n");
         exit(1);
 }

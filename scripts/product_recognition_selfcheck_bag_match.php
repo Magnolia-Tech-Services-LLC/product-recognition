@@ -239,6 +239,10 @@ pr_check("decide: a single-cutout photo with another colorway goes to review, bl
 $d = pr_bag_decide(['photo' => ['products' => [], 'colorways' => [], 'cutouts' => 1]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_on);
 pr_check("decide: product unknown and not inheritable opens nothing",
          $d['action'] === 'none' && $d['match'] === null && $d['blocked'] === 'no_product' && $d['auto'] === false);
+$d = pr_bag_decide(['photo' => ['products' => [7], 'colorways' => [3], 'cutouts' => 1]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_on);
+pr_check("decide: a photo that already has this colorway is left alone, and closes a stale open row",
+         $d['action'] === 'none' && pr_bag_decide(['photo' => ['products' => [7], 'colorways' => [3], 'cutouts' => 1]] + $bag_q_one,
+             $bag_cw_keys, [], $bag_seeds, $open, [], $bag_cfg)['action'] === 'close');
 $d = pr_bag_decide($bag_q_one, ['3' => ['all' => 0.90, 'seed' => 0.90, 'ref' => 99, 'n' => 1]], [], $bag_seeds, null, [], $bag_on);
 pr_check("decide: a score for a seed that is no longer there is dropped", $d['action'] === 'none');
 
