@@ -28,3 +28,10 @@ choose the product field. --migrate-family remaps those rows. Do not pick Family
 
 Auto-apply is off until you turn it on. Suggestions never overwrite a product tag that
 is already on the resource.
+
+Tag one bag, find the same bag: on a photo's panel, set Product and Colorway on one cutout and
+press "Save as seed bag". The nightly pass (--all, or --cutout-features then --bag-match) finds
+the same bag on other cutouts and lists them under Product suggestions > Bag matches. Nothing
+is written to a photo until you press Accept, unless an auto-apply flag in config/config.php is
+turned on. Leave both flags off until --bag-match-report meets the enable condition.
+--undo-bag-matches takes back exactly what the pass wrote.

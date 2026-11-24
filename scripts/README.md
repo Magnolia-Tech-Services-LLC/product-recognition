@@ -3,7 +3,7 @@
 Answers "which product does this image show" by nearest-neighbour retrieval against a
 reference set derived from an existing product (category-tree) field. Owns `/vector`
 (image-only, dinov2 space), `/identify`, `/calibrate`, `/health`, and `/segment`
-(lifestyle instances).
+(lifestyle instances), plus `/cutout_features` and `/match_bags` (tag one bag, find the same bag).
 
 The ResourceSpace plugin lives alongside this service in `plugins/product_recognition/`.
 Point the plugin setup page at this URL. The plugin does not create the product field.
@@ -93,3 +93,28 @@ headroom. **Measure RSS after the first /segment rather than after the first OOM
 `/calibrate` are numpy and stay unlocked. `/health` is async and never takes
 the lock. Drop the lock only after measured `memory.peak` on a sequential
 `/segment` is under ~4.0 GiB with ≥1.5 GiB headroom.
+
+## Tag one bag, find the same bag (#34)
+
+`POST /cutout_features` takes a cutout PNG and returns `{status, dinov2, hist}`: a 768-float
+DINOv2 vector and a 1152-float sqrt Lab histogram (8 x 12 x 12), little-endian float32 in
+base64. `status: "unusable"` means fewer than 1500 opaque pixels, or not an image.
+The arithmetic is `bag_features.py`, a line-for-line copy of the measured reference
+(longest side 448, alpha > 128, square white pad, 224). It is deliberately not the Resize 256 +
+CenterCrop path `/vector` uses. Change it and the 0.85 / 0.90 cutoffs stop meaning what they
+were measured as.
+
+`POST /match_bags` takes ids, not vectors: `{db, queries, candidates, mix?, near_copy?}`. It
+reads `product_cutout_feature` itself and returns raw scores per key (colorway pool, product
+|colorway pool on the same shoot), each with the best score over everything and over seeds
+only. Gates, margins and what may be written are PHP's (`product_recognition_bag_gates.php`).
+`near_copy` and the `hide_*` query fields exist for `--bag-match-report` only.
+
+Tests, no model and no database needed (numpy and Pillow; the endpoint test also needs torch,
+fastapi and httpx, and skips without them):
+
+```
+python3 scripts/test_bag_features.py
+python3 scripts/test_bag_endpoints.py
+php scripts/product_recognition_selfcheck_bag_match.php
+```
