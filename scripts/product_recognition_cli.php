@@ -27,7 +27,8 @@
  *   php product_recognition_cli.php --all
  *
  * Bag tags (#34): FILE is a JSON array of {resource, region_index, file_checksum, bbox, name,
- * colorway, user}. A row is taken only if its file checksum and cutout box (overlap >= 0.9)
+ * colorway, user}; bbox is [x1, y1, x2, y2], the box's corners as fractions of the image (not x, y, w, h).
+ * A row is taken only if its file checksum and cutout box (overlap >= 0.9)
  * still match, both labels exist, and it has a product.
  */
 include_once "/var/www/html/include/boot.php";
@@ -110,6 +111,8 @@ function pr_bag_print_match_summary(array $stats, string $indent = ''): void
     }
     foreach (['missing_features' => 'cutouts with no features yet', 'stale' => 'matches not opened, what they said was no longer true',
               'dropped_features' => 'stale feature rows dropped',
+              'missing_candidates' => 'candidate cutouts the service had no features for (left out of the scores)',
+              'failed_writes' => 'matches not opened, the row was lost before commit',
               'unverified_features' => 'feature rows kept but not used, their mask cannot be seen or read'] as $key => $what) {
         if ((int)($stats[$key] ?? 0) > 0) {
             printf("%s  %d %s\n", $indent, (int)$stats[$key], $what);

@@ -18,7 +18,11 @@ $tab = getval('tab', '') === 'bags' ? 'bags' : '';
 if ($action !== '' && enforcePostRequest(false)) {
     $status = 'failed';
     if ($action === 'bag_accept') {
-        $status = 'bag_' . pr_bag_accept_match((int)getval('match', 0), (int)$userref);
+        $identity_failed = false;
+        $status = 'bag_' . pr_bag_accept_match((int)getval('match', 0), (int)$userref, $identity_failed);
+        if ($identity_failed) {
+            $status = 'bag_applied_identity';
+        }
     } elseif ($action === 'bag_reject') {
         $status = 'bag_' . pr_bag_reject_match((int)getval('match', 0), (int)$userref);
     } elseif ($action === 'accept') {
@@ -82,6 +86,7 @@ $review_notices = [
     'gone' => 'product_recognition_review_gone',
     'failed' => 'product_recognition_review_failed',
     'bag_applied' => 'product_recognition_bag_applied',
+    'bag_applied_identity' => 'product_recognition_bag_applied_identity',
     'bag_rejected' => 'product_recognition_bag_rejected',
     'bag_blocked' => 'product_recognition_bag_blocked',
     'bag_denied' => 'product_recognition_review_denied',

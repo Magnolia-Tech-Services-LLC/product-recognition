@@ -201,11 +201,27 @@ function HookProduct_recognitionViewCustompanels()
                             $cw_parts = preg_split('/\s*,\s*/', $pre['colorway_text']) ?: [];
                             $pre['colorway_text'] = (string)($cw_parts[0] ?? '');
                         }
+                        # On a photo with several cutouts the photo-level product and colorway belong to no one bag. The
+                        # visible picker starts from what this cutout's seed says, else what was detected for it, so
+                        # what the person sees is what Save as example posts (the submit listener copies the picker).
+                        $shown_model = (string)$row['model_name'];
+                        if ($region_count > 1 && $bag_live && empty($row['fallback'])) {
+                            $bag_seed_here = ($bag_panel[(int)$row['region']] ?? ['seed' => null])['seed'];
+                            $pre = $bag_seed_here !== null
+                                ? ['sku' => '', 'model_text' => (string)$bag_seed_here['product'], 'colorway_text' => (string)$bag_seed_here['colorway']]
+                                : pr_picker_preselect((string)$row['model_name'], (string)$row['colorway'], $catalog);
+                            if (str_contains((string)$pre['colorway_text'], ',')) {
+                                $pre['colorway_text'] = (string)(preg_split('/\s*,\s*/', (string)$pre['colorway_text'])[0] ?? '');
+                            }
+                            if ($bag_seed_here !== null) {
+                                $shown_model = (string)$bag_seed_here['product'];
+                            }
+                        }
                         $picker_id = 'pr-picker-' . (int)$ref . '-' . (int)$row['region'];
                         $confidence_html = $row['confidence'] !== null
                             ? escape(sprintf('%.0f%%', 100 * (float)$row['confidence']))
                             : escape($lang['product_recognition_from_tag']);
-                        $facet_identity = pr_identity_for_reference_label((string)$row['model_name']);
+                        $facet_identity = pr_identity_for_reference_label($shown_model);
                         $facets = $facet_identity !== null
                             ? pr_facets_from_identity($facet_identity)
                             : [
@@ -238,7 +254,7 @@ function HookProduct_recognitionViewCustompanels()
                                 <input type="hidden" name="resource" value="<?php echo (int)$ref; ?>" />
                                 <input type="hidden" name="region" value="<?php echo (int)$row['region']; ?>" />
                                 <input type="hidden" name="model_text"
-                                       value="<?php echo escape((string)$row['model_name']); ?>" />
+                                       value="<?php echo escape($shown_model); ?>" />
                                 <?php if ($in_modal) { ?>
                                 <input type="hidden" name="modal" value="true" />
                                 <?php } ?>
@@ -375,17 +391,8 @@ function HookProduct_recognitionViewCustompanels()
                             </form>
                             <?php if (empty($row['fallback']) && $bag_live) {
                                 $bag_here = $bag_panel[(int)$row['region']] ?? ['seed' => null, 'match' => null];
-                                # The seed form starts from what was detected or saved for THIS cutout. On a photo with
-                                # several cutouts the photo-level product and colorway belong to no one bag, so they are not used.
+                                # The seed form posts what the picker shows (see $shown_model above for several cutouts).
                                 $bag_pre = $pre;
-                                if ($region_count > 1) {
-                                    $bag_pre = $bag_here['seed'] !== null
-                                        ? ['model_text' => $bag_here['seed']['product'], 'colorway_text' => $bag_here['seed']['colorway']]
-                                        : pr_picker_preselect((string)$row['model_name'], (string)$row['colorway'], $catalog);
-                                    if (str_contains((string)$bag_pre['colorway_text'], ',')) {
-                                        $bag_pre['colorway_text'] = (string)(preg_split('/\s*,\s*/', (string)$bag_pre['colorway_text'])[0] ?? '');
-                                    }
-                                }
                                 ?>
                             <form method="post" action="<?php echo escape($bag_tag); ?>" class="pr-bag-tag"
                                   style="display:inline;"

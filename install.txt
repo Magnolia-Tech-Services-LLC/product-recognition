@@ -33,7 +33,9 @@ Tag one bag, find the same bag: on a photo's panel, set Product and Colorway on 
 press "Save as seed bag". The nightly pass (--all, or --cutout-features then --bag-match) finds
 the same bag on other cutouts and lists them under Product suggestions > Bag matches, with the
 strict gate each one passes. Nothing is written to a photo until a person presses Accept, and
-Accept only adds a Name or Colorway the photo lacks. --bag-match-report (read-only) measures the
+Accept only adds a Name or Colorway the photo lacks. When it adds a Name it also fills the photo's
+empty identity fields (family, category and the rest), as the other accept paths do; on a photo with
+several cutouts it adds beside what is there. --bag-match-report (read-only) measures the
 gates on the saved seeds. The panel's Apply button does not save a seed; only "Save as seed bag"
 does.
 

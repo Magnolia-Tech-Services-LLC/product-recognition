@@ -667,6 +667,33 @@ pr_check("wiring: nothing is deleted for a missing or unreadable mask: the drop 
 pr_check("wiring: a cutout whose mask cannot be seen is skipped without a try, and Accept still refuses it (its check reads the feature with the mask mtime)",
          preg_match('/pr_bag_mask_stat\(\$mask\) === null.*?skipped_no_mask.*?continue;.*?pr_bag_store_attempt\(/s', $bag_fn('pr_bag_backfill_features')) === 1
          && str_contains($bag_fn('pr_bag_seed_reason_now'), "'pr_bag_mask_mtime'"));
+pr_check("wiring: U2 an unreadable mask header is null (no row, the try given back, counted), never 'unusable'; Save as seed fails rather than guessing",
+         str_contains($bag_fn('pr_bag_png_alpha'), 'return null') && str_contains($bag_fn('pr_bag_compute_features'), "'unreadable'")
+         && preg_match("/'unreadable'.*?pr_bag_give_back_attempts\\(\\[\\\$tried\\]\\).*?unverified'\\]\\+\\+.*?continue;/s", $bag_fn('pr_bag_backfill_features')) === 1
+         && preg_match('/pr_bag_png_alpha\\(\\$mask\\);\\s*if \\(\\$alpha === null\\) \\{\\s*return .failed./', $bag_fn('pr_bag_save_tag')) === 1
+         && !str_contains($bag_match_src, 'pr_bag_png_has_alpha'));
+pr_check("wiring: U3 the final row is read back inside the transaction before commit, for a seed and for an opened match; a missing row rolls back and reports failure",
+         preg_match('/pr_bag_store_tag_locked\\(.*?pr_bag_require_row\\(.*?catch \\(PrBagRowMissing.*?db_rollback_transaction.*?return false;.*?db_end_transaction/s', $bag_fn('pr_bag_store_tag')) === 1
+         && preg_match('/INSERT INTO product_bag_match.*?pr_bag_require_row\\(.*?catch \\(PrBagRowMissing.*?db_rollback_transaction.*?failed_writes.*?return;.*?db_end_transaction/s', $bag_fn('pr_bag_enact')) === 1
+         && str_contains($bag_fn('pr_bag_require_row'), 'throw new PrBagRowMissing'));
+pr_check("wiring: U4 a rolled-back claim removes nothing, it only logs the planned nodes that are on the photo",
+         preg_match("/=== 'clean'\\).*?pr_bag_log\\(.*?return 'failed';.*?delete_resource_nodes\\(/s", $bag_recover) === 1);
+pr_check("wiring: U5 after the commit, and only when a Name was added, Accept fills identity (add on several cutouts, else keep); a failure is logged and flagged, not undone",
+         preg_match("/db_end_transaction\\('pr_bag_accept'\\).*?\\\$name_missing !== \\[\\].*?try \\{\\s*pr_write_accept_identity\\(.*?> 1 \\? 'add' : 'keep'\\).*?catch \\(Throwable.*?identity_failed = true;.*?return 'applied';/s", $bag_fn('pr_bag_accept_match')) === 1
+         && str_contains($bag_src('pages/review.php'), 'bag_applied_identity') && str_contains($bag_src('install.txt'), 'identity fields'));
+pr_check("wiring: U6 the review tab's cutout and seed image URLs carry the mask mtime",
+         str_contains($bag_fn('pr_bag_render_review'), "'m' => (int)pr_bag_mask_stat("));
+pr_check("wiring: U8 pr_bag_log uses logScript only on the command line, error_log on the web",
+         str_contains($bag_fn('pr_bag_log'), "PHP_SAPI === 'cli'") && !str_contains($bag_match_src, 'logScript("'));
+pr_check("wiring: U9 missing candidates are counted in the match pass and the report, and the report gives no verdict while any are missing",
+         str_contains($bag_fn('pr_bag_run_match'), "missing_candidates") && str_contains($bag_fn('pr_bag_report'), "\$missing > 0")
+         && str_contains($bag_fn('pr_bag_report'), "['ok'] = false"));
+pr_check("wiring: Accept refuses (stays open) when the seed's own mask cannot be read",
+         str_contains($bag_fn('pr_bag_pre_write'), 'pr_bag_seed_mask_readable(') && str_contains($bag_fn('pr_bag_seed_mask_readable'), 'pr_bag_png_alpha(')
+         && pr_bag_pre_write_verdict(0, $bag_pm, $bag_ps, false, false, false, true, $bag_pp, true, true, true, false)['reason'] === 'seed_mask_unverified');
+pr_check("wiring: U1 on a multi-cutout photo the visible picker starts from this cutout's seed or detection, and the seed form posts what it shows",
+         preg_match('/\\$region_count > 1 && \\$bag_live.*?\\$bag_seed_here.*?\\$shown_model/s', $bag_src('hooks/view.php')) === 1
+         && str_contains($bag_src('hooks/view.php'), "\$bag_pre = \$pre;") && !str_contains($bag_src('hooks/view.php'), '$bag_pre = $bag_here'));
 pr_check("wiring: half-applied accepts are counted (never repaired) in the match pass and in --bag-match-report",
          str_contains($bag_fn('pr_bag_half_applied'), "state = 'applied' AND decided_at IS NULL")
          && str_contains($bag_fn('pr_bag_run_match'), 'pr_bag_half_applied()') && str_contains($bag_fn('pr_bag_report'), 'pr_bag_half_applied()')
@@ -709,7 +736,7 @@ pr_check("wiring: the feature pass checks the service before its first attempt, 
          && str_contains($bag_feat, 'pr_bag_count_given_up()') && !str_contains($bag_feat, "\$stats['given_up']++"));
 pr_check("wiring: a failing cutout is judged by pr_bag_failure_plan, probing the service only for an error answer; the try is given back only when the plan says so",
          preg_match('/pr_bag_failure_plan\(\$no_answer, \$back, \$no_answer \|\| pr_bag_probe_service\(\)\).*?keep_try.*?pr_bag_give_back_attempts\(\[\$tried\]\)/s', $bag_feat) === 1
-         && substr_count($bag_feat, 'pr_bag_give_back_attempts(') === 1 && str_contains($bag_fn('pr_bag_probe_service'), 'pr_bag_probe_png()'));
+         && substr_count($bag_feat, 'pr_bag_give_back_attempts(') === 2 && str_contains($bag_fn('pr_bag_probe_service'), 'pr_bag_probe_png()'));
 pr_check("wiring: the match pass drops stale feature rows before it looks for seeds, so a night with no seeds still does",
          preg_match('/pr_bag_drop_stale_pass\(.*?pr_bag_load_seeds\(/s', $bag_fn('pr_bag_run_match')) === 1);
 pr_check("wiring: every writing CLI mode creates the tables and checks the UNIQUE keys first; seeds, queries and competitors skip resources in the deletion state",
@@ -719,7 +746,9 @@ pr_check("wiring: every writing CLI mode creates the tables and checks the UNIQU
          && str_contains($bag_fn('pr_bag_load_cutout_page'), 'pr_bag_live_sql') && str_contains($bag_feat, 'pr_bag_live_sql'));
 pr_check("wiring: the panel and the review tab compute blocked with the same function, the panel hides Accept on a blocked match, and the tab cuts its page after blocked is known",
          str_contains($bag_fn('pr_bag_panel_state'), 'pr_bag_match_blocked(') && str_contains($bag_fn('pr_bag_open_matches'), 'pr_bag_match_blocked(')
-         && preg_match('/pr_bag_match_blocked\(.*?array_slice\(array_merge\(\$good, \$blocked\)/s', $bag_fn('pr_bag_open_matches')) === 1
+         && preg_match('/pr_bag_match_blocked\(.*?foreach \(array_merge\(\$good, \$blocked\) as \$r\).*?get_resource_access\(.*?\$more = true;/s', $bag_fn('pr_bag_open_matches')) === 1
+         && substr_count($bag_fn('pr_bag_open_matches'), 'get_resource_access(') === 1
+         && strpos($bag_fn('pr_bag_open_matches'), 'get_resource_access(') > strpos($bag_fn('pr_bag_open_matches'), 'pr_bag_match_blocked(')
          && str_contains($bag_src('hooks/view.php'), "\$bag_action === 'bag_accept' && \$bag_here['match']['blocked'] !== ''"));
 pr_check("wiring: the not-ready message names the CLI modes",
          preg_match('/product_recognition_bag_no_tables"\] = "[^"]*--cutout-features or --all/', $bag_src('languages/en.php')) === 1);
@@ -750,7 +779,7 @@ pr_check("wiring: the bags tab loads the leaf lists and access once, leaves pr_o
          && str_contains($bag_src('pages/review.php'), "review_params['bagpage']") && str_contains($bag_match_src, 'name="bagpage"'));
 pr_check("wiring: the panel hides the seed form and buttons on a photo that is not live, and a multi-cutout photo's seed form does not use the photo-level colorway",
          str_contains($bag_src('hooks/view.php'), '$bag_live = $bag_cuts !== null') && str_contains($bag_src('hooks/view.php'), "empty(\$row['fallback']) && \$bag_live")
-         && preg_match('/\$region_count > 1\).*?pr_picker_preselect\(\(string\)\$row\[.model_name.\], \(string\)\$row\[.colorway.\], \$catalog\)/s', $bag_src('hooks/view.php')) === 1
+         && preg_match('/\$region_count > 1 && \$bag_live.*?pr_picker_preselect\(\(string\)\$row\[.model_name.\], \(string\)\$row\[.colorway.\], \$catalog\)/s', $bag_src('hooks/view.php')) === 1
          && preg_match('/name="model_text"\s+id="<\?php echo escape\(\$picker_id\); \?>-bag-model"\s+value="<\?php echo escape\(\$bag_pre\[/', $bag_src('hooks/view.php')) === 1);
 
 # --- forms: the AJAX post never sends the clicked button -----------------------------------

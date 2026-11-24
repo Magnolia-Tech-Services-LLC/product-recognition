@@ -185,8 +185,9 @@ function pr_bag_rebind(array $seed, string $current_checksum, array $cutouts): ?
 }
 
 /**
- * A stored cutout box (tag or match row) as a plain [x, y, w, h] list. Accepts a JSON list, a
- * JSON list holding one list, or "x,y,w,h". Anything else is [].
+ * A stored cutout box (tag or match row) as a plain [x1, y1, x2, y2] list of corners, fractions of the
+ * image (the same as pr_bag_bbox_iou reads). Accepts a JSON list, a JSON list holding one list, or
+ * "x1,y1,x2,y2". Anything else is [].
  *
  * @return list<float>
  */
@@ -379,7 +380,7 @@ function pr_bag_seed_reason_acceptable(string $reason): bool
  */
 function pr_bag_pre_write_verdict(?int $bound, array $match, ?array $seed, bool $own_seed, bool $rejected,
                                   bool $answered, bool $seed_usable, ?array $photo, bool $name_ok, bool $colorway_ok,
-                                  bool $cutout_verified = true): array
+                                  bool $cutout_verified = true, bool $seed_mask_ok = true): array
 {
     $out = static fn(string $status, string $reason, ?array $plan = null): array => ['status' => $status, 'reason' => $reason, 'plan' => $plan];
     if ($bound === null) {
@@ -403,6 +404,9 @@ function pr_bag_pre_write_verdict(?int $bound, array $match, ?array $seed, bool 
     }
     if ($answered) {
         return $out('gone', 'answered');
+    }
+    if (!$seed_mask_ok) {
+        return $out('failed', 'seed_mask_unverified');      # the seed image the reviewer sees cannot be confirmed: stays open
     }
     if (!$cutout_verified) {
         return $out('failed', 'cutout_unverified');      # its mask cannot be read right now: not proof of a change, so it stays open
@@ -807,8 +811,8 @@ function pr_bag_recover_plan(array $planned, array $present, array $protect): ar
  *  - 'completed': it is applied and decided_at is set, so the last step committed. Leave everything.
  *  - 'reopen':    applied with decided_at empty, the claim committed (an implicit commit) but the
  *                 accept did not finish. Take back the planned nodes, return the row to open.
- *  - 'clean':     the claim was rolled back, but planned nodes may have been committed outside it.
- *                 Take back the planned nodes; the row is not touched.
+ *  - 'clean':     the claim was rolled back. Nothing shows who wrote a planned node that is on the photo
+ *                 now (a colleague may have added it), so nothing is removed; the nodes are only logged.
  *
  * @param array{state:string,decided_at_set:bool}|null $row
  */
