@@ -1024,6 +1024,7 @@ function pr_bag_seed_reason_now(array $tag): string
 function pr_bag_import_tags(array $rows, bool $dry_run = false): array
 {
     $stats = ['accepted' => 0, 'rejected' => []];
+    pr_bag_arm_exceptions();
     if (!$dry_run) {
         pr_bag_prepare_tables();
     }
@@ -1063,13 +1064,23 @@ function pr_bag_import_tags(array $rows, bool $dry_run = false): array
             $stats['rejected'][] = ['row' => (int)$at, 'resource' => $resource, 'reason' => $alpha === null ? 'mask_unreadable' : 'need_cutout'];
             continue;
         }
-        if (!$dry_run && !pr_bag_store_tag(
-            $resource, (int)$row['region_index'], $row['file_checksum'],
-            array_map('floatval', $row['bbox']), (int)$name_node, (int)$colorway_node,
-            (int)($row['user'] ?? 0)
-        )) {
-            $stats['rejected'][] = ['row' => (int)$at, 'resource' => $resource, 'reason' => 'store_failed'];
-            continue;
+        if (!$dry_run) {
+            # One row's database error rejects that row; it does not end the import.
+            try {
+                pr_bag_arm_exceptions();
+                $stored = pr_bag_store_tag(
+                    $resource, (int)$row['region_index'], $row['file_checksum'],
+                    array_map('floatval', $row['bbox']), (int)$name_node, (int)$colorway_node,
+                    (int)($row['user'] ?? 0)
+                );
+            } catch (Throwable $e) {
+                pr_bag_log('bag import row ' . (int)$at . ' not stored: ' . $e->getMessage());
+                $stored = false;
+            }
+            if (!$stored) {
+                $stats['rejected'][] = ['row' => (int)$at, 'resource' => $resource, 'reason' => 'store_failed'];
+                continue;
+            }
         }
         $stats['accepted']++;
     }
@@ -1850,6 +1861,7 @@ function pr_bag_nodes_on_photo(int $resource, array $nodes): array
  */
 function pr_bag_report(callable $on_row): array
 {
+    pr_bag_arm_exceptions();
     $cfg = pr_bag_config();
     if (pr_bag_disabled_reason() !== '') {
         return ['tally' => [], 'seeds' => 0, 'ignored' => [], 'error' => pr_bag_disabled_text(pr_bag_disabled_reason()),
