@@ -92,6 +92,7 @@ function HookProduct_recognitionViewCustompanels()
                 'gone' => 'product_recognition_review_gone',
                 'failed' => 'product_recognition_review_failed',
                 'bag_applied' => 'product_recognition_bag_applied',
+                'bag_applied_identity' => 'product_recognition_bag_applied_identity',
                 'bag_rejected' => 'product_recognition_bag_rejected',
                 'bag_blocked' => 'product_recognition_bag_blocked',
                 'bag_denied' => 'product_recognition_review_denied',

@@ -566,8 +566,8 @@ function pr_bag_choose(?array $colorway, ?array $pair, array $cfg): ?array
 
 /**
  * Whether this match is the kind a later, unattended step could write without a person: it clears
- * the rest of the strict gate once the numbers pass (the row's 'passes'). Nothing writes on this
- * today. The review page and --bag-match show it so a person sees which gate a suggestion passed.
+ * the rest of the strict gate once the numbers pass (the row's 'passes'). No path in this change
+ * writes on it and no screen mentions it; the automatic path (#37) is the caller.
  *
  * colorway: the photo already has exactly one product, one cutout, and the seed has that product.
  * pair:     same shoot, and the photo has no product or already has the seed's product.

@@ -711,6 +711,16 @@ pr_check("wiring: the picker's colorway select keeps the photo-level default (de
          && str_contains($bag_view_src, 'data-initial="<?php echo escape($pre[\'colorway_text\']); ?>"')
          && str_contains($bag_view_src, "color.value !== color.getAttribute('data-initial')")
          && str_contains($bag_view_src, 'id="<?php echo escape($picker_id); ?>-bag-colorway"'));
+$bag_lang_src = $bag_src('languages/en.php');
+pr_check("wiring: nit round: the view panel knows the identity-notice status, the reject notice names the colorway, and no text promises a later automatic step",
+         str_contains($bag_src('hooks/view.php'), "'bag_applied_identity' => 'product_recognition_bag_applied_identity'")
+         && str_contains($bag_lang_src, 'This colorway will not be suggested again for this cutout')
+         && !str_contains($bag_lang_src, 'automatic step') && !str_contains($bag_lang_src, 'bag_gate_auto')
+         && !str_contains($bag_match_src, 'gate_auto') && !str_contains($bag_match_src, 'later automatic'));
+pr_check("wiring: Save as seed answers need_cutout when the mask is not there (mask_stat null), failed only when it exists but cannot be read",
+         preg_match("/pr_bag_mask_stat\\(\\\$mask\\) === null\\) \\{\\s*return 'need_cutout';.*?pr_bag_png_alpha\\(.*?=== null\\) \\{\\s*return 'failed';/s", $bag_fn('pr_bag_save_tag')) === 1);
+pr_check("wiring: a throw in the middle of a resource saves the cursor at resource - 1, so its remaining cutouts are not skipped",
+         preg_match('/\\$in_resource = \\$resource;.*?\\$in_resource = null;.*?catch \\(Throwable \\$e\\) \\{.*?\\$pos = \\$in_resource - 1;.*?throw \\$e;.*?finally/s', $bag_fn('pr_bag_backfill_features')) === 1);
 pr_check("wiring: seeds' cutouts get their features first, every run, with their own position; the sweep cursor is not moved by it, and they are counted",
          str_contains($bag_fn('pr_bag_backfill_features'), 'FROM product_bag_tag t WHERE t.resource = pr.resource')
          && preg_match('/\\$seed_phase = true;.*?if \\(\\$seed_phase\\) \\{.*?\\$pos = &\\$seed_pos;.*?\\} else \\{.*?\\$pos = &\\$cursor;/s', $bag_fn('pr_bag_backfill_features')) === 1

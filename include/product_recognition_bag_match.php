@@ -635,6 +635,7 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
     $seed_sql = str_replace('WHERE pr.resource > ?', 'WHERE pr.resource > ? AND EXISTS (SELECT 1 FROM product_bag_tag t WHERE t.resource = pr.resource)', $sql);
     $seed_phase = true;
     $seed_pos = 0;
+    $in_resource = null;
     try {
         while ($budget > 0) {
             if ($seed_phase) {
@@ -679,6 +680,7 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
                     continue;
                 }
                 $boxes = pr_decode_bboxes((string)$row['bbox']);
+                $in_resource = $resource;      # until every cutout of it is handled (see the catch below)
                 # A stored row counts only if it is this cutout: file checksum, box and mask file as it is
                 # now (mtime). Anything else is a leftover and is replaced here, with its tries.
                 $stored = $stored_by_resource[$resource] ?? [];
@@ -757,8 +759,16 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
                     $stats[$features['status'] === 'ok' ? 'computed' : 'unusable']++;
                     $stats['seed_computed'] += $seed_phase ? 1 : 0;
                 }
+                $in_resource = null;
             }
         }
+    } catch (Throwable $e) {
+        # A throw in the middle of a resource (a database error) must not move the saved cursor past it: the
+        # resource's remaining cutouts would never be looked at. Resume at that resource.
+        if ($in_resource !== null) {
+            $pos = $in_resource - 1;
+        }
+        throw $e;
     } finally {
         # Wherever the loop ended, an exit from a throw included, the next run resumes from here.
         $stats['last'] = $cursor;
@@ -948,9 +958,12 @@ function pr_bag_save_tag(int $resource, int $region, string $model_text, string 
         return 'need_cutout';
     }
     $mask = pr_mask_file($resource, $current['file_checksum'], $region);
+    if (pr_bag_mask_stat($mask) === null) {
+        return 'need_cutout';      # the mask is not written yet (or is gone)
+    }
     $alpha = pr_bag_png_alpha($mask);
     if ($alpha === null) {
-        return 'failed';      # the mask cannot be read right now: not proof it is a plain crop
+        return 'failed';      # it is there but cannot be read right now: not proof it is a plain crop
     }
     if (!$alpha) {
         return 'need_cutout';
@@ -2151,7 +2164,6 @@ function pr_bag_open_matches(int $limit = 100, int $offset = 0): array
     }
     $seed_cuts = pr_bag_current_cutouts(array_values(array_unique(array_map(static fn(array $r): int => (int)$r['seed_resource'], $page))));
     $cfg = pr_bag_config();
-    $withheld = pr_nodes_withheld_from_auto_apply();
     $out = [];
     $seed_access = [];
     foreach ($page as $r) {
@@ -2160,14 +2172,10 @@ function pr_bag_open_matches(int $limit = 100, int $offset = 0): array
         $seed_res = (int)$r['seed_resource'];
         $seed_access[$seed_res] ??= !function_exists('get_resource_access') || get_resource_access($seed_res) <= 1;
         $seed_region = pr_bag_bind_row(['region_index' => $r['seed_region'], 'file_checksum' => $r['seed_checksum'], 'bbox' => $r['seed_bbox']], $now);
-        # Which strict gate the numbers pass, and whether it is also the kind a later automatic step
-        # could write. Shown, never acted on.
+        # Which strict gate the numbers pass. Shown, never acted on.
         $gate = $r['name_node'] === null ? 'colorway' : 'pair';
-        $same_shoot = (int)$r['same_shoot'] === 1;
         $passes = pr_bag_gate_passes($gate, (float)$r['similarity'], $r['margin'] === null ? null : (float)$r['margin'], $cfg);
         $out[] = $r + ['gate' => $passes ? $gate : '',
-                       'gate_auto' => $passes && $r['blocked'] === ''
-                           && pr_bag_auto_ok($gate, $states[(int)$r['resource']], (int)$r['seed_name_node'], $same_shoot, $withheld),
                        'seed_visible' => $seed_access[$seed_res],
                        'seed_current_region' => $seed_region,
                        'seed_current_checksum' => $now['file_checksum'] ?? ''];
@@ -2242,7 +2250,7 @@ function pr_bag_render_review(): void
                        <?php echo escape((int)$r['same_shoot'] === 1 ? $lang['product_recognition_bag_same_shoot'] : $lang['product_recognition_bag_other_shoot']); ?></p>
                     <p><?php
                         echo escape($r['gate'] === '' ? $lang['product_recognition_bag_gate_none']
-                            : sprintf($r['gate_auto'] ? $lang['product_recognition_bag_gate_auto'] : $lang['product_recognition_bag_gate_passed'],
+                            : sprintf($lang['product_recognition_bag_gate_passed'],
                                       $lang['product_recognition_bag_gate_' . $r['gate']]));
                     ?></p>
                     <?php if ($r['blocked'] !== '') { ?>
