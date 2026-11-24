@@ -24,7 +24,6 @@
  *   php product_recognition_cli.php --import-bag-tags=FILE [--dry-run]   # JSON rows, see below
  *   php product_recognition_cli.php --bag-match [--dry-run]
  *   php product_recognition_cli.php --bag-match-report                   # read-only
- *   php product_recognition_cli.php --undo-bag-matches [--resource=N | --match=N] [--dry-run]
  *   php product_recognition_cli.php --all
  *
  * Bag tags (#34): FILE is a JSON array of {resource, region_index, file_checksum, bbox, name,
@@ -83,9 +82,9 @@ function pr_bag_print_match_summary(array $stats, string $indent = ''): void
     $ignored = (array)($stats['ignored_seeds'] ?? []);
     printf("%sseeds %d (ignored %d), competitors %d, cutouts scored %d\n", $indent, (int)($stats['seeds'] ?? 0),
            count($ignored), (int)($stats['competitors'] ?? 0), (int)($stats['considered'] ?? 0));
-    printf("%s  opened %d, updated %d, closed %d, auto-applied %d, blocked %d (auto-apply is OFF unless a bag flag is set)\n",
+    printf("%s  opened %d, updated %d, closed %d, blocked %d (suggestions only; a person's Accept writes the tags)\n",
            $indent, (int)($stats['opened'] ?? 0), (int)($stats['updated'] ?? 0), (int)($stats['closed'] ?? 0),
-           (int)($stats['auto_applied'] ?? 0), (int)($stats['blocked'] ?? 0));
+           (int)($stats['blocked'] ?? 0));
     foreach ($ignored as $i) {
         printf("%s  ignored seed %d (resource %d): %s\n", $indent, $i['ref'], $i['resource'], $i['reason']);
     }
@@ -93,10 +92,8 @@ function pr_bag_print_match_summary(array $stats, string $indent = ''): void
         printf("%s  superseded %d open suggestions (cutout gone or re-cut, or no usable seed)\n", $indent, (int)$stats['superseded']);
     }
     foreach ((array)($stats['stale_applied'] ?? []) as $a) {
-        # Only what the pass wrote unattended can be undone; a person's accepted match is theirs.
-        printf("%s  applied match %d (resource %d) came from seed %d, which has since been re-answered; %s\n",
-               $indent, $a['match'], $a['resource'], $a['seed_ref'],
-               $a['unattended'] ? sprintf('not undone (see --undo-bag-matches --match=%d)', $a['match']) : 'accepted by a person, so it stays');
+        printf("%s  accepted match %d (resource %d) came from seed %d, which has since been re-answered; its tags stay\n",
+               $indent, $a['match'], $a['resource'], $a['seed_ref']);
     }
     if (!empty($stats['service_down'])) {
         printf("%s  the service did not answer; the pass stopped early\n", $indent);
@@ -576,40 +573,6 @@ switch ($mode) {
         fwrite(STDERR, "Nothing written (read-only).\n");
         exit($report['error'] === null ? 0 : 1);
 
-    case '--undo-bag-matches':
-        # No --resource means the whole library, so a mistyped argument must stop, not widen the undo.
-        $only = null;
-        $only_match = null;
-        foreach (array_slice($modes, 1) as $arg) {
-            if ($arg === '--dry-run') {
-                continue;
-            }
-            if ($only !== null || $only_match !== null || !preg_match('/^--(resource|match)=([1-9]\d*)$/', $arg, $m)) {
-                fwrite(STDERR, "Usage: --undo-bag-matches [--resource=N | --match=N] [--dry-run]\n");
-                exit(1);
-            }
-            if ($m[1] === 'match') {
-                $only_match = (int)$m[2];
-            } else {
-                $only = (int)$m[2];
-            }
-        }
-        $stats = $pr_cli_run(fn() => pr_bag_undo_matches($dry_run, $only, $only_match));
-        if ($stats === null) {
-            exit(0);
-        }
-        if (!empty($stats['disabled_reason'])) {
-            fwrite(STDERR, 'product_recognition: ' . pr_bag_disabled_text($stats['disabled_reason']) . "; nothing to undo.\n");
-            exit(1);
-        }
-        printf("Bag matches written by the nightly pass, %s: %d\n  nodes removed   %d\n  already gone    %d\n  kept (shared)   %d\n",
-               $dry_run ? 'to undo' : 'undone', $stats['matches'], $stats['nodes_removed'],
-               $stats['already_gone'], $stats['protected']);
-        if ($dry_run) {
-            echo "\nDRY RUN - nothing written.\n";
-        }
-        break;
-
     case '--all':
         $result = pr_run_all();
         if (!empty($result['locked'])) {
@@ -654,7 +617,7 @@ switch ($mode) {
 
     case '--help':
     case '-h':
-        fwrite(STDOUT, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--colorway-color|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed|--cutout-features|--import-bag-tags=FILE|--bag-match|--bag-match-report|--undo-bag-matches [--dry-run]\n");
+        fwrite(STDOUT, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--colorway-color|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed|--cutout-features|--import-bag-tags=FILE|--bag-match|--bag-match-report [--dry-run]\n");
         break;
 
     case '--sheet':
@@ -712,6 +675,6 @@ switch ($mode) {
 
     default:
         fwrite(STDERR, "Unknown mode: $mode\n");
-        fwrite(STDERR, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--colorway-color|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed|--cutout-features|--import-bag-tags=FILE|--bag-match|--bag-match-report|--undo-bag-matches [--dry-run]\n");
+        fwrite(STDERR, "product_recognition_cli.php --report|--references|--catalog|--paths|--backfill|--calibrate|--classify|--disagreement|--colorway-accuracy|--colorway-projection|--colorway-crops|--colorway-color|--regions|--migrate-family|--all|--accept-certain|--sheet|--studio-seed|--cutout-features|--import-bag-tags=FILE|--bag-match|--bag-match-report [--dry-run]\n");
         exit(1);
 }

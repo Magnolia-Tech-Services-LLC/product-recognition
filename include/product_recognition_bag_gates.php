@@ -5,7 +5,7 @@
  * No database, no ResourceSpace call, no service call in this file, so the self-check can
  * load it on its own (scripts/product_recognition_selfcheck_bag_match.php) and the nightly
  * writer cannot drift from what the tests assert. The service returns raw scores
- * (POST /match_bags); every cutoff, every "may this be written" and every undo step is here.
+ * (POST /match_bags); every cutoff and every "may this be written" check is here.
  *
  * Vocabulary:
  *  - seed      a product_bag_tag row: a person's explicit answer for one cutout. Only seeds
@@ -27,11 +27,11 @@ const PR_BAG_MAX_ATTEMPTS = 3;
 const PR_BAG_REBIND_IOU = 0.9;
 
 /**
- * Settings with their spec defaults. Nothing auto-applies until a flag is switched on, and the
- * flags are only to be switched on once --bag-match-report meets the enable condition.
+ * Settings with their spec defaults. Nothing here writes to a photo: a person's Accept is the
+ * only writer.
  *
  * @param array<string,mixed>|null $source defaults to the plugin globals
- * @return array{colorway_auto:bool,product_auto:bool,colorway_sim:float,colorway_margin:float,product_sim:float,product_margin:float,review_floor:float,copy_segments:list<string>,batch:int,report_min_hidden:int}
+ * @return array{colorway_sim:float,colorway_margin:float,product_sim:float,product_margin:float,review_floor:float,copy_segments:list<string>,batch:int,report_min_hidden:int}
  */
 function pr_bag_config(?array $source = null): array
 {
@@ -48,8 +48,6 @@ function pr_bag_config(?array $source = null): array
         }
     }
     return [
-        'colorway_auto' => !empty($g['product_recognition_bag_colorway_auto_apply']),
-        'product_auto' => !empty($g['product_recognition_bag_product_auto_apply']),
         'colorway_sim' => (float)($g['product_recognition_bag_colorway_min_similarity'] ?? 0.85),
         'colorway_margin' => (float)($g['product_recognition_bag_colorway_min_margin'] ?? 0.10),
         'product_sim' => (float)($g['product_recognition_bag_product_min_similarity'] ?? 0.90),
@@ -302,32 +300,12 @@ function pr_bag_feature_state(?array $row): string
 }
 
 /**
- * Undo may not remove a node that is the ancestor of a leaf that stays on the photo.
- *
- * @param list<int> $remove nodes the undo plan would remove
- * @param list<int> $photo_leaves leaf nodes on the photo now
- * @param callable(int):list<int> $ancestors a node and its ancestors
- * @return array{remove:list<int>,kept:list<int>}
- */
-function pr_bag_keep_ancestors(array $remove, array $photo_leaves, callable $ancestors): array
-{
-    $stay = [];
-    foreach (array_diff($photo_leaves, $remove) as $leaf) {
-        foreach ($ancestors((int)$leaf) as $node) {
-            $stay[(int)$node] = true;
-        }
-    }
-    $kept = array_values(array_filter($remove, static fn(int $n): bool => isset($stay[$n])));
-    return ['remove' => array_values(array_diff($remove, $kept)), 'kept' => $kept];
-}
-
-/**
  * The one check before any match is opened or written, on facts read just now (never on what the
  * nightly run read at its start). The caller gathers the facts; this decides.
  *
  *  - 'gone':    the match no longer describes anything true: its cutout is not on the photo, its seed
- *               is gone or was re-answered, the cutout has an answer of its own, or the colorway was
- *               rejected for it. Close it.
+ *               is gone or was re-answered, the cutout has an answer of its own, the colorway was
+ *               rejected for it, or another match for the cutout was already accepted. Close it.
  *  - 'failed':  the Product is no longer a leaf.
  *  - 'blocked': it cannot be written now (colorway gone, or what the photo has): leave it for review.
  *  - 'ok':      'plan' says what may be added.
@@ -338,7 +316,7 @@ function pr_bag_keep_ancestors(array $remove, array $photo_leaves, callable $anc
  * @return array{status:string,reason:string,plan:?array{add_name:bool,add_colorway:bool,blocked:string}}
  */
 function pr_bag_pre_write_verdict(?int $bound, array $match, ?array $seed, bool $own_seed, bool $rejected,
-                                  ?array $photo, bool $name_ok, bool $colorway_ok): array
+                                  bool $answered, ?array $photo, bool $name_ok, bool $colorway_ok): array
 {
     $out = static fn(string $status, string $reason, ?array $plan = null): array => ['status' => $status, 'reason' => $reason, 'plan' => $plan];
     if ($bound === null) {
@@ -356,6 +334,9 @@ function pr_bag_pre_write_verdict(?int $bound, array $match, ?array $seed, bool 
     }
     if ($rejected) {
         return $out('gone', 'rejected');
+    }
+    if ($answered) {
+        return $out('gone', 'answered');
     }
     if ($photo === null || !$name_ok) {
         return $out('failed', 'photo_or_product');
@@ -511,27 +492,26 @@ function pr_bag_choose(?array $colorway, ?array $pair, array $cfg): ?array
 }
 
 /**
- * Whether this match may be written without a person. Passing the numbers is a separate test
- * (the row's 'passes'); this is the rest of the gate.
+ * Whether this match is the kind a later, unattended step could write without a person: it clears
+ * the rest of the strict gate once the numbers pass (the row's 'passes'). Nothing writes on this
+ * today. The review page and --bag-match show it so a person sees which gate a suggestion passed.
  *
  * colorway: the photo already has exactly one product, one cutout, and the seed has that product.
  * pair:     same shoot, and the photo has no product or already has the seed's product.
- * Either: the config flag is on, and the seed's product is not on the never-auto-apply list.
+ * Either: the seed's product is not on the never-auto-apply list.
  *
  * @param array{products:list<int>,colorways:list<int>,cutouts:int} $photo
  * @param array<int,true> $withheld product node => true
  */
-function pr_bag_auto_ok(string $gate, array $photo, int $seed_product, bool $same_shoot, array $cfg, array $withheld = []): bool
+function pr_bag_auto_ok(string $gate, array $photo, int $seed_product, bool $same_shoot, array $withheld = []): bool
 {
     if ($seed_product <= 0 || isset($withheld[$seed_product])) {
         return false;
     }
     if ($gate === 'pair') {
-        return $cfg['product_auto'] && $same_shoot
-            && ($photo['products'] === [] || in_array($seed_product, $photo['products'], true));
+        return $same_shoot && ($photo['products'] === [] || in_array($seed_product, $photo['products'], true));
     }
-    return $cfg['colorway_auto'] && count($photo['products']) === 1 && (int)$photo['cutouts'] === 1
-        && (int)$photo['products'][0] === $seed_product;
+    return count($photo['products']) === 1 && (int)$photo['cutouts'] === 1 && (int)$photo['products'][0] === $seed_product;
 }
 
 /**
@@ -584,27 +564,25 @@ function pr_bag_write_plan(array $photo, ?int $name_node, int $colorway_node, ?i
  *
  * The one row a cutout gets is pr_bag_choose(). Against the open row it already has:
  * nothing to do, close it (it no longer qualifies), update its numbers (same match), or
- * replace it (a different match). A passing match that the config allows, and that the photo
- * can take as an add, is marked for auto-apply.
+ * replace it (a different match). The pass only suggests; a person's Accept writes.
  *
  * @param array{photo:array{products:list<int>,colorways:list<int>,cutouts:int},shoot:string} $query
  * @param array<string,array> $colorway_keys service 'colorway' pool
  * @param array<string,array> $pair_keys     service 'pair' pool
  * @param array<int,array{product:int,shoot:string}> $seeds seed ref => seed
  * @param array{ref:int,name_node:?int,colorway_node:int,seed_ref:int}|null $open the cutout's open row
- * @param list<int> $rejected colorways rejected or undone for this cutout
- * @param array<int,true> $withheld never-auto-apply products
- * @return array{action:string,match:?array,open_ref:int,auto:bool,blocked:string}
+ * @param list<int> $rejected colorways rejected for this cutout
+ * @return array{action:string,match:?array,open_ref:int,blocked:string}
  */
 function pr_bag_decide(array $query, array $colorway_keys, array $pair_keys, array $seeds, ?array $open,
-                       array $rejected, array $cfg, array $withheld = []): array
+                       array $rejected, array $cfg): array
 {
-    $out = ['action' => 'none', 'match' => null, 'open_ref' => (int)($open['ref'] ?? 0), 'auto' => false, 'blocked' => ''];
+    $out = ['action' => 'none', 'match' => null, 'open_ref' => (int)($open['ref'] ?? 0), 'blocked' => ''];
     $by_colorway = pr_bag_pool_result($colorway_keys, $rejected);
     $by_pair = pr_bag_pool_result($pair_keys, $rejected);
 
-    # What one choice would do on this photo: its row, its plan, whether the pass may write it unattended.
-    $assess = static function (?array $choice) use ($query, $seeds, $cfg, $withheld): ?array {
+    # What one choice would do on this photo: its row and its plan.
+    $assess = static function (?array $choice) use ($query, $seeds): ?array {
         $seed = $choice === null ? null : ($seeds[$choice['ref']] ?? null);
         if ($choice === null || $seed === null) {
             return null;
@@ -621,28 +599,15 @@ function pr_bag_decide(array $query, array $colorway_keys, array $pair_keys, arr
             # The photo already says exactly this, or nothing could ever be written: not worth a row.
             'void' => in_array($plan['blocked'], ['no_product', 'no_colorway'], true)
                 || ($plan['blocked'] === '' && !$plan['add_name'] && !$plan['add_colorway']),
-            'auto' => $choice['passes'] && $plan['blocked'] === ''
-                && pr_bag_auto_ok($choice['gate'], $query['photo'], (int)$seed['product'], $same_shoot, $cfg, $withheld),
         ];
     };
-    # An auto-eligible gate wins even when the other gate also passes: the two flags are independent.
-    $by_gate = [pr_bag_choose(null, $by_pair, $cfg), pr_bag_choose($by_colorway, null, $cfg)];
+    # The usual preference, falling to either gate on its own if the preferred row is void.
     $picked = null;
-    foreach ($by_gate as $choice) {
+    foreach ([pr_bag_choose($by_colorway, $by_pair, $cfg), pr_bag_choose(null, $by_pair, $cfg), pr_bag_choose($by_colorway, null, $cfg)] as $choice) {
         $one = $assess($choice);
-        if ($one !== null && !$one['void'] && $one['auto']) {
+        if ($one !== null && !$one['void']) {
             $picked = $one;
             break;
-        }
-    }
-    # Otherwise the usual preference, falling to the other gate if the preferred row is void.
-    if ($picked === null) {
-        foreach ([pr_bag_choose($by_colorway, $by_pair, $cfg), $by_gate[0], $by_gate[1]] as $choice) {
-            $one = $assess($choice);
-            if ($one !== null && !$one['void']) {
-                $picked = $one;
-                break;
-            }
         }
     }
     if ($picked === null) {
@@ -652,7 +617,6 @@ function pr_bag_decide(array $query, array $colorway_keys, array $pair_keys, arr
     $match = $picked['match'];
     $out['match'] = $match;
     $out['blocked'] = $picked['blocked'];
-    $out['auto'] = $picked['auto'];
     if ($open !== null && (int)$open['seed_ref'] === $match['seed_ref'] && (int)$open['colorway_node'] === $match['colorway_node']
         && ($open['name_node'] === null ? null : (int)$open['name_node']) === $match['name_node']) {
         $out['action'] = 'update';
@@ -671,43 +635,6 @@ function pr_bag_ids_csv(array $ids): string
 {
     $ids = array_values(array_unique(array_filter(array_map('intval', $ids), static fn(int $n): bool => $n > 0)));
     return implode(',', $ids);
-}
-
-/** @return list<int> */
-function pr_bag_csv_ids(string $csv): array
-{
-    $out = [];
-    foreach (explode(',', $csv) as $part) {
-        if ((int)$part > 0) {
-            $out[(int)$part] = (int)$part;
-        }
-    }
-    return array_values($out);
-}
-
-/**
- * Undo: remove only the nodes this match wrote, and only the ones still on the photo. Anything
- * a person added or kept since is left alone, and so is a node another applied match on the
- * same photo also relies on, or that a person's seed answer on the photo confirms ($protect).
- * Only an applied match has anything to undo.
- *
- * @param list<int> $present node ids currently on the photo (both fields)
- * @param list<int> $protect node ids written by this photo's other applied matches, or in its seeds
- * @return array{remove:list<int>,already_gone:list<int>,protected:list<int>}
- */
-function pr_bag_undo_plan(string $state, string $name_written, string $colorway_written, array $present, array $protect = []): array
-{
-    if ($state !== 'applied') {
-        return ['remove' => [], 'already_gone' => [], 'protected' => []];
-    }
-    $wrote = array_values(array_unique(array_merge(pr_bag_csv_ids($name_written), pr_bag_csv_ids($colorway_written))));
-    $there = array_values(array_intersect($wrote, array_map('intval', $present)));
-    $keep = array_values(array_intersect($there, array_map('intval', $protect)));
-    return [
-        'remove' => array_values(array_diff($there, $keep)),
-        'already_gone' => array_values(array_diff($wrote, $there)),
-        'protected' => $keep,
-    ];
 }
 
 /** An --import-bag-tags row must be a JSON object. A number, a string, null or a list is a rejected row. */

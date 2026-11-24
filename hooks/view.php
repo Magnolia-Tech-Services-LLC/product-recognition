@@ -233,8 +233,6 @@ function HookProduct_recognitionViewCustompanels()
                                 <?php generateFormToken('pr_catalog_apply'); ?>
                                 <input type="hidden" name="resource" value="<?php echo (int)$ref; ?>" />
                                 <input type="hidden" name="region" value="<?php echo (int)$row['region']; ?>" />
-                                <input type="hidden" name="file_checksum" value="<?php echo escape($checksum); ?>" />
-                                <input type="hidden" name="bbox" value="<?php echo escape(json_encode($bag_boxes[(int)$row['region']] ?? [])); ?>" />
                                 <input type="hidden" name="model_text"
                                        value="<?php echo escape((string)$row['model_name']); ?>" />
                                 <?php if ($in_modal) { ?>

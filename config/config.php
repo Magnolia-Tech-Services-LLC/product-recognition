@@ -63,18 +63,16 @@ $product_recognition_segment_classes = "product";
 $product_recognition_catalog_title_match = "";
 
 # Tag one bag, find the same bag (#34). A person sets Product and Colorway on one cutout; the
-# nightly pass finds the same bag on other cutouts. Nothing is written to a photo until an
-# auto-apply flag is switched on, and the flags stay off until `product_recognition_cli.php
-# --bag-match-report` meets the enable condition on the reviewed bags (zero wrong among
-# hidden-colorway cutouts, at least 98% right, on the held-out half).
+# nightly pass finds the same bag on other cutouts and suggests it on the review page. Nothing
+# is written to a photo until a person presses Accept. The cutoffs below mark a suggestion as
+# passing the strict gate (shown on the review page, and measured by `product_recognition_cli.php
+# --bag-match-report`).
 #
-# Colorway only: the photo already has exactly one product and one cutout, and the seed has
-# that product. Similarity and margin are measured on the 0.5 DINOv2 + 0.5 Lab-histogram score.
-$product_recognition_bag_colorway_auto_apply = false;
+# Colorway only: compared within the photo's products. Similarity and margin are measured on
+# the 0.5 DINOv2 + 0.5 Lab-histogram score.
 $product_recognition_bag_colorway_min_similarity = 0.85;
 $product_recognition_bag_colorway_min_margin = 0.10;
-# Product + colorway: same shoot only; the photo has no product or already has the seed's.
-$product_recognition_bag_product_auto_apply = false;
+# Product + colorway: same shoot only.
 $product_recognition_bag_product_min_similarity = 0.90;
 $product_recognition_bag_product_min_margin = 0.10;
 # Anything at or above this that does not pass goes to the review page as an open match.

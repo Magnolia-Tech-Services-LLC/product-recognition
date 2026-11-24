@@ -18,7 +18,7 @@ $tab = getval('tab', '') === 'bags' ? 'bags' : '';
 if ($action !== '' && enforcePostRequest(false)) {
     $status = 'failed';
     if ($action === 'bag_accept') {
-        $status = 'bag_' . pr_bag_apply_match((int)getval('match', 0), (int)$userref, true);
+        $status = 'bag_' . pr_bag_accept_match((int)getval('match', 0), (int)$userref);
     } elseif ($action === 'bag_reject') {
         $status = 'bag_' . pr_bag_reject_match((int)getval('match', 0), (int)$userref);
     } elseif ($action === 'accept') {

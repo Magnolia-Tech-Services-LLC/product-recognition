@@ -19,23 +19,17 @@ if (!function_exists('pr_check')) {
 }
 include_once dirname(__DIR__) . '/include/product_recognition_bag_gates.php';
 
-# --- config: every auto flag is off, cutoffs are the spec's --------------------------------
+# --- config: cutoffs are the spec's, and there is no switch that writes tags ----------------
 $bag_cfg = pr_bag_config([]);
-pr_check("config defaults: both auto-apply flags off, cutoffs .85/.10 and .90/.10, review floor .75",
-         $bag_cfg['colorway_auto'] === false && $bag_cfg['product_auto'] === false
-         && $bag_cfg['colorway_sim'] === 0.85 && $bag_cfg['colorway_margin'] === 0.10
+pr_check("config defaults: cutoffs .85/.10 and .90/.10, review floor .75, no auto-apply setting at all",
+         $bag_cfg['colorway_sim'] === 0.85 && $bag_cfg['colorway_margin'] === 0.10
          && $bag_cfg['product_sim'] === 0.90 && $bag_cfg['product_margin'] === 0.10
-         && $bag_cfg['review_floor'] === 0.75 && $bag_cfg['copy_segments'] === []);
-$bag_on = pr_bag_config([
-    'product_recognition_bag_colorway_auto_apply' => true,
-    'product_recognition_bag_product_auto_apply' => '1',
-    'product_recognition_bag_copy_segments' => "Copy, Goat Hill (Copy);; ",
-]);
-$bag_on_cw = $bag_on;
-$bag_on_cw['product_auto'] = false;
-pr_check("config: flags and copy segments read from settings, segments folded and deduplicated",
-         $bag_on['colorway_auto'] === true && $bag_on['product_auto'] === true
-         && $bag_on['copy_segments'] === ['copy', 'goat hill copy']);
+         && $bag_cfg['review_floor'] === 0.75 && $bag_cfg['copy_segments'] === []
+         && !array_key_exists('colorway_auto', $bag_cfg) && !array_key_exists('product_auto', $bag_cfg)
+         && !array_key_exists('colorway_auto', pr_bag_config(['product_recognition_bag_colorway_auto_apply' => true])));
+$bag_seg = pr_bag_config(['product_recognition_bag_copy_segments' => "Copy, Goat Hill (Copy);; "]);
+pr_check("config: copy segments read from settings, folded and deduplicated",
+         $bag_seg['copy_segments'] === ['copy', 'goat hill copy']);
 
 # --- bbox overlap and rebinding a re-cut seed -----------------------------------------------
 pr_check("iou: identical 1, disjoint 0, half overlap one third, malformed 0",
@@ -121,9 +115,9 @@ pr_check("pool result: a pair key is rejected by its colorway part; every key re
 $bag_decide_q = ['photo' => ['products' => [7], 'colorways' => [], 'cutouts' => 2], 'shoot' => '10,77'];
 $bag_decide_seeds = [11 => ['product' => 7, 'shoot' => '10,20'], 12 => ['product' => 7, 'shoot' => '10,20']];
 $d = pr_bag_decide($bag_decide_q, $bag_black_navy, [], $bag_decide_seeds, null, [3], $bag_cfg);
-pr_check("decide: rejecting Black does not hide Navy; it goes to review (the margin is negative), never auto",
+pr_check("decide: rejecting Black does not hide Navy; it goes to review (the margin is negative)",
          $d['action'] === 'insert' && $d['match']['colorway_node'] === 4 && $d['match']['seed_ref'] === 12
-         && $d['auto'] === false && $d['match']['margin'] < 0);
+         && $d['match']['margin'] < 0);
 $d = pr_bag_decide($bag_decide_q, $bag_black_navy, [], $bag_decide_seeds, null, [3, 4], $bag_cfg);
 pr_check("decide: with both rejected, only a key under the review floor is left, so nothing", $d['action'] === 'none');
 
@@ -159,25 +153,22 @@ pr_check("choose: under the .75 review floor is nothing",
 pr_check("choose: no margin means suggest only",
          pr_bag_choose(['margin' => null] + $bag_c, null, $bag_cfg)['passes'] === false);
 
-# --- may it be written without a person ----------------------------------------------------
+# --- which strict gate a suggestion is (what a later automatic step could write) -------------
 $bag_one = ['products' => [7], 'colorways' => [], 'cutouts' => 1];
-pr_check("auto: both flags are off by default, whatever the numbers",
-         !pr_bag_auto_ok('colorway', $bag_one, 7, true, $bag_cfg) && !pr_bag_auto_ok('pair', $bag_one, 7, true, $bag_cfg));
 pr_check("auto colorway: exactly one product, one cutout, and the seed has that product",
-         pr_bag_auto_ok('colorway', $bag_one, 7, false, $bag_on)
-         && !pr_bag_auto_ok('colorway', $bag_one, 8, false, $bag_on)
-         && !pr_bag_auto_ok('colorway', ['products' => [7], 'colorways' => [], 'cutouts' => 2], 7, false, $bag_on)
-         && !pr_bag_auto_ok('colorway', ['products' => [7, 8], 'colorways' => [], 'cutouts' => 1], 7, false, $bag_on)
-         && !pr_bag_auto_ok('colorway', ['products' => [], 'colorways' => [], 'cutouts' => 1], 7, false, $bag_on));
+         pr_bag_auto_ok('colorway', $bag_one, 7, false)
+         && !pr_bag_auto_ok('colorway', $bag_one, 8, false)
+         && !pr_bag_auto_ok('colorway', ['products' => [7], 'colorways' => [], 'cutouts' => 2], 7, false)
+         && !pr_bag_auto_ok('colorway', ['products' => [7, 8], 'colorways' => [], 'cutouts' => 1], 7, false)
+         && !pr_bag_auto_ok('colorway', ['products' => [], 'colorways' => [], 'cutouts' => 1], 7, false));
 pr_check("auto pair: same shoot, and the photo has no product or already has the seed's",
-         pr_bag_auto_ok('pair', ['products' => [], 'colorways' => [], 'cutouts' => 3], 7, true, $bag_on)
-         && pr_bag_auto_ok('pair', ['products' => [7, 9], 'colorways' => [], 'cutouts' => 3], 7, true, $bag_on)
-         && !pr_bag_auto_ok('pair', ['products' => [9], 'colorways' => [], 'cutouts' => 3], 7, true, $bag_on)
-         && !pr_bag_auto_ok('pair', $bag_one, 7, false, $bag_on));
-pr_check("auto: each gate obeys its own flag, and a never-auto-apply product is left for a person",
-         !pr_bag_auto_ok('pair', $bag_one, 7, true, $bag_on_cw) && pr_bag_auto_ok('colorway', $bag_one, 7, true, $bag_on_cw)
-         && !pr_bag_auto_ok('pair', $bag_one, 7, true, $bag_on, [7 => true])
-         && !pr_bag_auto_ok('colorway', $bag_one, 7, true, $bag_on, [7 => true]));
+         pr_bag_auto_ok('pair', ['products' => [], 'colorways' => [], 'cutouts' => 3], 7, true)
+         && pr_bag_auto_ok('pair', ['products' => [7, 9], 'colorways' => [], 'cutouts' => 3], 7, true)
+         && !pr_bag_auto_ok('pair', ['products' => [9], 'colorways' => [], 'cutouts' => 3], 7, true)
+         && !pr_bag_auto_ok('pair', $bag_one, 7, false));
+pr_check("auto: a never-auto-apply product, or no product, is never the kind a later step could write",
+         !pr_bag_auto_ok('pair', $bag_one, 7, true, [7 => true]) && !pr_bag_auto_ok('colorway', $bag_one, 7, true, [7 => true])
+         && !pr_bag_auto_ok('colorway', $bag_one, 0, true) && pr_bag_auto_ok('colorway', $bag_one, 7, true, [8 => true]));
 
 # --- what a write may add (fill-empty, never replace) --------------------------------------
 pr_check("plan: a single-cutout photo with nothing gets the name and the colorway",
@@ -207,38 +198,19 @@ pr_check("plan: a colorway-only match is blocked once the photo lost the seed's 
          && pr_bag_write_plan($bag_one, 7, 3, 9)['blocked'] === '');
 pr_check("plan: no colorway is no write", pr_bag_write_plan($bag_one, 7, 0)['blocked'] === 'no_colorway');
 
-# --- undo ----------------------------------------------------------------------------------
-pr_check("ids csv: dedupes, drops zero, round-trips",
-         pr_bag_ids_csv([4, 5, 4, 0, -1]) === '4,5' && pr_bag_csv_ids('4,5,x,0,4') === [4, 5]
-         && pr_bag_csv_ids('') === []);
-$bag_undo = pr_bag_undo_plan('applied', '10,11', '30', [10, 30, 99]);
-pr_check("undo: removes only what the match wrote and what is still there",
-         $bag_undo['remove'] === [10, 30] && $bag_undo['already_gone'] === [11]);
-pr_check("undo: a person's node the match did not write is untouched",
-         pr_bag_undo_plan('applied', '', '30', [30, 31])['remove'] === [30]);
-$bag_undo = pr_bag_undo_plan('applied', '10,11', '30', [10, 30], [10]);
-pr_check("undo: a node another applied match on the photo also wrote stays",
-         $bag_undo['remove'] === [30] && $bag_undo['protected'] === [10]);
-pr_check("undo: a Colorway a person's accepted match relies on stays, though that match wrote nothing itself",
-         pr_bag_undo_plan('applied', '', '30,31', [30, 31], [30])['remove'] === [31]);
-pr_check("undo: only an applied match has anything to undo",
-         pr_bag_undo_plan('open', '10', '30', [10, 30]) === ['remove' => [], 'already_gone' => [], 'protected' => []]
-         && pr_bag_undo_plan('undone', '10', '30', [10, 30])['remove'] === []
-         && pr_bag_undo_plan('applied', '', '', [10])['remove'] === []);
-
+# --- the node ids a match wrote ------------------------------------------------------------
+pr_check("ids csv: dedupes, drops zero",
+         pr_bag_ids_csv([4, 5, 4, 0, -1]) === '4,5' && pr_bag_ids_csv([]) === '');
 
 # --- the nightly decision for one cutout ---------------------------------------------------
 $bag_seeds = [6 => ['product' => 7, 'shoot' => '10,20'], 5 => ['product' => 7, 'shoot' => '10,99']];
 $bag_q = ['photo' => ['products' => [], 'colorways' => [], 'cutouts' => 3], 'shoot' => '10,20'];
 $bag_pair_keys = ['7|3' => ['all' => 0.93, 'seed' => 0.93, 'ref' => 6, 'n' => 1], '7|4' => ['all' => 0.50, 'seed' => 0.50, 'ref' => 6, 'n' => 1]];
 $d = pr_bag_decide($bag_q, [], $bag_pair_keys, $bag_seeds, null, [], $bag_cfg);
-pr_check("decide: a passing pair on a photo with no product is inserted, same shoot, and not auto while the flag is off",
+pr_check("decide: a passing pair on a photo with no product is inserted, same shoot, and writes nothing itself",
          $d['action'] === 'insert' && $d['match']['gate'] === 'pair' && $d['match']['name_node'] === 7
-         && $d['match']['colorway_node'] === 3 && $d['match']['same_shoot'] === true && $d['auto'] === false);
-$d = pr_bag_decide($bag_q, [], $bag_pair_keys, $bag_seeds, null, [], $bag_on);
-pr_check("decide: the same match is auto once the product flag is on", $d['auto'] === true && $d['blocked'] === '');
-$d = pr_bag_decide($bag_q, [], $bag_pair_keys, $bag_seeds, null, [], $bag_on, [7 => true]);
-pr_check("decide: a never-auto-apply product stays in review", $d['action'] === 'insert' && $d['auto'] === false);
+         && $d['match']['colorway_node'] === 3 && $d['match']['same_shoot'] === true && $d['blocked'] === ''
+         && !array_key_exists('auto', $d));
 $open = ['ref' => 40, 'name_node' => 7, 'colorway_node' => 3, 'seed_ref' => 6];
 $d = pr_bag_decide($bag_q, [], $bag_pair_keys, $bag_seeds, $open, [], $bag_cfg);
 pr_check("decide: the same match against its open row is an update, not a second row",
@@ -253,28 +225,23 @@ $d = pr_bag_decide($bag_q, [], $bag_pair_keys, $bag_seeds, null, [3], $bag_cfg);
 pr_check("decide: a rejected colorway is not offered again", $d['action'] === 'none');
 $bag_q_one = ['photo' => ['products' => [7], 'colorways' => [], 'cutouts' => 1], 'shoot' => '10,77'];
 $bag_cw_keys = ['3' => ['all' => 0.90, 'seed' => 0.90, 'ref' => 6, 'n' => 1], '4' => ['all' => 0.70, 'seed' => 0.70, 'ref' => 5, 'n' => 1]];
-$d = pr_bag_decide($bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_on);
-pr_check("decide: a colorway-only match on a one-cutout photo with that product is auto, from another shoot",
-         $d['match']['gate'] === 'colorway' && $d['match']['name_node'] === null && $d['match']['same_shoot'] === false
-         && $d['auto'] === true);
-$d = pr_bag_decide(['photo' => ['products' => [7], 'colorways' => [], 'cutouts' => 2]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_on);
-pr_check("decide: the colorway-only gate never auto-writes on a multi-cutout photo, it still suggests",
-         $d['action'] === 'insert' && $d['auto'] === false);
-$d = pr_bag_decide(['photo' => ['products' => [7], 'colorways' => [4], 'cutouts' => 1]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_on);
-pr_check("decide: a single-cutout photo with another colorway goes to review, blocked, never auto",
-         $d['action'] === 'insert' && $d['blocked'] === 'other_colorway' && $d['auto'] === false);
-$d = pr_bag_decide(['photo' => ['products' => [], 'colorways' => [], 'cutouts' => 1]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_on);
-pr_check("decide: product unknown and not inheritable opens nothing",
-         $d['action'] === 'none' && $d['match'] === null && $d['auto'] === false);
-$d = pr_bag_decide(['photo' => ['products' => [7], 'colorways' => [3], 'cutouts' => 1]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_on);
+$d = pr_bag_decide($bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_cfg);
+pr_check("decide: a colorway-only match on a one-cutout photo with that product is suggested, from another shoot",
+         $d['action'] === 'insert' && $d['match']['gate'] === 'colorway' && $d['match']['name_node'] === null && $d['match']['same_shoot'] === false);
+$d = pr_bag_decide(['photo' => ['products' => [7], 'colorways' => [], 'cutouts' => 2]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_cfg);
+pr_check("decide: a colorway-only match on a multi-cutout photo is still suggested", $d['action'] === 'insert');
+$d = pr_bag_decide(['photo' => ['products' => [7], 'colorways' => [4], 'cutouts' => 1]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_cfg);
+pr_check("decide: a single-cutout photo with another colorway goes to review, blocked",
+         $d['action'] === 'insert' && $d['blocked'] === 'other_colorway');
+$d = pr_bag_decide(['photo' => ['products' => [], 'colorways' => [], 'cutouts' => 1]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_cfg);
+pr_check("decide: product unknown and not inheritable opens nothing", $d['action'] === 'none' && $d['match'] === null);
+$d = pr_bag_decide(['photo' => ['products' => [7], 'colorways' => [3], 'cutouts' => 1]] + $bag_q_one, $bag_cw_keys, [], $bag_seeds, null, [], $bag_cfg);
 pr_check("decide: a photo that already has this colorway is left alone, and closes a stale open row",
          $d['action'] === 'none' && pr_bag_decide(['photo' => ['products' => [7], 'colorways' => [3], 'cutouts' => 1]] + $bag_q_one,
              $bag_cw_keys, [], $bag_seeds, $open, [], $bag_cfg)['action'] === 'close');
-$bag_both = pr_bag_decide($bag_q_one, $bag_cw_keys, $bag_pair_keys, $bag_seeds, null, [], $bag_on_cw);
-pr_check("decide: with only the colorway flag on, the colorway gate is the one that auto-applies even when the pair gate also passes",
-         $bag_both['match']['gate'] === 'colorway' && $bag_both['auto'] === true
-         && pr_bag_decide($bag_q_one, $bag_cw_keys, $bag_pair_keys, $bag_seeds, null, [], $bag_cfg)['match']['gate'] === 'pair');
-$d = pr_bag_decide($bag_q_one, ['3' => ['all' => 0.90, 'seed' => 0.90, 'ref' => 99, 'n' => 1]], [], $bag_seeds, null, [], $bag_on);
+pr_check("decide: when both gates have a row the usual preference picks it (a passing pair first)",
+         pr_bag_decide($bag_q_one, $bag_cw_keys, $bag_pair_keys, $bag_seeds, null, [], $bag_cfg)['match']['gate'] === 'pair');
+$d = pr_bag_decide($bag_q_one, ['3' => ['all' => 0.90, 'seed' => 0.90, 'ref' => 99, 'n' => 1]], [], $bag_seeds, null, [], $bag_cfg);
 pr_check("decide: a score for a seed that is no longer there is dropped", $d['action'] === 'none');
 
 # --- importing tags ------------------------------------------------------------------------
@@ -376,14 +343,6 @@ pr_check("features: no row is retried; a finished row is done; an attempt is ret
          && pr_bag_feature_state(['status' => 'attempt', 'attempts' => PR_BAG_MAX_ATTEMPTS - 1]) === 'retry'
          && pr_bag_feature_state(['status' => 'attempt', 'attempts' => PR_BAG_MAX_ATTEMPTS]) === 'given_up');
 
-# --- undo keeps the parent of any leaf that stays -----------------------------------------
-$bag_anc = static fn(int $n): array => [20 => [20, 2], 21 => [21, 2], 30 => [30, 3]][$n] ?? [$n];
-$bag_kept = pr_bag_keep_ancestors([20, 2, 30, 3], [21, 30], $bag_anc);
-pr_check("undo: a parent of a leaf that stays on the photo is not removed; the rest is",
-         $bag_kept['remove'] === [20, 30, 3] && $bag_kept['kept'] === [2]
-         && pr_bag_keep_ancestors([20, 2], [20], $bag_anc)['remove'] === [20, 2]
-         && pr_bag_keep_ancestors([], [21], $bag_anc) === ['remove' => [], 'kept' => []]);
-
 # --- the check before any write: facts read just now --------------------------------------
 $bag_pm = ['name_node' => null, 'colorway_node' => 3];
 $bag_ps = ['name_node' => 7, 'colorway_node' => 3];
@@ -391,7 +350,7 @@ $bag_pp = ['products' => [7], 'colorways' => [], 'cutouts' => 1];
 $bag_pw = static function (array $o = []) use ($bag_pm, $bag_ps, $bag_pp): array {
     $get = static fn(string $k, $default) => array_key_exists($k, $o) ? $o[$k] : $default;
     return pr_bag_pre_write_verdict($get('bound', 0), $get('match', $bag_pm), $get('seed', $bag_ps), $get('own', false),
-                                    $get('rej', false), $get('photo', $bag_pp), $get('name_ok', true), $get('cw_ok', true));
+                                    $get('rej', false), $get('answered', false), $get('photo', $bag_pp), $get('name_ok', true), $get('cw_ok', true));
 };
 pr_check("pre-write: everything as it was is ok, with the plan",
          $bag_pw()['status'] === 'ok' && $bag_pw()['plan']['add_colorway'] === true);
@@ -403,6 +362,9 @@ pr_check("pre-write: a cutout no longer on the photo, a seed that is gone or re-
 pr_check("pre-write: a cutout with an answer of its own, or the colorway rejected for it, is gone",
          $bag_pw(['own' => true])['reason'] === 'own_seed' && $bag_pw(['rej' => true])['reason'] === 'rejected'
          && $bag_pw(['own' => true])['status'] === 'gone');
+pr_check("pre-write: a cutout another match was already accepted for is gone, so a second Accept or a new suggestion for it is closed",
+         $bag_pw(['answered' => true])['status'] === 'gone' && $bag_pw(['answered' => true])['reason'] === 'answered'
+         && $bag_pw(['answered' => true])['plan'] === null && $bag_pw(['bound' => null, 'answered' => true])['reason'] === 'cutout');
 pr_check("pre-write: the photo's tags as they are now decide the plan; a Product that is no longer a leaf fails; a deleted Colorway blocks",
          $bag_pw(['photo' => ['products' => [7], 'colorways' => [4], 'cutouts' => 1]])['reason'] === 'other_colorway'
          && $bag_pw(['photo' => ['products' => [9], 'colorways' => [], 'cutouts' => 1]])['reason'] === 'product_changed'
@@ -514,7 +476,7 @@ pr_check("tables: no hook or page calls pr_bag_ensure_tables()", $bag_callers ==
 $bag_match_src = $bag_src('include/product_recognition_bag_match.php');
 pr_check("tables: the review tab, accept and reject check the tables exist before they query them",
          preg_match('/function pr_bag_render_review\(\): void\s*\{\s*global[^;]*;\s*if \(!pr_bag_tables_exist\(\)\)/', $bag_match_src) === 1
-         && preg_match('/function pr_bag_apply_match\([^)]*\): string\s*\{\s*if \(!pr_bag_tables_exist\(\)\)/', $bag_match_src) === 1
+         && preg_match('/function pr_bag_accept_match\([^)]*\): string\s*\{\s*if \(!pr_bag_tables_exist\(\)\)/', $bag_match_src) === 1
          && preg_match('/function pr_bag_reject_match\([^)]*\): string\s*\{\s*if \(!pr_bag_tables_exist\(\)\)/', $bag_match_src) === 1);
 
 # --- the DB layer is wired to the pure checks (source checks: the SQL itself needs a database) ---
@@ -523,10 +485,30 @@ $bag_fn = static function (string $name) use ($bag_match_src): string {
     $end = strpos($bag_match_src, "\n}\n", $at);
     return substr($bag_match_src, $at, ($end === false ? strlen($bag_match_src) : $end) - $at);
 };
-pr_check("wiring: accept and the nightly write run pr_bag_pre_write inside the transaction, after the claim, and the unattended one re-checks its gate and auto-apply",
-         preg_match('/db_begin_transaction.*?UPDATE product_bag_match SET state = .applied..*?pr_bag_pre_write\(\$m\).*?db_end_transaction/s', $bag_fn('pr_bag_apply_match')) === 1
-         && str_contains($bag_fn('pr_bag_apply_match'), 'pr_bag_gate_passes') && str_contains($bag_fn('pr_bag_apply_match'), 'pr_bag_auto_ok')
-         && !str_contains($bag_fn('pr_bag_run_match'), 'pr_bag_load_photo_states([$q'));
+$bag_accept = $bag_fn('pr_bag_accept_match');
+pr_check("wiring: Accept checks edit access, then locks the photo first, claims, and runs pr_bag_pre_write (locking) inside the transaction",
+         str_contains($bag_accept, 'pr_can_edit_resource($resource)')
+         && preg_match('/db_begin_transaction.*?pr_bag_lock_photo\(\$resource\).*?UPDATE product_bag_match SET state = .applied..*?pr_bag_pre_write\(\$m, true\).*?add_resource_nodes.*?db_end_transaction/s', $bag_accept) === 1
+         && !str_contains($bag_accept, 'pr_bag_gate_passes') && !str_contains($bag_accept, 'manual'));
+pr_check("wiring: Accept's last step needs the claim to still stand (state applied, decided_at empty, one row) or it takes its nodes back and fails",
+         preg_match('/decided_at = NOW\(\)\s*WHERE ref = \? AND state = .applied. AND decided_by = \? AND decided_at IS NULL.*?sql_affected_rows\(\) !== 1.*?take_back\(\);\s*return .failed./s', $bag_accept) === 1
+         && str_contains($bag_accept, 'decided_at = NULL') && str_contains($bag_accept, 'delete_resource_nodes('));
+pr_check("wiring: a rejected row that someone else already decided is 'gone', not 'rejected'",
+         preg_match('/state = .rejected.*?return sql_affected_rows\(\) === 1 \? .rejected. : .gone./s', $bag_fn('pr_bag_reject_match')) === 1);
+pr_check("wiring: opening a suggestion takes the photo's lock, checks pr_bag_pre_write locking, then inserts, in one transaction",
+         preg_match('/db_begin_transaction.*?pr_bag_lock_photo.*?pr_bag_pre_write\(\$row, true\).*?INSERT INTO product_bag_match.*?db_end_transaction/s', $bag_fn('pr_bag_enact')) === 1
+         && str_contains($bag_fn('pr_bag_pre_write'), "state = 'applied' AND ref <> ?"));
+pr_check("wiring: the end of a run closes open rows for cutouts accepted meanwhile, read again at that point",
+         preg_match('/pr_bag_answered_cutouts\(\).*?isset\(\$answered\[\$cut_key\]\)/s', $bag_fn('pr_bag_run_match')) === 1);
+pr_check("wiring: nothing but a person's Accept writes tags: no auto-apply settings, no undo, one add_resource_nodes caller, no seed save in apply.php",
+         substr_count($bag_src('include/product_recognition_bag_match.php'), 'add_resource_nodes(') === 2
+         && !str_contains($bag_src('include/product_recognition_bag_match.php'), 'pr_bag_undo')
+         && !str_contains($bag_src('include/product_recognition_bag_match.php'), 'pr_bag_apply_match')
+         && !str_contains($bag_src('config/config.php'), 'bag_colorway_auto_apply') && !str_contains($bag_src('config/config.php'), 'bag_product_auto_apply')
+         && !str_contains($bag_src('scripts/product_recognition_cli.php'), 'undo-bag-matches')
+         && !str_contains($bag_src('pages/apply.php'), 'pr_bag_save_tag'));
+pr_check("wiring: the nightly bag stage turns on use_error_exception and restores it, so a SQL error cannot end the CLI run",
+         preg_match('/use_error_exception.*?= true;.*?pr_bag_backfill_features.*?pr_bag_run_match.*?finally/s', $bag_fn('pr_bag_nightly')) === 1);
 pr_check("wiring: an open row is checked with pr_bag_pre_write before it is inserted",
          preg_match('/pr_bag_pre_write\(\$row\).*?INSERT INTO product_bag_match/s', $bag_fn('pr_bag_enact')) === 1);
 pr_check("wiring: matching and the report check /health first; both build candidates with pr_bag_build_candidates and load competitors",
@@ -536,19 +518,18 @@ pr_check("wiring: matching and the report check /health first; both build candid
          && !str_contains($bag_fn('pr_bag_report'), 'hide_product'));
 pr_check("wiring: an open row whose seed is only waiting for its features is not closed",
          str_contains($bag_fn('pr_bag_run_match'), "'close' && isset(\$pending_seeds["));
-pr_check("wiring: the feature pass records an attempt before posting, stores only if the mask mtime did not move, skips .fail masks, and has no sysvar or rewind",
-         preg_match('/pr_bag_store_attempt\(.*?pr_bag_compute_features.*?filemtime\(\$mask\) !== \$mtime.*?pr_bag_store_features/s', $bag_fn('pr_bag_backfill_features')) === 1
+pr_check("wiring: the feature pass records an attempt before posting, stores only if the mask mtime did not move (stat cache cleared before both reads), skips .fail masks, and has no sysvar or rewind",
+         preg_match('/clearstatcache\(true, \$mask\);\s*\$mtime = .*?pr_bag_store_attempt\(.*?pr_bag_compute_features.*?clearstatcache\(true, \$mask\);\s*if \(\(int\)@filemtime\(\$mask\) !== \$mtime.*?pr_bag_store_features/s', $bag_fn('pr_bag_backfill_features')) === 1
          && str_contains($bag_fn('pr_bag_backfill_features'), "'.fail'") && !str_contains($bag_match_src, 'feature_suspect'));
 $bag_view_src = $bag_src('include/product_recognition_view.php');
 pr_check("wiring: a region commit clears the cutout features before and after it writes the masks",
          preg_match('/function pr_commit_regions.*?pr_bag_forget_cutouts\(\$ref\);.*?pr_write_mask_bytes.*?pr_bag_forget_cutouts\(\$ref\);\s*\}/s', $bag_view_src) === 1);
-pr_check("wiring: undo keeps ancestors of the leaves that stay, and can be limited to one match",
-         str_contains($bag_fn('pr_bag_undo_matches'), 'pr_bag_keep_ancestors(') && str_contains($bag_fn('pr_bag_undo_matches'), 'AND ref = ?')
-         && str_contains($bag_src('scripts/product_recognition_cli.php'), '--undo-bag-matches [--resource=N | --match=N]'));
-pr_check("wiring: the undo hint is printed only for rows the pass wrote, and the not-ready message names the CLI modes",
-         str_contains($bag_src('scripts/product_recognition_cli.php'), "\$a['unattended'] ?")
-         && str_contains($bag_fn('pr_bag_applied_from_changed_seeds'), 'decided_by')
-         && preg_match('/product_recognition_bag_no_tables"\] = "[^"]*--cutout-features or --all/', $bag_src('languages/en.php')) === 1);
+pr_check("wiring: the feature pass checks the service before its first attempt, and gives the tries back on an outage or a service-wide streak",
+         preg_match('/pr_bag_service_up\(\)\)\s*\{\s*\$stats\[.service_down.\] = true;\s*return.*?pr_bag_store_attempt\(/s', $bag_fn('pr_bag_backfill_features')) === 1
+         && substr_count($bag_fn('pr_bag_backfill_features'), 'pr_bag_give_back_attempts(') === 2
+         && str_contains($bag_fn('pr_bag_backfill_features'), 'pr_bag_count_given_up()'));
+pr_check("wiring: the not-ready message names the CLI modes",
+         preg_match('/product_recognition_bag_no_tables"\] = "[^"]*--cutout-features or --all/', $bag_src('languages/en.php')) === 1);
 
 # --- forms: the AJAX post never sends the clicked button -----------------------------------
 $bag_view = $bag_src('hooks/view.php');
@@ -556,9 +537,10 @@ pr_check("forms: the panel's bag Accept and Reject carry the action in a hidden 
          !preg_match('/<button[^>]*name="action"[^>]*value="bag_/', $bag_view)
          && str_contains($bag_view, "'bag_accept' => 'product_recognition_accept'")
          && preg_match('/<input type="hidden" name="action" value="<\?php echo escape\(\$bag_action\)/', $bag_view) === 1);
-pr_check("forms: the panel's Apply form carries the file checksum and box, and apply.php passes them to the seed save",
-         preg_match('/pr_catalog_apply.*?name="file_checksum".*?name="bbox"/s', $bag_view) === 1
-         && preg_match('/pr_bag_save_tag\([^;]*getval\("file_checksum"[^;]*getval\("bbox"/s', $bag_src('pages/apply.php')) === 1);
+pr_check("forms: the panel's Apply form does not carry a seed (only the Save as seed bag form carries the file checksum and box)",
+         preg_match('/pr_catalog_apply.*?name="model_text"/s', $bag_view, $bag_apply_form) === 1
+         && !str_contains($bag_apply_form[0], 'name="file_checksum"') && !str_contains($bag_apply_form[0], 'name="bbox"')
+         && preg_match('/pr_bag_tag.*?name="file_checksum".*?name="bbox"/s', $bag_view) === 1);
 pr_check("panel: tells the person when the tables are missing instead of showing nothing",
          str_contains($bag_view, "pr_bag_disabled_reason() === 'tables'") && str_contains($bag_view, 'product_recognition_bag_no_tables'));
 
@@ -581,7 +563,12 @@ foreach (['include/product_recognition_bag_match.php', 'hooks/view.php', 'pages/
     $bag_used = array_merge($bag_used, $bag_m[1]);
 }
 $bag_missing = array_values(array_filter(array_unique($bag_used), static fn(string $k): bool => !isset($bag_lang[$k])));
-# keys built at run time: product_recognition_bag_blocked_<reason>
+# keys built at run time: product_recognition_bag_blocked_<reason>, product_recognition_bag_gate_<gate>
+foreach (['colorway', 'pair'] as $bag_gate) {
+    if (!isset($bag_lang['product_recognition_bag_gate_' . $bag_gate])) {
+        $bag_missing[] = 'product_recognition_bag_gate_' . $bag_gate;
+    }
+}
 foreach (['other_name', 'other_colorway', 'no_product', 'product_changed', 'colorway_gone', 'no_colorway'] as $bag_reason) {
     if (!isset($bag_lang['product_recognition_bag_blocked_' . $bag_reason])) {
         $bag_missing[] = 'product_recognition_bag_blocked_' . $bag_reason;
