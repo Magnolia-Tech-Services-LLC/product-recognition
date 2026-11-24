@@ -39,9 +39,11 @@ import mysql.connector
 import numpy as np
 import torch
 import uvicorn
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Header, Depends
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Header, Depends, Body
 from fastapi.responses import JSONResponse
 from PIL import Image
+
+import bag_features
 
 API_KEY = os.getenv("PRODUCT_RECOGNITION_API_KEY", "")
 
@@ -98,26 +100,43 @@ _dinov2 = {}
 # /health never does.
 _torch_lock = threading.Lock()
 _dinov2_lock = _torch_lock
+def _load_dinov2_locked():
+    """Load DINOv2 once. Caller holds _dinov2_lock: two threadpool workers must not share
+    one nn.Module while it loads, and must not run YOLO/SAM at the same time (6g cap)."""
+    if "model" not in _dinov2:
+        import torchvision.transforms as T
+        print("Loading DINOv2 ViT-B/14...")
+        m = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
+        m.eval().to(device)
+        _dinov2["transform"] = T.Compose([
+            T.Resize(256, interpolation=T.InterpolationMode.BICUBIC),
+            T.CenterCrop(224),
+            T.ToTensor(),
+            T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
+        _dinov2["model"] = m       # published last: this is the key the guard tests
+        print("DINOv2 loaded.")
+
+
 def _encode_dinov2(img):
-    # Lock covers load AND forward: two threadpool workers must not share one nn.Module,
-    # and must not run YOLO/SAM at the same time (6g cap).
+    # Lock covers load AND forward.
     with _dinov2_lock:
-        if "model" not in _dinov2:
-            import torchvision.transforms as T
-            print("Loading DINOv2 ViT-B/14...")
-            m = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
-            m.eval().to(device)
-            _dinov2["transform"] = T.Compose([
-                T.Resize(256, interpolation=T.InterpolationMode.BICUBIC),
-                T.CenterCrop(224),
-                T.ToTensor(),
-                T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-            ])
-            _dinov2["model"] = m       # published last: this is the key the guard tests
-            print("DINOv2 loaded.")
+        _load_dinov2_locked()
         with torch.no_grad():
             x = _dinov2["transform"](img).unsqueeze(0).to(device)
             return _dinov2["model"](x).cpu().numpy().flatten()
+
+
+def _encode_dinov2_batch(batch):
+    """Forward an already-preprocessed (1,3,224,224) array. /cutout_features only: its
+    preprocessing is bag_features.prepare_cutout, not the Resize/CenterCrop above."""
+    with _dinov2_lock:
+        _load_dinov2_locked()
+        with torch.no_grad():
+            x = torch.tensor(batch).float().to(device)
+            return _dinov2["model"](x)[0].cpu().numpy()
+
+
 SPACES = {
     "dinov2": Space("dinov2", 768, "resource_dinov2_vector", "1", _encode_dinov2),
 }
@@ -420,6 +439,128 @@ def calibrate(
     return JSONResponse(content={"observations": observations,
                                  "reference_count": len(resources),
                                  "elapsed_seconds": elapsed})
+
+
+@app.post("/cutout_features", dependencies=[Depends(require_api_key)])
+def cutout_features(image: UploadFile = File(...)):
+    """DINOv2 vector plus Lab sqrt-histogram for one cutout PNG (tag-one-bag matching).
+
+    Preprocessing is bag_features.prepare_cutout, the measured reference: longest side 448,
+    alpha > 128, at least 1500 opaque pixels, square white pad, 224. A cutout that fails
+    that is {"status": "unusable"}, which is an answer, not an error. Vectors are
+    little-endian float32, base64.
+    """
+    prepared = bag_features.prepare_cutout(image.file.read())
+    if prepared is None:
+        return JSONResponse(content={"status": "unusable"})
+    x, hist = prepared
+    try:
+        vector = bag_features.unit(_encode_dinov2_batch(bag_features.to_model_batch(x)))
+    except Exception as e:
+        print(f"Cutout feature error: {e}")
+        raise HTTPException(status_code=500, detail="Cutout feature error")
+    if vector is None:
+        raise HTTPException(status_code=500, detail="Degenerate vector")
+    return JSONResponse(content={
+        "status": "ok",
+        "dinov2": base64.b64encode(vector.astype("<f4").tobytes()).decode("ascii"),
+        "hist": base64.b64encode(hist.astype("<f4").tobytes()).decode("ascii"),
+    })
+
+
+def _load_cutout_features(db_name, wanted):
+    """{(resource, region_index): (dinov2, hist, file_checksum)} for rows with status ok.
+
+    wanted maps (resource, region_index) to the file checksum the caller expects; a row cut
+    from another file version is dropped, never matched.
+    """
+    out = {}
+    resources = sorted({r for r, _ in wanted})
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG, database=db_name)
+        cursor = conn.cursor()
+        for at in range(0, len(resources), 500):
+            chunk = resources[at:at + 500]
+            marks = ",".join(["%s"] * len(chunk))
+            cursor.execute(
+                f"SELECT resource, region_index, file_checksum, dinov2, hist "
+                f"FROM product_cutout_feature WHERE status = 'ok' AND resource IN ({marks})",
+                chunk,
+            )
+            for resource, region, checksum, dino, hist in cursor.fetchall():
+                key = (int(resource), int(region))
+                if key not in wanted or (wanted[key] and wanted[key] != checksum):
+                    continue
+                if (dino is None or hist is None or len(dino) != bag_features.DIM * 4
+                        or len(hist) != bag_features.HIST_BINS * 4):
+                    continue
+                out[key] = (np.frombuffer(dino, dtype="<f4").astype(np.float64),
+                            np.frombuffer(hist, dtype="<f4").astype(np.float64),
+                            str(checksum or ""))
+        conn.close()
+    except Exception as e:
+        print(f"Cutout feature load error: {e}")
+        raise HTTPException(status_code=500, detail="Cutout feature load error")
+    return out
+
+
+@app.post("/match_bags", dependencies=[Depends(require_api_key)])
+def match_bags(payload: dict = Body(...)):
+    """Score query cutouts against seed and competitor cutouts. Raw scores only.
+
+    The gates (similarity and margin cutoffs, same-shoot, what may be written) are PHP's
+    job, as /calibrate leaves thresholds to PHP. Features are read from
+    product_cutout_feature, so the request carries ids, not vectors:
+
+      {db, mix?,
+       queries:    [{resource, region_index, checksum, shoot, products:[node,...]}],
+       candidates: [{resource, region_index, checksum, kind: seed|competitor,
+                     product, colorway, shoot, ref}]}
+
+    Returns {results: [per query, same order, null when its feature row is missing or stale],
+    missing_queries, missing_candidates}. See bag_features.match_queries for the shape.
+    """
+    db_name = str(payload.get("db") or "")
+    queries = payload.get("queries")
+    candidates = payload.get("candidates")
+    if not db_name or not isinstance(queries, list) or not isinstance(candidates, list):
+        raise HTTPException(status_code=400, detail="Provide db, queries and candidates")
+    mix = float(payload.get("mix", bag_features.MIX))
+    try:
+        wanted = {}
+        for row in queries + candidates:
+            wanted[(int(row["resource"]), int(row["region_index"]))] = str(row.get("checksum") or "")
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Malformed queries or candidates")
+    features = _load_cutout_features(db_name, wanted)
+
+    cands = []
+    for row in candidates:
+        found = features.get((int(row["resource"]), int(row["region_index"])))
+        if found is None or row.get("kind") not in ("seed", "competitor"):
+            continue
+        cands.append({"dino": found[0], "hist": found[1], "resource": int(row["resource"]),
+                      "checksum": found[2], "kind": row["kind"], "product": int(row["product"]),
+                      "colorway": int(row["colorway"]), "shoot": str(row.get("shoot") or ""),
+                      "ref": int(row.get("ref") or 0)})
+    present, qs = [], []
+    for at, row in enumerate(queries):
+        found = features.get((int(row["resource"]), int(row["region_index"])))
+        if found is None:
+            continue
+        present.append(at)
+        qs.append({"dino": found[0], "hist": found[1], "resource": int(row["resource"]),
+                   "checksum": found[2], "shoot": str(row.get("shoot") or ""),
+                   "products": [int(p) for p in row.get("products") or []]})
+    scored = bag_features.match_queries(qs, cands, mix)
+    results = [None] * len(queries)
+    for at, res in zip(present, scored):
+        results[at] = res
+    return JSONResponse(content={
+        "results": results,
+        "missing_queries": len(queries) - len(qs),
+        "missing_candidates": len(candidates) - len(cands),
+    })
 
 
 @app.post("/segment", dependencies=[Depends(require_api_key)])

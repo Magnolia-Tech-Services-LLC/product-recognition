@@ -34,6 +34,7 @@ ADD --checksum=sha256:40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eb
     /app/weights/clip/ViT-B-32.pt
 
 COPY dinov2_service.py /app/dinov2_service.py
+COPY bag_features.py /app/bag_features.py
 COPY segment_products.py /app/segment_products.py
 
 # Evidence, not runtime: reproduces the precision@10 numbers in the design doc.
