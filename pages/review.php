@@ -13,9 +13,15 @@ $min_confidence = pr_review_min_confidence(getval('min_confidence', ''));
 $min_percent = (int)round($min_confidence * 100);
 $floors = pr_review_confidence_floors();
 
+$tab = getval('tab', '') === 'bags' ? 'bags' : '';
+
 if ($action !== '' && enforcePostRequest(false)) {
     $status = 'failed';
-    if ($action === 'accept') {
+    if ($action === 'bag_accept') {
+        $status = 'bag_' . pr_bag_apply_match((int)getval('match', 0), (int)$userref, true);
+    } elseif ($action === 'bag_reject') {
+        $status = 'bag_' . pr_bag_reject_match((int)getval('match', 0), (int)$userref);
+    } elseif ($action === 'accept') {
         $status = pr_accept_suggestion($suggestion, $userref);
     } elseif ($action === 'reject') {
         $status = pr_reject_suggestion($suggestion, $userref);
@@ -39,6 +45,9 @@ if ($action !== '' && enforcePostRequest(false)) {
         redirect(generateURL($baseurl . '/pages/view.php', $view_params));
     }
     $review_params = ['pr_review' => $status];
+    if (str_starts_with($status, 'bag_')) {
+        $review_params['tab'] = 'bags';
+    }
     if ($min_percent > 0) {
         $review_params['min_confidence'] = (string)$min_percent;
     }
@@ -69,6 +78,12 @@ $review_notices = [
     'none' => 'product_recognition_review_none',
     'gone' => 'product_recognition_review_gone',
     'failed' => 'product_recognition_review_failed',
+    'bag_applied' => 'product_recognition_bag_applied',
+    'bag_rejected' => 'product_recognition_bag_rejected',
+    'bag_blocked' => 'product_recognition_bag_blocked',
+    'bag_denied' => 'product_recognition_review_denied',
+    'bag_gone' => 'product_recognition_review_gone',
+    'bag_failed' => 'product_recognition_review_failed',
 ];
 ?>
 <div class="BasicsBox">
@@ -79,6 +94,18 @@ if (isset($review_notices[$review_status])) {
     echo "<p>" . escape($lang[$review_notices[$review_status]]) . "</p>";
 }
 ?>
+<p>
+    <?php if ($tab === 'bags') { ?>
+    <a href="<?php echo escape(generateURL($filter_url)); ?>"><?php echo escape($lang["product_recognition_review"]); ?></a>
+    | <strong><?php echo escape($lang["product_recognition_bag_tab"]); ?></strong>
+    <?php } else { ?>
+    <strong><?php echo escape($lang["product_recognition_review"]); ?></strong>
+    | <a href="<?php echo escape(generateURL($filter_url, ['tab' => 'bags'])); ?>"><?php echo escape($lang["product_recognition_bag_tab"]); ?></a>
+    <?php } ?>
+</p>
+<?php if ($tab === 'bags') {
+    pr_bag_render_review();
+} else { ?>
 <form method="get" action="<?php echo escape(generateURL($filter_url)); ?>" style="margin:1em 0;">
     <label><?php echo escape($lang["product_recognition_min_confidence"]); ?>
         <select name="min_confidence" onchange="this.form.submit()">
@@ -173,5 +200,6 @@ if (isset($review_notices[$review_status])) {
         <?php
     }
 } ?>
+<?php } ?>
 </div>
 <?php include "../../../include/footer.php";

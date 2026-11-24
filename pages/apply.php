@@ -15,6 +15,8 @@ if ($resource <= 0 || !get_edit_access($resource)) {
     exit($lang["error-permissiondenied"]);
 }
 $status = "none";
+$model_text = "";
+$colorway_text = "";
 if (enforcePostRequest(false)) {
     $model_text = trim(getval("model_text", ""));
     $colorway_text = trim(getval("colorway_text", ""));
@@ -46,7 +48,17 @@ if (enforcePostRequest(false)) {
     }
 }
 
+# A photo with exactly one current cutout and both values set: that is a person's answer for
+# the bag, so it is also saved as a seed (product_bag_tag) for the tag-one-bag matcher.
+$bag_status = "";
+if ($model_text !== "" && $colorway_text !== "" && pr_bag_enabled() && pr_stored_region_count($resource) === 1) {
+    $bag_status = pr_bag_save_tag($resource, 0, $model_text, $colorway_text, (int)$userref);
+}
+
 $view_params = ["ref" => $resource, "pr_apply" => $status];
+if ($bag_status !== "") {
+    $view_params["pr_bag"] = $bag_status;
+}
 if (getval("modal", "") === "true") {
     $view_params["modal"] = "true";
 }
