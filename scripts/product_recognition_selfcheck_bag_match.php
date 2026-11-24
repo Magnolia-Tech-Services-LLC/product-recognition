@@ -704,6 +704,13 @@ pr_check("wiring: U1 on a multi-cutout photo the seed form and the picker's colo
          && str_contains($bag_src('hooks/view.php'), "pr_identity_for_reference_label((string)\$row['model_name'])")
          && preg_match('/class="pr-picker".*?name="model_text"\\s+value="<\\?php echo escape\\(\\(string\\)\\$row\\[.model_name.\\]\\)/s', $bag_src('hooks/view.php')) === 1
          && str_contains($bag_src('hooks/view.php'), "data-keep-seed") && str_contains($bag_src('hooks/view.php'), "getAttribute('data-initial')"));
+$bag_view_src = $bag_src('hooks/view.php');
+pr_check("wiring: the picker's colorway select keeps the photo-level default (detected or empty) that Apply posts; the seed form's own hidden colorway takes the picker's value only when the person changed it",
+         !str_contains(substr($bag_view_src, (int)strpos($bag_view_src, 'name="colorway_text"'), 1800), '$bag_pre[\'colorway_text\'] === $cw_name')
+         && str_contains($bag_view_src, "\$pre['colorway_text'] === \$cw_name ? ' selected'")
+         && str_contains($bag_view_src, 'data-initial="<?php echo escape($pre[\'colorway_text\']); ?>"')
+         && str_contains($bag_view_src, "color.value !== color.getAttribute('data-initial')")
+         && str_contains($bag_view_src, 'id="<?php echo escape($picker_id); ?>-bag-colorway"'));
 pr_check("wiring: seeds' cutouts get their features first, every run, with their own position; the sweep cursor is not moved by it, and they are counted",
          str_contains($bag_fn('pr_bag_backfill_features'), 'FROM product_bag_tag t WHERE t.resource = pr.resource')
          && preg_match('/\\$seed_phase = true;.*?if \\(\\$seed_phase\\) \\{.*?\\$pos = &\\$seed_pos;.*?\\} else \\{.*?\\$pos = &\\$cursor;/s', $bag_fn('pr_bag_backfill_features')) === 1

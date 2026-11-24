@@ -202,8 +202,8 @@ function HookProduct_recognitionViewCustompanels()
                             $pre['colorway_text'] = (string)($cw_parts[0] ?? '');
                         }
                         # On a photo with several cutouts the photo-level product and colorway belong to no one bag. The seed
-                        # form and the colorway shown in the picker start from this cutout's seed, else what was detected for
-                        # it. The Apply form and its facets stay on the detected model (that default is not this feature's).
+                        # form starts from this cutout's seed, else what was detected for
+                        # it. The Apply form, its facets and the picker's colorway select stay as they were (that default is not this feature's).
                         $bag_pre = $pre;
                         if ($region_count > 1 && $bag_live && empty($row['fallback'])) {
                             $bag_seed_here = ($bag_panel[(int)$row['region']] ?? ['seed' => null])['seed'];
@@ -294,6 +294,7 @@ function HookProduct_recognitionViewCustompanels()
                     <tr>
                         <td>
                             <select form="<?php echo escape($picker_id); ?>" name="colorway_text"
+                                    data-initial="<?php echo escape($pre['colorway_text']); ?>"
                                     style="max-width:12em;"
                                     title="<?php echo escape($lang['product_recognition_colorway']); ?>">
                                 <option value=""><?php echo escape($lang['product_recognition_pick_colorway']); ?></option>
@@ -307,15 +308,15 @@ function HookProduct_recognitionViewCustompanels()
                                     $seen_cw[$cw_name] = true;
                                     ?>
                                 <option value="<?php echo escape($cw_name); ?>"
-                                    <?php echo $bag_pre['colorway_text'] === $cw_name ? ' selected' : ''; ?>>
+                                    <?php echo $pre['colorway_text'] === $cw_name ? ' selected' : ''; ?>>
                                     <?php echo escape($cw_name); ?>
                                 </option>
                                     <?php
                                 }
-                                if ($bag_pre['colorway_text'] !== '' && !isset($seen_cw[$bag_pre['colorway_text']])) {
+                                if ($pre['colorway_text'] !== '' && !isset($seen_cw[$pre['colorway_text']])) {
                                     ?>
-                                <option value="<?php echo escape($bag_pre['colorway_text']); ?>" selected>
-                                    <?php echo escape($bag_pre['colorway_text']); ?>
+                                <option value="<?php echo escape($pre['colorway_text']); ?>" selected>
+                                    <?php echo escape($pre['colorway_text']); ?>
                                 </option>
                                     <?php
                                 }
@@ -389,7 +390,7 @@ function HookProduct_recognitionViewCustompanels()
                             </form>
                             <?php if (empty($row['fallback']) && $bag_live) {
                                 $bag_here = $bag_panel[(int)$row['region']] ?? ['seed' => null, 'match' => null];
-                                # The seed form posts $bag_pre (see above); the picker's colorway select shows the same value.
+                                # The seed form posts $bag_pre (see above); the picker's colorway select keeps the photo-level default Apply always had.
                                 ?>
                             <form method="post" action="<?php echo escape($bag_tag); ?>" class="pr-bag-tag"
                                   style="display:inline;"
@@ -743,7 +744,7 @@ function HookProduct_recognitionViewCustompanels()
                 }
                 var color = document.querySelector('select[name=colorway_text][form="' + pickerId + '"]');
                 var colorHidden = form.querySelector('[name=colorway_text]');
-                if (color && colorHidden) {
+                if (color && colorHidden && (!hidden.hasAttribute('data-keep-seed') || color.value !== color.getAttribute('data-initial'))) {
                     colorHidden.value = color.value;
                 }
             }, true);
