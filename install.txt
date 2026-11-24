@@ -34,4 +34,14 @@ press "Save as seed bag". The nightly pass (--all, or --cutout-features then --b
 the same bag on other cutouts and lists them under Product suggestions > Bag matches. Nothing
 is written to a photo until you press Accept, unless an auto-apply flag in config/config.php is
 turned on. Leave both flags off until --bag-match-report meets the enable condition.
---undo-bag-matches takes back exactly what the pass wrote.
+--undo-bag-matches takes back exactly what the nightly pass wrote on its own (auto-apply).
+A match a person accepted is theirs and stays.
+
+Database structure: the feature adds three tables (product_bag_tag, product_cutout_feature,
+product_bag_match), created from dbstruct/ by ResourceSpace's structure check. Run that check
+after deploying this plugin version: the CLI writing modes (--cutout-features,
+--import-bag-tags, --bag-match, --all) run it themselves when the tables are missing, and
+ResourceSpace also runs it on upgrade. Until the tables exist the panel, the review tab and
+the hooks leave them alone (the panel shows "not ready"), and --bag-match-report,
+--undo-bag-matches and the dry runs say the tables are missing instead of claiming there is
+no colorway field.

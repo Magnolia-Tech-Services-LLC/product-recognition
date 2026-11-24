@@ -124,6 +124,22 @@ def _per_key(sims, kinds, keys):
     return out
 
 
+def _fold_unknown_product(pair):
+    """Pair keys are 'product|colorway'. A competitor with no product is key '0|colorway'. It is a
+    different key from another only when its colorway differs: with the same colorway it may be the
+    very bag, so it joins that colorway's keys instead of rivaling them. With no such key it stays
+    a rival of every key."""
+    for key in [k for k in pair if k.startswith('0|')]:
+        colorway = key.split('|', 1)[1]
+        same = [k for k in pair if k != key and k.split('|', 1)[1] == colorway]
+        if not same:
+            continue
+        entry = pair.pop(key)
+        for k in same:
+            pair[k]['all'] = max(pair[k]['all'], entry['all'])
+            pair[k]['n'] += entry['n']
+
+
 def match_queries(queries, cands, mix=MIX, near_copy=None):
     """Score query cutouts against seed and competitor cutouts. Gates are not applied here.
 
@@ -138,7 +154,8 @@ def match_queries(queries, cands, mix=MIX, near_copy=None):
 
     A pair is skipped when the candidate is on the query's photo, or has the query's file
     checksum (a duplicate file). Per query two pools are reduced to a best score per key:
-      colorway  candidates whose product is one of the query photo's products; key = colorway
+      colorway  candidates whose product is one of the query photo's products, plus competitors
+                with no product (rival colorways); key = colorway
       pair      candidates on the query's shoot (never when the shoot is ''); key = product|colorway
     near_copy: report only (prop3.py). A candidate whose photo holds a cutout with DINOv2 cosine
     above this to ANY cutout of the query's photo is dropped with its whole photo. Production
@@ -175,7 +192,10 @@ def match_queries(queries, cands, mix=MIX, near_copy=None):
         hide_pr = int(q.get('hide_product') or 0)
         res = {'colorway': {}, 'pair': {}}
         prods = set(int(p) for p in q['products'])
-        pool = ok & np.isin(c_prod, list(prods)) if prods else np.zeros(len(cands), bool)
+        # A competitor with no known product still says "this look is that colorway", so it counts
+        # as a rival colorway for any query. Seeds always have a product.
+        unknown = (c_prod == 0) & np.array([k == 'competitor' for k in kinds], dtype=bool)
+        pool = ok & (np.isin(c_prod, list(prods)) | unknown) if prods else np.zeros(len(cands), bool)
         if hide_cw:
             pool &= c_color != hide_cw
         idx = np.where(pool)[0]
@@ -196,5 +216,6 @@ def match_queries(queries, cands, mix=MIX, near_copy=None):
                     res['pair'][key] = {'all': best_all, 'seed': best_seed,
                                         'ref': int(cands[idx[at]]['ref']) if at >= 0 else 0,
                                         'n': keys.count(key)}
+            _fold_unknown_product(res['pair'])
         out.append(res)
     return out

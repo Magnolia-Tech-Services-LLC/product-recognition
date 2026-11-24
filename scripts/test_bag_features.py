@@ -192,6 +192,25 @@ comp_only = bf.match_queries([dict(queries[0], products={7}, shoot='')],
                              [dict(cands[0], kind='competitor', product=7, ref=0)])
 entry = list(comp_only[0]['colorway'].values())[0]
 check('a key with only competitors has a score but no seed', entry['seed'] is None and entry['all'] is not None and entry['ref'] == 0)
+# a competitor with no product (issue #34: one cutout, one colorway, product not required)
+_d = np.zeros(768); _d[0] = 1.0
+_h = np.full(1152, 1 / np.sqrt(1152))
+def _c(res, product, colorway, kind, ref=0, shoot='S'):
+    return dict(dino=_d, hist=_h, resource=res, checksum='k%d' % res, kind=kind, product=product,
+                colorway=colorway, shoot=shoot, ref=ref)
+_q = dict(dino=_d, hist=_h, resource=1, checksum='kq', shoot='S', products={7})
+_out = bf.match_queries([_q], [_c(10, 7, 1, 'seed', ref=5), _c(11, 0, 2, 'competitor'), _c(12, 0, 1, 'competitor')])[0]
+check('colorway pool: a productless competitor is a rival colorway for any query',
+      set(_out['colorway']) == {'1', '2'} and _out['colorway']['2']['seed'] is None)
+check('pair pool: a productless competitor of ANOTHER colorway is a different key (rival)',
+      '0|2' in _out['pair'] and _out['pair']['0|2']['seed'] is None)
+check('pair pool: a productless competitor of the SAME colorway joins that key, not a rival key',
+      '0|1' not in _out['pair'] and _out['pair']['7|1']['n'] == 2 and set(_out['pair']) == {'7|1', '0|2'})
+_alone = bf.match_queries([_q], [_c(10, 7, 1, 'seed', ref=5), _c(12, 0, 1, 'competitor')])[0]
+check('pair pool: with only the same-colorway productless competitor there is no rival key at all (margin unknown)',
+      set(_alone['pair']) == {'7|1'})
+_other = bf.match_queries([dict(_q, products={8})], [_c(11, 0, 2, 'competitor'), _c(13, 7, 2, 'competitor')])[0]
+check('colorway pool: a competitor of another known product is still left out', set(_other['colorway']) == {'2'} and _other['colorway']['2']['n'] == 1)
 check('no queries or no candidates is an empty answer, not an error',
       bf.match_queries([], cands) == [] and bf.match_queries(queries[:1], []) == [{'colorway': {}, 'pair': {}}])
 

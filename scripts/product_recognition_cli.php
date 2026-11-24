@@ -77,7 +77,7 @@ $pr_cli_run = function (callable $fn) use ($dry_run) {
 function pr_bag_print_match_summary(array $stats, string $indent = ''): void
 {
     if (!empty($stats['disabled'])) {
-        printf("%sbag match: no colorway field set, skipped\n", $indent);
+        printf("%sbag match: %s, skipped\n", $indent, pr_bag_disabled_text((string)($stats['disabled_reason'] ?? '')));
         return;
     }
     $ignored = (array)($stats['ignored_seeds'] ?? []);
@@ -485,11 +485,15 @@ switch ($mode) {
         if ($stats === null) {
             exit(0);
         }
+        if (!empty($stats['disabled_reason'])) {
+            fwrite(STDERR, 'product_recognition: ' . pr_bag_disabled_text($stats['disabled_reason']) . "; nothing to do.\n");
+            exit(1);
+        }
         printf("Cutout features%s\n", $dry_run ? ' (would compute)' : '');
-        printf("  computed         %d\n  unusable         %d\n  no mask yet      %d\n  resources scanned %d\n",
-               $stats['computed'], $stats['unusable'], $stats['skipped_no_mask'], $stats['scanned']);
+        printf("  computed         %d\n  unusable         %d\n  failed           %d\n  no mask yet      %d\n  resources scanned %d\n",
+               $stats['computed'], $stats['unusable'], $stats['failed'], $stats['skipped_no_mask'], $stats['scanned']);
         if ($stats['service_down']) {
-            fwrite(STDERR, "product_recognition: the service did not answer; stopped.\n");
+            fwrite(STDERR, "product_recognition: the service did not answer, or kept failing; stopped.\n");
             exit(1);
         }
         if ($dry_run) {
@@ -507,6 +511,10 @@ switch ($mode) {
         if ($stats === null) {
             exit(0);
         }
+        if (!empty($stats['disabled_reason'])) {
+            fwrite(STDERR, 'product_recognition: ' . pr_bag_disabled_text($stats['disabled_reason']) . "; nothing imported.\n");
+            exit(1);
+        }
         printf("Bag tags: %d accepted, %d rejected%s\n", $stats['accepted'], count($stats['rejected']),
                $dry_run ? ' (dry run)' : '');
         foreach ($stats['rejected'] as $r) {
@@ -523,7 +531,7 @@ switch ($mode) {
             exit(0);
         }
         if (!empty($stats['disabled'])) {
-            fwrite(STDERR, "product_recognition: needs a colorway field (setup page); nothing to do.\n");
+            fwrite(STDERR, 'product_recognition: ' . pr_bag_disabled_text((string)($stats['disabled_reason'] ?? '')) . "; nothing to do.\n");
             exit(1);
         }
         pr_bag_print_match_summary($stats);
@@ -566,17 +574,27 @@ switch ($mode) {
         exit($report['error'] === null ? 0 : 1);
 
     case '--undo-bag-matches':
+        # No --resource means the whole library, so a mistyped argument must stop, not widen the undo.
         $only = null;
-        foreach ($modes as $arg) {
-            if (preg_match('/^--resource=(\d+)$/', $arg, $m)) {
-                $only = (int)$m[1];
+        foreach (array_slice($modes, 1) as $arg) {
+            if ($arg === '--dry-run') {
+                continue;
             }
+            if ($only !== null || !preg_match('/^--resource=([1-9]\d*)$/', $arg, $m)) {
+                fwrite(STDERR, "Usage: --undo-bag-matches [--resource=N] [--dry-run]\n");
+                exit(1);
+            }
+            $only = (int)$m[1];
         }
         $stats = $pr_cli_run(fn() => pr_bag_undo_matches($dry_run, $only));
         if ($stats === null) {
             exit(0);
         }
-        printf("Bag matches %s: %d\n  nodes removed   %d\n  already gone    %d\n  kept (shared)   %d\n",
+        if (!empty($stats['disabled_reason'])) {
+            fwrite(STDERR, 'product_recognition: ' . pr_bag_disabled_text($stats['disabled_reason']) . "; nothing to undo.\n");
+            exit(1);
+        }
+        printf("Bag matches written by the nightly pass, %s: %d\n  nodes removed   %d\n  already gone    %d\n  kept (shared)   %d\n",
                $dry_run ? 'to undo' : 'undone', $stats['matches'], $stats['nodes_removed'],
                $stats['already_gone'], $stats['protected']);
         if ($dry_run) {
@@ -612,8 +630,8 @@ switch ($mode) {
                $result['classification']['certain_accepted']);
         $bag_features = $result['bag_features'] ?? [];
         $bag_match = $result['bag_match'] ?? [];
-        printf("bag features computed %d, unusable %d%s\n", (int)($bag_features['computed'] ?? 0),
-               (int)($bag_features['unusable'] ?? 0),
+        printf("bag features computed %d, unusable %d, failed %d%s\n", (int)($bag_features['computed'] ?? 0),
+               (int)($bag_features['unusable'] ?? 0), (int)($bag_features['failed'] ?? 0),
                empty($bag_features['error']) ? (empty($bag_features['service_down']) ? '' : ' (service did not answer)') : ' (' . $bag_features['error'] . ')');
         if (empty($bag_match['error'])) {
             pr_bag_print_match_summary($bag_match, 'bag match    ');

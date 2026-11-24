@@ -36,6 +36,7 @@ function HookProduct_recognitionViewCustompanels()
     $find = $baseurl . '/plugins/product_recognition/pages/find.php';
     $bag_tag = $baseurl . '/plugins/product_recognition/pages/bag_tag.php';
     $bag_panel = ($can_decide && pr_bag_enabled()) ? pr_bag_panel_state((int)$ref, $checksum) : [];
+    $bag_boxes = ($can_decide && pr_bag_enabled()) ? (pr_bag_current_cutouts([(int)$ref])[(int)$ref]['bboxes'] ?? []) : [];
     $bag_status = getval('pr_bag', '');
     $catalog = $can_decide ? pr_catalog_picker_rows() : [];
     $catalog_empty = $can_decide && $catalog === [];
@@ -99,6 +100,7 @@ function HookProduct_recognitionViewCustompanels()
                 'need_product' => 'product_recognition_bag_need_product',
                 'need_colorway' => 'product_recognition_bag_need_colorway',
                 'need_cutout' => 'product_recognition_bag_need_cutout',
+                'no_tables' => 'product_recognition_bag_no_tables',
                 'failed' => 'product_recognition_ref_failed',
             ];
             $ref_notices = [
@@ -376,6 +378,8 @@ function HookProduct_recognitionViewCustompanels()
                                 <?php generateFormToken('pr_bag_tag'); ?>
                                 <input type="hidden" name="resource" value="<?php echo (int)$ref; ?>" />
                                 <input type="hidden" name="region" value="<?php echo (int)$row['region']; ?>" />
+                                <input type="hidden" name="file_checksum" value="<?php echo escape($checksum); ?>" />
+                                <input type="hidden" name="bbox" value="<?php echo escape(json_encode($bag_boxes[(int)$row['region']] ?? [])); ?>" />
                                 <input type="hidden" name="model_text"
                                        id="<?php echo escape($picker_id); ?>-bag-model"
                                        value="<?php echo escape($pre['model_text']); ?>" />
@@ -687,6 +691,8 @@ function HookProduct_recognitionViewCustompanels()
                 });
             });
         });
+        // Capture phase: the form's inline onsubmit serializes at once, and it was registered
+        // first, so a bubble listener would copy the pickers after the post had gone out.
         document.querySelectorAll('form.pr-bag-tag').forEach(function (form) {
             form.addEventListener('submit', function () {
                 var hidden = form.querySelector('[name=model_text]');
@@ -696,7 +702,9 @@ function HookProduct_recognitionViewCustompanels()
                 var pickerId = hidden.id.replace(/-bag-model$/, '');
                 var picker = document.getElementById(pickerId);
                 var model = picker ? picker.querySelector('[name=model_text]') : null;
-                if (model && model.value) {
+                // An empty model means the facets match no product. Post it empty (need_product)
+                // rather than falling back to the detected product.
+                if (model) {
                     hidden.value = model.value;
                 }
                 var color = document.querySelector('select[name=colorway_text][form="' + pickerId + '"]');
@@ -704,7 +712,7 @@ function HookProduct_recognitionViewCustompanels()
                 if (color && colorHidden) {
                     colorHidden.value = color.value;
                 }
-            });
+            }, true);
         });
         document.querySelectorAll('form.pr-pin').forEach(function (form) {
             form.addEventListener('submit', function () {

@@ -23,7 +23,9 @@ if (enforcePostRequest(false)) {
         (int)getval("region", 0),
         trim((string)getval("model_text", "")),
         trim((string)getval("colorway_text", "")),
-        (int)$userref
+        (int)$userref,
+        (string)getval("file_checksum", ""),
+        (string)getval("bbox", "")
     );
 }
 

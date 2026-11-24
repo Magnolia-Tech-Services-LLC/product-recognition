@@ -17,6 +17,9 @@
  *  - photo     ['products' => list<int> leaf ids, 'colorways' => list<int>, 'cutouts' => int]
  */
 
+/** Cutouts in a row the service may fail on before the feature pass treats it as down. */
+const PR_BAG_MAX_FEATURE_FAILURES = 5;
+
 /** A seed whose photo was re-cut keeps its bag when a current cutout overlaps it this much. */
 const PR_BAG_REBIND_IOU = 0.9;
 
@@ -216,17 +219,20 @@ function pr_bag_shoot_key(array $folder_nodes, array $copy_segments = []): strin
 }
 
 /**
- * A photo that can stand in as a rival: exactly one cutout, one product and one colorway.
+ * A photo that can stand in as a rival (issue #34): exactly one cutout and one colorway. The
+ * product is not required: with none known (or more than one, which says nothing about this
+ * cutout) it is 0, and the rival counts as that colorway only.
  *
  * @param array{products:list<int>,colorways:list<int>,cutouts:int} $photo
  * @return array{product:int,colorway:int}|null
  */
 function pr_bag_competitor_key(array $photo): ?array
 {
-    if ((int)$photo['cutouts'] !== 1 || count($photo['products']) !== 1 || count($photo['colorways']) !== 1) {
+    if ((int)$photo['cutouts'] !== 1 || count($photo['colorways']) !== 1) {
         return null;
     }
-    return ['product' => (int)$photo['products'][0], 'colorway' => (int)$photo['colorways'][0]];
+    return ['product' => count($photo['products']) === 1 ? (int)$photo['products'][0] : 0,
+            'colorway' => (int)$photo['colorways'][0]];
 }
 
 /**
@@ -351,14 +357,17 @@ function pr_bag_auto_ok(string $gate, array $photo, int $seed_product, bool $sam
  *
  *  - Product unknown and not inheritable (a colorway-only match on a photo with no product):
  *    nothing is written.
+ *  - A colorway-only match whose seed product is no longer on the photo: blocked. The colorway was
+ *    only compared within that product.
  *  - A single-cutout photo that already has a different Name or a different Colorway: blocked,
  *    the match stays in review.
  *  - A multi-cutout photo may gain the matched bag's Name and Colorway beside what it has.
  *
  * @param array{products:list<int>,colorways:list<int>,cutouts:int} $photo
+ * @param int|null $seed_product the seed's product; null skips the product check
  * @return array{add_name:bool,add_colorway:bool,blocked:string}
  */
-function pr_bag_write_plan(array $photo, ?int $name_node, int $colorway_node): array
+function pr_bag_write_plan(array $photo, ?int $name_node, int $colorway_node, ?int $seed_product = null): array
 {
     $plan = ['add_name' => false, 'add_colorway' => false, 'blocked' => ''];
     if ($colorway_node <= 0) {
@@ -367,6 +376,10 @@ function pr_bag_write_plan(array $photo, ?int $name_node, int $colorway_node): a
     }
     if ($name_node === null && $photo['products'] === []) {
         $plan['blocked'] = 'no_product';
+        return $plan;
+    }
+    if ($name_node === null && $seed_product !== null && !in_array($seed_product, $photo['products'], true)) {
+        $plan['blocked'] = 'product_changed';
         return $plan;
     }
     if ((int)$photo['cutouts'] <= 1) {
@@ -493,10 +506,11 @@ function pr_bag_csv_ids(string $csv): array
 /**
  * Undo: remove only the nodes this match wrote, and only the ones still on the photo. Anything
  * a person added or kept since is left alone, and so is a node another applied match on the
- * same photo also relies on ($protect). Only an applied match has anything to undo.
+ * same photo also relies on, or that a person's seed answer on the photo confirms ($protect).
+ * Only an applied match has anything to undo.
  *
  * @param list<int> $present node ids currently on the photo (both fields)
- * @param list<int> $protect node ids written by this photo's other applied matches
+ * @param list<int> $protect node ids written by this photo's other applied matches, or in its seeds
  * @return array{remove:list<int>,already_gone:list<int>,protected:list<int>}
  */
 function pr_bag_undo_plan(string $state, string $name_written, string $colorway_written, array $present, array $protect = []): array
@@ -512,6 +526,12 @@ function pr_bag_undo_plan(string $state, string $name_written, string $colorway_
         'already_gone' => array_values(array_diff($wrote, $there)),
         'protected' => $keep,
     ];
+}
+
+/** An --import-bag-tags row must be a JSON object. A number, a string, null or a list is a rejected row. */
+function pr_bag_import_row_is_object($row): bool
+{
+    return is_array($row) && ($row === [] || !array_is_list($row));
 }
 
 /**
@@ -560,6 +580,34 @@ function pr_bag_import_check(array $row, ?array $current, ?int $name_node, ?int 
 function pr_bag_report_held_out(string $shoot_key): bool
 {
     return (crc32($shoot_key) & 1) === 1;
+}
+
+/**
+ * Report queries in chunks of about $size that never split a photo. The service's near-copy rule
+ * looks at every seed cutout of the query's photo, and only sees the ones in the same request.
+ *
+ * @param list<array<string,mixed>> $seeds
+ * @return list<list<array<string,mixed>>>
+ */
+function pr_bag_report_chunks(array $seeds, int $size = 200): array
+{
+    $by_photo = [];
+    foreach ($seeds as $seed) {
+        $by_photo[(int)$seed['resource']][] = $seed;
+    }
+    $chunks = [];
+    $chunk = [];
+    foreach ($by_photo as $group) {
+        if ($chunk !== [] && count($chunk) + count($group) > $size) {
+            $chunks[] = $chunk;
+            $chunk = [];
+        }
+        $chunk = array_merge($chunk, $group);
+    }
+    if ($chunk !== []) {
+        $chunks[] = $chunk;
+    }
+    return $chunks;
 }
 
 /**

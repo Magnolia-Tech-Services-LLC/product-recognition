@@ -71,12 +71,12 @@ pr_check("shoot key: a copy segment (any case) drops out, so a copy folder joins
          && pr_bag_shoot_key(array_merge($bag_path, [['ref' => 99, 'name' => 'COPY']])) === '10,20,30,99');
 
 # --- competitors ---------------------------------------------------------------------------
-pr_check("competitor: one cutout, one product, one colorway, and only that",
+pr_check("competitor: one cutout and one colorway; the product is not required (0 when none or several)",
          pr_bag_competitor_key(['products' => [7], 'colorways' => [3], 'cutouts' => 1]) === ['product' => 7, 'colorway' => 3]
          && pr_bag_competitor_key(['products' => [7], 'colorways' => [3], 'cutouts' => 2]) === null
          && pr_bag_competitor_key(['products' => [7], 'colorways' => [3, 4], 'cutouts' => 1]) === null
-         && pr_bag_competitor_key(['products' => [], 'colorways' => [3], 'cutouts' => 1]) === null
-         && pr_bag_competitor_key(['products' => [7, 8], 'colorways' => [3], 'cutouts' => 1]) === null
+         && pr_bag_competitor_key(['products' => [], 'colorways' => [3], 'cutouts' => 1]) === ['product' => 0, 'colorway' => 3]
+         && pr_bag_competitor_key(['products' => [7, 8], 'colorways' => [3], 'cutouts' => 1]) === ['product' => 0, 'colorway' => 3]
          && pr_bag_competitor_key(['products' => [7], 'colorways' => [], 'cutouts' => 1]) === null);
 
 # --- the winning key and its margin --------------------------------------------------------
@@ -180,6 +180,11 @@ pr_check("plan: a multi-cutout photo may add the matched bag's values beside its
          pr_bag_write_plan(['products' => [9], 'colorways' => [4], 'cutouts' => 3], 7, 3)
          === ['add_name' => true, 'add_colorway' => true, 'blocked' => '']
          && pr_bag_write_plan(['products' => [], 'colorways' => [], 'cutouts' => 3], 7, 3)['add_name'] === true);
+pr_check("plan: a colorway-only match is blocked once the photo lost the seed's product; a pair match is not affected",
+         pr_bag_write_plan($bag_one, null, 3, 7)['blocked'] === ''
+         && pr_bag_write_plan($bag_one, null, 3, 9)['blocked'] === 'product_changed'
+         && pr_bag_write_plan($bag_one, null, 3, 0)['blocked'] === 'product_changed'
+         && pr_bag_write_plan($bag_one, 7, 3, 9)['blocked'] === '');
 pr_check("plan: no colorway is no write", pr_bag_write_plan($bag_one, 7, 0)['blocked'] === 'no_colorway');
 
 # --- undo ----------------------------------------------------------------------------------
@@ -271,6 +276,10 @@ pr_check("import: rejects a changed file, a moved box, a missing cutout, unknown
 pr_check("report halves: deterministic, and both halves are used",
          pr_bag_report_held_out('10,20,30') === pr_bag_report_held_out('10,20,30')
          && count(array_unique(array_map(static fn(int $n): bool => pr_bag_report_held_out((string)$n), range(1, 40)))) === 2);
+$bag_chunks = pr_bag_report_chunks([['resource' => 1, 'ref' => 1], ['resource' => 2, 'ref' => 2], ['resource' => 3, 'ref' => 3], ['resource' => 1, 'ref' => 4]], 2);
+pr_check("report chunks: every seed once, and a photo's seeds are never split",
+         array_map(static fn(array $c): array => array_column($c, 'ref'), $bag_chunks) === [[1, 4], [2, 3]]
+         && pr_bag_report_chunks([]) === []);
 $bag_win = ['key' => '3', 'similarity' => 0.95, 'margin' => 0.2, 'ref' => 1];
 pr_check("report outcome: right, wrong, or nothing passed",
          pr_bag_report_outcome('colorway', $bag_win, '3', $bag_cfg) === 'right'
@@ -318,6 +327,13 @@ pr_check("identity: two rows for one cutout bind to the same index and only the 
          $bag_two[0]['bound'] === 1 && $bag_two[1]['bound'] === 1 && $bag_two[0]['newest'] === false
          && $bag_two[1]['newest'] === true && $bag_two[2]['bound'] === null && $bag_two[2]['newest'] === false);
 
+
+# --- import rows must be objects -----------------------------------------------------------
+pr_check("import: only a JSON object is a row; a number, string, null, list or bool is rejected, not fatal",
+         pr_bag_import_row_is_object(['resource' => 1]) && pr_bag_import_row_is_object([])
+         && !pr_bag_import_row_is_object(5) && !pr_bag_import_row_is_object('x') && !pr_bag_import_row_is_object(null)
+         && !pr_bag_import_row_is_object([1, 2]) && !pr_bag_import_row_is_object(true));
+
 # --- language strings: every key the bag screens use exists, and none has an em dash -------
 # Loaded in a closure: this file is required into the main self-check's scope, where $lang is ResourceSpace's.
 $bag_lang = (static function (): array {
@@ -332,7 +348,7 @@ foreach (['include/product_recognition_bag_match.php', 'hooks/view.php', 'pages/
 }
 $bag_missing = array_values(array_filter(array_unique($bag_used), static fn(string $k): bool => !isset($bag_lang[$k])));
 # keys built at run time: product_recognition_bag_blocked_<reason>
-foreach (['other_name', 'other_colorway', 'no_product', 'no_colorway'] as $bag_reason) {
+foreach (['other_name', 'other_colorway', 'no_product', 'product_changed', 'colorway_gone', 'no_colorway'] as $bag_reason) {
     if (!isset($bag_lang['product_recognition_bag_blocked_' . $bag_reason])) {
         $bag_missing[] = 'product_recognition_bag_blocked_' . $bag_reason;
     }
