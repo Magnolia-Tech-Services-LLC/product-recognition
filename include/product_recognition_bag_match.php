@@ -325,6 +325,31 @@ function pr_bag_post_json(string $path, array $body, int $timeout = 600): ?array
     return is_array($decoded) ? $decoded : null;
 }
 
+/**
+ * POST /match_bags. A run sends the same candidate list with every page of queries, so after the first request
+ * only a key (a hash of the list) goes along and the service keeps the list for the run. A service that does not
+ * know the key (restarted, or its copy expired) says so and the full list is sent again.
+ *
+ * @param list<array<string,mixed>> $queries
+ * @param list<array<string,mixed>> $candidates
+ * @param array<string,mixed> $extra more request fields (near_copy)
+ * @return array<string,mixed>|null the service's answer, null when it did not answer
+ */
+function pr_bag_match_request(array $queries, array $candidates, array $extra = []): ?array
+{
+    static $sent = [];
+    $key = sha1((string)json_encode($candidates));
+    $body = ['db' => (string)$GLOBALS['mysql_db'], 'queries' => $queries, 'candidates_key' => $key] + $extra;
+    $response = pr_bag_post_json('/match_bags', isset($sent[$key]) ? $body : $body + ['candidates' => $candidates]);
+    if (isset($response['unknown_candidates'])) {
+        $response = pr_bag_post_json('/match_bags', $body + ['candidates' => $candidates]);
+    }
+    if ($response !== null && isset($response['results'])) {
+        $sent[$key] = true;
+    }
+    return $response;
+}
+
 # ---------------------------------------------------------------------------------------------
 # Cutout features
 # ---------------------------------------------------------------------------------------------
@@ -1032,14 +1057,21 @@ function pr_bag_import_tags(array $rows, bool $dry_run = false): array
             $stats['rejected'][] = ['row' => (int)$at, 'resource' => $resource, 'reason' => $check['reason']];
             continue;
         }
-        $stats['accepted']++;
-        if (!$dry_run) {
-            pr_bag_store_tag(
-                $resource, (int)$row['region_index'], $row['file_checksum'],
-                array_map('floatval', $row['bbox']), (int)$name_node, (int)$colorway_node,
-                (int)($row['user'] ?? 0)
-            );
+        # Same test as Save as seed: a plain crop (no alpha) is no bag, and a header that cannot be read is not proof either way.
+        $alpha = pr_bag_png_alpha(pr_mask_file($resource, (string)$row['file_checksum'], (int)$row['region_index']));
+        if ($alpha !== true) {
+            $stats['rejected'][] = ['row' => (int)$at, 'resource' => $resource, 'reason' => $alpha === null ? 'mask_unreadable' : 'need_cutout'];
+            continue;
         }
+        if (!$dry_run && !pr_bag_store_tag(
+            $resource, (int)$row['region_index'], $row['file_checksum'],
+            array_map('floatval', $row['bbox']), (int)$name_node, (int)$colorway_node,
+            (int)($row['user'] ?? 0)
+        )) {
+            $stats['rejected'][] = ['row' => (int)$at, 'resource' => $resource, 'reason' => 'store_failed'];
+            continue;
+        }
+        $stats['accepted']++;
     }
     return $stats;
 }
@@ -1306,9 +1338,7 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
             $q['products'] = $states[$q['resource']]['products'];
         }
         unset($q);
-        $response = pr_bag_post_json('/match_bags', [
-            'db' => (string)$GLOBALS['mysql_db'], 'queries' => $queries, 'candidates' => $candidates,
-        ]);
+        $response = pr_bag_match_request($queries, $candidates);
         if ($response === null || !isset($response['results']) || !is_array($response['results'])) {
             $stats['service_down'] = true;
             break;
@@ -1851,9 +1881,7 @@ function pr_bag_report(callable $on_row): array
                 'resource' => $s['resource'], 'region_index' => $s['region_index'], 'checksum' => $s['checksum'],
                 'shoot' => $s['shoot'], 'products' => [$s['product']], 'hide_colorway' => $hide ? $s['colorway'] : 0,
             ], $chunk);
-            $response = pr_bag_post_json('/match_bags', [
-                'db' => (string)$GLOBALS['mysql_db'], 'queries' => $queries, 'candidates' => $candidates, 'near_copy' => 0.95,
-            ]);
+            $response = pr_bag_match_request($queries, $candidates, ['near_copy' => 0.95]);
             if ($response === null || !isset($response['results'])) {
                 $out['error'] = 'service did not answer';
                 return $out;
@@ -2028,7 +2056,7 @@ function pr_bag_open_matches(int $limit = 100, int $offset = 0): array
                 t.name_node AS seed_name_node, t.resource AS seed_resource, t.region_index AS seed_region, t.file_checksum AS seed_checksum,
                 t.bbox AS seed_bbox, sn.name AS seed_product, sc.name AS seed_colorway
            FROM product_bag_match m
-           JOIN resource r ON r.ref = m.resource AND r.archive = 0
+           JOIN resource r ON r.ref = m.resource AND " . pr_bag_live_sql('r') . "
            JOIN product_bag_tag t ON t.ref = m.seed_ref
            JOIN node cn ON cn.ref = m.colorway_node
            JOIN node sn ON sn.ref = t.name_node JOIN node sc ON sc.ref = t.colorway_node
@@ -2088,8 +2116,12 @@ function pr_bag_open_matches(int $limit = 100, int $offset = 0): array
     $cfg = pr_bag_config();
     $withheld = pr_nodes_withheld_from_auto_apply();
     $out = [];
+    $seed_access = [];
     foreach ($page as $r) {
         $now = $seed_cuts[(int)$r['seed_resource']] ?? null;
+        # The seed's photo can be one this person may not open: its thumbnail and label stay out of the row then.
+        $seed_res = (int)$r['seed_resource'];
+        $seed_access[$seed_res] ??= !function_exists('get_resource_access') || get_resource_access($seed_res) <= 1;
         $seed_region = pr_bag_bind_row(['region_index' => $r['seed_region'], 'file_checksum' => $r['seed_checksum'], 'bbox' => $r['seed_bbox']], $now);
         # Which strict gate the numbers pass, and whether it is also the kind a later automatic step
         # could write. Shown, never acted on.
@@ -2099,6 +2131,7 @@ function pr_bag_open_matches(int $limit = 100, int $offset = 0): array
         $out[] = $r + ['gate' => $passes ? $gate : '',
                        'gate_auto' => $passes && $r['blocked'] === ''
                            && pr_bag_auto_ok($gate, $states[(int)$r['resource']], (int)$r['seed_name_node'], $same_shoot, $withheld),
+                       'seed_visible' => $seed_access[$seed_res],
                        'seed_current_region' => $seed_region,
                        'seed_current_checksum' => $now['file_checksum'] ?? ''];
     }
@@ -2152,6 +2185,7 @@ function pr_bag_render_review(): void
                     </a>
                     <figcaption><?php echo escape($lang['product_recognition_bag_this_cutout']); ?></figcaption>
                 </figure>
+                <?php if ($r['seed_visible']) { ?>
                 <figure style="margin:0;">
                     <?php if ($r['seed_current_region'] !== null) { ?>
                     <a href="<?php echo escape($baseurl . '/pages/view.php?ref=' . (int)$r['seed_resource']); ?>" target="_blank">
@@ -2161,6 +2195,7 @@ function pr_bag_render_review(): void
                     <?php } ?>
                     <figcaption><?php echo escape(sprintf($lang['product_recognition_bag_seed_caption'], $r['seed_product'], $r['seed_colorway'])); ?></figcaption>
                 </figure>
+                <?php } ?>
                 <div>
                     <p><strong><?php echo escape($product); ?></strong> / <strong><?php echo escape((string)$r['colorway']); ?></strong></p>
                     <p><?php echo escape($lang['product_recognition_bag_similarity']); ?>

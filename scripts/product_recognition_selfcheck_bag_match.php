@@ -731,6 +731,17 @@ pr_check("png alpha: a mask that exists but cannot be read is null, so it is nev
 chmod($bag_unreadable, 0644);
 array_map('unlink', glob($bag_png_dir . '/*') ?: []);
 rmdir($bag_png_dir);
+pr_check("wiring: review tab 1 the import runs Save as seed's alpha check (unreadable is its own reason), uses store_tag's result, and counts accepted only after it",
+         preg_match("/pr_bag_png_alpha\\(.*?'mask_unreadable'.*?need_cutout.*?!pr_bag_store_tag\\(.*?store_failed.*?\\\$stats\\['accepted'\\]\\+\\+;/s", $bag_fn('pr_bag_import_tags')) === 1);
+pr_check("wiring: the review tab hides the seed photo's link and caption when its photo cannot be opened",
+         str_contains($bag_fn('pr_bag_open_matches'), "get_resource_access(\$seed_res)") && str_contains($bag_fn('pr_bag_open_matches'), "'seed_visible'")
+         && preg_match("/if \\(\\\$r\\['seed_visible'\\]\\).*?pages\\/view.php\\?ref=' \\. \\(int\\)\\\$r\\['seed_resource'\\].*?bag_seed_caption/s", $bag_fn('pr_bag_render_review')) === 1);
+pr_check("wiring: the review tab uses the same live predicate as everything else, not archive = 0",
+         str_contains($bag_fn('pr_bag_open_matches'), "pr_bag_live_sql('r')") && !str_contains($bag_fn('pr_bag_open_matches'), 'archive = 0'));
+pr_check("wiring: /match_bags callers send the candidate list once per run (key afterwards), and resend when the service does not know the key",
+         str_contains($bag_fn('pr_bag_match_request'), "unknown_candidates") && str_contains($bag_fn('pr_bag_match_request'), 'candidates_key')
+         && str_contains($bag_fn('pr_bag_run_match'), 'pr_bag_match_request(') && str_contains($bag_fn('pr_bag_report'), 'pr_bag_match_request(')
+         && substr_count($bag_match_src, "pr_bag_post_json('/match_bags'") === 2);
 pr_check("wiring: half-applied accepts are counted (never repaired) in the match pass and in --bag-match-report",
          str_contains($bag_fn('pr_bag_half_applied'), "state = 'applied' AND decided_at IS NULL")
          && str_contains($bag_fn('pr_bag_run_match'), 'pr_bag_half_applied()') && str_contains($bag_fn('pr_bag_report'), 'pr_bag_half_applied()')
@@ -784,7 +795,7 @@ pr_check("wiring: every writing CLI mode creates the tables and checks the UNIQU
 pr_check("wiring: the panel and the review tab compute blocked with the same function, the panel hides Accept on a blocked match, and the tab cuts its page after blocked is known",
          str_contains($bag_fn('pr_bag_panel_state'), 'pr_bag_match_blocked(') && str_contains($bag_fn('pr_bag_open_matches'), 'pr_bag_match_blocked(')
          && preg_match('/pr_bag_match_blocked\(.*?foreach \(array_merge\(\$good, \$blocked\) as \$r\).*?get_resource_access\(.*?\$more = true;/s', $bag_fn('pr_bag_open_matches')) === 1
-         && substr_count($bag_fn('pr_bag_open_matches'), 'get_resource_access(') === 1
+         && substr_count($bag_fn('pr_bag_open_matches'), 'get_resource_access(') === 2
          && strpos($bag_fn('pr_bag_open_matches'), 'get_resource_access(') > strpos($bag_fn('pr_bag_open_matches'), 'pr_bag_match_blocked(')
          && str_contains($bag_src('hooks/view.php'), "\$bag_action === 'bag_accept' && \$bag_here['match']['blocked'] !== ''"));
 pr_check("wiring: the not-ready message names the CLI modes",

@@ -137,7 +137,19 @@ check("match_bags: seed key has a seed score and ref; competitor key has none",
 d = lambda i: np.frombuffer(ROWS[i][3], "<f4").astype(float); hs = lambda i: np.frombuffer(ROWS[i][4], "<f4").astype(float)
 want = .5 * (d(0) @ d(1)) + .5 * (hs(0) @ hs(1))
 check("match_bags: score is 0.5 cos + 0.5 hist dot of the stored vectors",
-      abs(res[0]["colorway"]["1"]["seed"] - want) < 1e-9)
+      abs(res[0]["colorway"]["1"]["seed"] - want) < 1e-5)      # float32 vectors, float32 matmul
+# One candidate list serves a whole run: the first request carries it with a key, later ones carry the key only.
+keyed = dict(req, candidates_key="run1")
+r1 = client.post("/match_bags", json=keyed).json()
+later = {k: v for k, v in keyed.items() if k != "candidates"}
+r2 = client.post("/match_bags", json=later).json()
+check("match_bags: a later page sends the candidate key only and gets the same scores",
+      r2.get("results") == r1["results"] and r2["missing_candidates"] == r1["missing_candidates"])
+r3 = client.post("/match_bags", json=dict(later, candidates_key="other")).json()
+check("match_bags: an unknown key is answered so the caller resends the list",
+      r3 == {"unknown_candidates": True})
+check("match_bags: runs under the torch lock (it must not overlap /segment or /vector)",
+      "with _torch_lock" in open(svc.__file__).read().split("def match_bags")[1].split("def _match_bags_locked")[0])
 check("match_bags: the pair pool is keyed product|colorway on the query's shoot",
       set(res[0]["pair"]) == {"7|1", "7|2"})
 check("match_bags: only product_cutout_feature rows with status ok are read",

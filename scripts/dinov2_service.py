@@ -494,14 +494,29 @@ def _load_cutout_features(db_name, wanted):
                 if (dino is None or hist is None or len(dino) != bag_features.DIM * 4
                         or len(hist) != bag_features.HIST_BINS * 4):
                     continue
-                out[key] = (np.frombuffer(dino, dtype="<f4").astype(np.float64),
-                            np.frombuffer(hist, dtype="<f4").astype(np.float64),
+                out[key] = (np.frombuffer(dino, dtype="<f4").astype(np.float32),
+                            np.frombuffer(hist, dtype="<f4").astype(np.float32),
                             str(checksum or ""))
         conn.close()
     except Exception as e:
         print(f"Cutout feature load error: {e}")
         raise HTTPException(status_code=500, detail="Cutout feature load error")
     return out
+
+
+_cand_cache = {"key": "", "rows": None, "at": 0.0}
+_CAND_TTL = 900
+
+
+def _remember_candidates(key, rows):
+    """Keep the last run's candidate list (ids only, small) for _CAND_TTL seconds."""
+    _cand_cache.update(key=key, rows=rows, at=time.time())
+
+
+def _cached_candidates(key):
+    if _cand_cache["key"] == key and time.time() - _cand_cache["at"] < _CAND_TTL:
+        return _cand_cache["rows"]
+    return None
 
 
 @app.post("/match_bags", dependencies=[Depends(require_api_key)])
@@ -524,6 +539,15 @@ def match_bags(payload: dict = Body(...)):
     db_name = str(payload.get("db") or "")
     queries = payload.get("queries")
     candidates = payload.get("candidates")
+    # A run sends the same candidate list with every page of queries. The first request carries it with a
+    # candidates_key; later ones carry only the key, and an unknown key is answered so the caller resends.
+    cand_key = str(payload.get("candidates_key") or "")
+    if cand_key and candidates is None:
+        candidates = _cached_candidates(cand_key)
+        if candidates is None:
+            return JSONResponse(content={"unknown_candidates": True})
+    elif cand_key and isinstance(candidates, list):
+        _remember_candidates(cand_key, candidates)
     if not db_name or not isinstance(queries, list) or not isinstance(candidates, list):
         raise HTTPException(status_code=400, detail="Provide db, queries and candidates")
     mix = float(payload.get("mix", bag_features.MIX))
@@ -535,6 +559,12 @@ def match_bags(payload: dict = Body(...)):
             wanted[(int(row["resource"]), int(row["region_index"]))] = str(row.get("checksum") or "")
     except (KeyError, TypeError, ValueError):
         raise HTTPException(status_code=400, detail="Malformed queries or candidates")
+    # Under the lock: this must not overlap /segment or /vector (the 6 GB cap), and the lists below are big.
+    with _torch_lock:
+        return _match_bags_locked(db_name, queries, candidates, wanted, mix, near_copy)
+
+
+def _match_bags_locked(db_name, queries, candidates, wanted, mix, near_copy):
     features = _load_cutout_features(db_name, wanted)
 
     cands = []

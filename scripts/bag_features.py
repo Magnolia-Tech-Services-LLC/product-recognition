@@ -19,6 +19,7 @@ Pair score = mix * cos(dinov2) + (1 - mix) * dot(hist), mix 0.5.
 """
 
 import io
+from collections import Counter
 
 import numpy as np
 from PIL import Image
@@ -97,29 +98,31 @@ def unit(e):
 
 
 def pair_scores(q_dino, q_hist, c_dino, c_hist, mix=MIX):
-    """(Q, C) similarity matrix: mix * cosine + (1 - mix) * histogram dot product."""
-    sd = np.asarray(q_dino, dtype=np.float64) @ np.asarray(c_dino, dtype=np.float64).T
-    sh = np.asarray(q_hist, dtype=np.float64) @ np.asarray(c_hist, dtype=np.float64).T
-    return mix * sd + (1 - mix) * sh
+    """(Q, C) similarity matrix: mix * cosine + (1 - mix) * histogram dot product.
+
+    The inputs keep the dtype they come in (the service loads float32, half the memory of float64, and
+    this stacks each list once); the result is float64.
+    """
+    sd = np.asarray(q_dino) @ np.asarray(c_dino).T
+    sh = np.asarray(q_hist) @ np.asarray(c_hist).T
+    return (mix * sd + (1 - mix) * sh).astype(np.float64, copy=False)
 
 
 def _per_key(sims, kinds, keys):
-    """Best score per key over all candidates and over seed candidates only.
+    """Best score per key over all candidates and over seed candidates only, in one pass.
 
     Returns {key: (best_all, best_seed or None, index_of_best_seed or -1)}.
     Competitors move best_all (the margin's runner-up) and never best_seed.
     """
     out = {}
-    for key in set(keys):
-        members = [i for i, k in enumerate(keys) if k == key]
-        s = sims[members]
-        best_all = float(s.max())
-        best_seed = None
-        seed_at = -1
-        for j, i in enumerate(members):
-            if kinds[i] == 'seed' and (best_seed is None or s[j] > best_seed):
-                best_seed = float(s[j])
-                seed_at = i
+    for i, key in enumerate(keys):
+        score = float(sims[i])
+        best_all, best_seed, seed_at = out.get(key, (score, None, -1))
+        if score > best_all:
+            best_all = score
+        if kinds[i] == 'seed' and (best_seed is None or score > best_seed):
+            best_seed = score
+            seed_at = i
         out[key] = (best_all, best_seed, seed_at)
     return out
 
@@ -154,8 +157,7 @@ def match_queries(queries, cands, mix=MIX, near_copy=None):
                        [c['dino'] for c in cands], [c['hist'] for c in cands], mix)
     cos = None
     if near_copy is not None:
-        cos = np.asarray([q['dino'] for q in queries], dtype=np.float64) \
-            @ np.asarray([c['dino'] for c in cands], dtype=np.float64).T
+        cos = np.asarray([q['dino'] for q in queries]) @ np.asarray([c['dino'] for c in cands]).T
     c_res = np.array([c['resource'] for c in cands])
     c_chk = np.array([c['checksum'] for c in cands], dtype=object)
     c_prod = np.array([c['product'] for c in cands])
@@ -184,10 +186,11 @@ def match_queries(queries, cands, mix=MIX, near_copy=None):
         idx = np.where(pool)[0]
         if len(idx):
             keys = [str(cands[i]['colorway']) for i in idx]
+            counts = Counter(keys)
             for key, (best_all, best_seed, at) in _per_key(sims[qi, idx], [kinds[i] for i in idx], keys).items():
                 res['colorway'][key] = {'all': best_all, 'seed': best_seed,
                                         'ref': int(cands[idx[at]]['ref']) if at >= 0 else 0,
-                                        'n': keys.count(key)}
+                                        'n': counts[key]}
         if q['shoot']:
             same = ok & (c_shoot == q['shoot'])
             if hide_cw:
@@ -195,9 +198,10 @@ def match_queries(queries, cands, mix=MIX, near_copy=None):
             idx = np.where(same)[0]
             if len(idx):
                 keys = ['%d|%d' % (cands[i]['product'], cands[i]['colorway']) for i in idx]
+                counts = Counter(keys)
                 for key, (best_all, best_seed, at) in _per_key(sims[qi, idx], [kinds[i] for i in idx], keys).items():
                     res['pair'][key] = {'all': best_all, 'seed': best_seed,
                                         'ref': int(cands[idx[at]]['ref']) if at >= 0 else 0,
-                                        'n': keys.count(key)}
+                                        'n': counts[key]}
         out.append(res)
     return out

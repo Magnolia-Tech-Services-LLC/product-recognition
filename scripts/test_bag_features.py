@@ -142,6 +142,16 @@ SD = qd @ cd.T; SH = qh @ ch.T
 check('pair score is 0.5*cos + 0.5*hist dot, as in prop3',
       np.allclose(bf.pair_scores(qd, qh, cd, ch), .5*SD+.5*SH, atol=0, rtol=1e-12))
 
+# _per_key groups in one pass: same answers as the definition (max over all, best seed and its index)
+_sims = np.array([.2, .9, .5, .7, .3, .6]); _kinds = ['seed', 'competitor', 'seed', 'seed', 'competitor', 'seed']
+_keys = ['a', 'a', 'b', 'a', 'b', 'c']
+_got = bf._per_key(_sims, _kinds, _keys)
+check('_per_key: best over all, best seed and its index, per key, in one pass',
+      _got == {'a': (.9, .7, 3), 'b': (.5, .5, 2), 'c': (.6, .6, 5)})
+check('pair_scores keeps float32 inputs float32 until the result, which is float64',
+      bf.pair_scores(qd.astype(np.float32), qh.astype(np.float32), cd.astype(np.float32), ch.astype(np.float32)).dtype == np.float64
+      and np.allclose(bf.pair_scores(qd.astype(np.float32), qh.astype(np.float32), cd.astype(np.float32), ch.astype(np.float32)), .5*SD+.5*SH, atol=1e-5))
+
 # candidates: colorways 1..4 over products 7/8, three shoots, seeds and competitors mixed
 c_color = rng.integers(1, 5, C); c_prod = rng.choice([7, 8], C)
 c_shoot = rng.choice(['A', 'B', 'C'], C); c_kind = rng.choice(['seed', 'competitor'], C, p=[.5, .5])
