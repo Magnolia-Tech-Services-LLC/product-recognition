@@ -382,21 +382,39 @@ function pr_bag_backfill_features(int $limit, bool $dry_run = false): array
 # ---------------------------------------------------------------------------------------------
 
 /**
- * Write one person's answer for a cutout. One row per (resource, region, file checksum):
- * an answer for the same cutout replaces the earlier one. Open suggestions for the cutout
- * close, since a person has now said what it is.
+ * Write one person's answer for a cutout. The cutout is its file checksum plus its box, not its
+ * index: the existing seed is the stored row that re-binds to this cutout, and an answer for it
+ * replaces that row (and refreshes its index and box). Open suggestions for the cutout close,
+ * since a person has now said what it is. When the answer differs from the old one, open
+ * matches found from that seed are stale and close too; ones already applied are left alone
+ * (--bag-match lists them).
  */
 function pr_bag_store_tag(int $resource, int $region, string $checksum, array $bbox, int $name_node, int $colorway_node, int $user): bool
 {
-    $existing = ps_query(
-        'SELECT ref FROM product_bag_tag WHERE resource = ? AND region_index = ? AND file_checksum = ?',
-        ['i', $resource, 'i', $region, 's', $checksum]
-    );
-    if ($existing !== []) {
+    $now = pr_bag_current_cutouts([$resource])[$resource] ?? null;
+    $boxes = ($now !== null && $now['file_checksum'] === $checksum) ? $now['bboxes'] : [];
+    $boxes[$region] = $bbox;
+    $cuts = [$resource => ['file_checksum' => $checksum, 'bboxes' => $boxes]];
+    $existing = null;
+    foreach (pr_bag_bind_rows(
+        ps_query('SELECT * FROM product_bag_tag WHERE resource = ? AND file_checksum = ?', ['i', $resource, 's', $checksum]),
+        $cuts
+    ) as $row) {
+        if ($row['bound'] === $region && $row['newest']) {
+            $existing = $row;
+        }
+    }
+    if ($existing !== null) {
+        $changed = (int)$existing['name_node'] !== $name_node || (int)$existing['colorway_node'] !== $colorway_node;
         ps_query(
-            'UPDATE product_bag_tag SET bbox = ?, name_node = ?, colorway_node = ?, user = ?, created = NOW() WHERE ref = ?',
-            ['s', json_encode($bbox), 'i', $name_node, 'i', $colorway_node, 'i', $user, 'i', (int)$existing[0]['ref']]
+            'UPDATE product_bag_tag SET region_index = ?, bbox = ?, name_node = ?, colorway_node = ?, user = ?, created = NOW() WHERE ref = ?',
+            ['i', $region, 's', json_encode($bbox), 'i', $name_node, 'i', $colorway_node, 'i', $user, 'i', (int)$existing['ref']]
         );
+        if ($changed) {
+            ps_query("UPDATE product_bag_match SET state = 'superseded', decided_by = ?, decided_at = NOW()
+                       WHERE seed_ref = ? AND state = 'open'",
+                     ['i', $user, 'i', (int)$existing['ref']]);
+        }
     } else {
         ps_query(
             'INSERT INTO product_bag_tag (resource, region_index, file_checksum, bbox, name_node, colorway_node, user)
@@ -404,10 +422,38 @@ function pr_bag_store_tag(int $resource, int $region, string $checksum, array $b
             ['i', $resource, 'i', $region, 's', $checksum, 's', json_encode($bbox), 'i', $name_node, 'i', $colorway_node, 'i', $user]
         );
     }
-    ps_query("UPDATE product_bag_match SET state = 'superseded', decided_by = ?, decided_at = NOW()
-               WHERE resource = ? AND region_index = ? AND state = 'open'",
-             ['i', $user, 'i', $resource, 'i', $region]);
+    foreach (pr_bag_bind_rows(
+        ps_query("SELECT ref, resource, region_index, file_checksum, bbox FROM product_bag_match
+                   WHERE resource = ? AND file_checksum = ? AND state = 'open'", ['i', $resource, 's', $checksum]),
+        $cuts
+    ) as $open) {
+        if ($open['bound'] === $region) {
+            ps_query("UPDATE product_bag_match SET state = 'superseded', decided_by = ?, decided_at = NOW() WHERE ref = ? AND state = 'open'",
+                     ['i', $user, 'i', (int)$open['ref']]);
+        }
+    }
     return true;
+}
+
+/**
+ * Applied matches whose seed has since been re-answered (another Product or Colorway). They are
+ * not undone automatically; --bag-match lists them so a person can run --undo-bag-matches.
+ *
+ * @return list<array{match:int,resource:int,seed_ref:int}>
+ */
+function pr_bag_applied_from_changed_seeds(): array
+{
+    $out = [];
+    foreach (ps_query(
+        "SELECT m.ref, m.resource, m.seed_ref FROM product_bag_match m
+           JOIN product_bag_tag t ON t.ref = m.seed_ref
+          WHERE m.state = 'applied'
+            AND (m.colorway_node <> t.colorway_node OR (m.name_node IS NOT NULL AND m.name_node <> t.name_node))
+          ORDER BY m.ref"
+    ) as $r) {
+        $out[] = ['match' => (int)$r['ref'], 'resource' => (int)$r['resource'], 'seed_ref' => (int)$r['seed_ref']];
+    }
+    return $out;
 }
 
 /**
@@ -644,7 +690,23 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
     $seeds = $loaded['usable'];
     $stats['seeds'] = count($seeds);
     $stats['ignored_seeds'] = $loaded['ignored'];
+    $stats['stale_applied'] = pr_bag_applied_from_changed_seeds();
+    $stats['superseded'] = 0;
     if ($seeds === []) {
+        # No seed to stand behind an open suggestion: close them all, except those whose seed is
+        # only waiting for its features (it will be usable soon).
+        $pending = [];
+        foreach ($loaded['ignored'] as $i) {
+            if ($i['reason'] === 'features_pending') {
+                $pending[] = (int)$i['ref'];
+            }
+        }
+        $keep = $pending === [] ? '' : ' AND seed_ref NOT IN (' . pr_bag_marks($pending) . ')';
+        $where = "state = 'open'" . $keep;
+        $stats['superseded'] = (int)ps_value("SELECT COUNT(*) AS value FROM product_bag_match WHERE $where", pr_bag_int_params($pending), 0);
+        if (!$dry_run && $stats['superseded'] > 0) {
+            ps_query("UPDATE product_bag_match SET state = 'superseded', decided_at = NOW() WHERE $where", pr_bag_int_params($pending));
+        }
         return $stats;
     }
     $seed_cutouts = [];
@@ -663,20 +725,43 @@ function pr_bag_run_match(bool $dry_run = false, int $page = 300): array
     $stats['competitors'] = count($competitors);
     $candidates = array_merge($candidates, $competitors);
 
+    # Stored decisions follow the cutout (file checksum + box), not its old index. A row that no
+    # longer binds to a current cutout suppresses nothing.
+    $cols = 'ref, resource, region_index, file_checksum, bbox, name_node, colorway_node, seed_ref, state';
+    $decided = ps_query("SELECT $cols FROM product_bag_match WHERE state IN ('rejected','undone','applied','open')");
+    $current = pr_bag_current_cutouts(array_values(array_unique(array_map(static fn(array $r): int => (int)$r['resource'], $decided))));
     $rejected = [];
-    foreach (ps_query("SELECT resource, region_index, colorway_node FROM product_bag_match WHERE state IN ('rejected','undone')") as $r) {
-        $rejected[(int)$r['resource'] . ':' . (int)$r['region_index']][] = (int)$r['colorway_node'];
-    }
     $applied = [];
-    foreach (ps_query("SELECT resource, region_index, file_checksum FROM product_bag_match WHERE state = 'applied'") as $r) {
-        $applied[(int)$r['resource'] . ':' . (int)$r['region_index'] . ':' . $r['file_checksum']] = true;
-    }
     $open = [];
-    foreach (ps_query("SELECT ref, resource, region_index, name_node, colorway_node, seed_ref FROM product_bag_match WHERE state = 'open'") as $r) {
-        $open[(int)$r['resource'] . ':' . (int)$r['region_index']] = [
-            'ref' => (int)$r['ref'], 'name_node' => $r['name_node'] === null ? null : (int)$r['name_node'],
-            'colorway_node' => (int)$r['colorway_node'], 'seed_ref' => (int)$r['seed_ref'],
-        ];
+    $drop = [];
+    foreach (pr_bag_bind_rows($decided, $current) as $r) {
+        $state = (string)$r['state'];
+        if ($r['bound'] === null) {
+            if ($state === 'open') {
+                $drop[] = (int)$r['ref'];
+            }
+            continue;
+        }
+        $key = (int)$r['resource'] . ':' . (int)$r['bound'];
+        if ($state === 'applied') {
+            $applied[$key . ':' . $r['file_checksum']] = true;
+        } elseif ($state === 'open') {
+            if (!$r['newest']) {
+                $drop[] = (int)$r['ref'];
+                continue;
+            }
+            $open[$key] = [
+                'ref' => (int)$r['ref'], 'name_node' => $r['name_node'] === null ? null : (int)$r['name_node'],
+                'colorway_node' => (int)$r['colorway_node'], 'seed_ref' => (int)$r['seed_ref'],
+            ];
+        } else {
+            $rejected[$key][] = (int)$r['colorway_node'];
+        }
+    }
+    $stats['superseded'] += count($drop);
+    if (!$dry_run && $drop !== []) {
+        ps_query("UPDATE product_bag_match SET state = 'superseded', decided_at = NOW() WHERE state = 'open' AND ref IN (" . pr_bag_marks($drop) . ')',
+                 pr_bag_int_params($drop));
     }
     $seen_open = [];
 
@@ -830,6 +915,13 @@ function pr_bag_apply_match(int $match_ref, int $user, bool $manual): string
     $resource = (int)$m['resource'];
     if ($manual && !pr_can_edit_resource($resource)) {
         return 'denied';
+    }
+    # The match was found for a cutout (file checksum + box). If the file was replaced or the
+    # cutout moved since, it no longer describes anything on the photo: close it, write nothing.
+    if (pr_bag_bind_row($m, pr_bag_current_cutouts([$resource])[$resource] ?? null) === null) {
+        ps_query("UPDATE product_bag_match SET state = 'superseded', decided_at = NOW() WHERE ref = ? AND state = 'open'",
+                 ['i', $match_ref]);
+        return 'gone';
     }
     $photo = pr_bag_load_photo_states([$resource])[$resource] ?? null;
     $name_node = $m['name_node'] === null ? null : (int)$m['name_node'];
@@ -1060,26 +1152,32 @@ function pr_bag_nightly(): array
 function pr_bag_panel_state(int $resource, string $checksum): array
 {
     $out = [];
-    foreach (ps_query(
-        "SELECT t.region_index, nn.name AS product, cn.name AS colorway
+    $current = [$resource => ['file_checksum' => $checksum,
+                              'bboxes' => pr_bag_current_cutouts([$resource])[$resource]['bboxes'] ?? []]];
+    foreach (pr_bag_bind_rows(ps_query(
+        "SELECT t.ref, t.resource, t.region_index, t.file_checksum, t.bbox, nn.name AS product, cn.name AS colorway
            FROM product_bag_tag t
            JOIN node nn ON nn.ref = t.name_node JOIN node cn ON cn.ref = t.colorway_node
-          WHERE t.resource = ? AND t.file_checksum = ?",
-        ['i', $resource, 's', $checksum]
-    ) as $row) {
-        $out[(int)$row['region_index']]['seed'] = ['product' => (string)$row['product'], 'colorway' => (string)$row['colorway']];
+          WHERE t.resource = ?",
+        ['i', $resource]
+    ), $current) as $row) {
+        if ($row['bound'] !== null && $row['newest']) {
+            $out[$row['bound']]['seed'] = ['product' => (string)$row['product'], 'colorway' => (string)$row['colorway']];
+        }
     }
-    foreach (ps_query(
-        "SELECT m.ref, m.region_index, m.similarity, nn.name AS product, cn.name AS colorway
+    foreach (pr_bag_bind_rows(ps_query(
+        "SELECT m.ref, m.resource, m.region_index, m.file_checksum, m.bbox, m.similarity, nn.name AS product, cn.name AS colorway
            FROM product_bag_match m
            LEFT JOIN node nn ON nn.ref = m.name_node JOIN node cn ON cn.ref = m.colorway_node
-          WHERE m.resource = ? AND m.file_checksum = ? AND m.state = 'open'",
-        ['i', $resource, 's', $checksum]
-    ) as $row) {
-        $out[(int)$row['region_index']]['match'] = [
-            'ref' => (int)$row['ref'], 'product' => (string)($row['product'] ?? ''),
-            'colorway' => (string)$row['colorway'], 'similarity' => (float)$row['similarity'],
-        ];
+          WHERE m.resource = ? AND m.state = 'open'",
+        ['i', $resource]
+    ), $current) as $row) {
+        if ($row['bound'] !== null && $row['newest']) {
+            $out[$row['bound']]['match'] = [
+                'ref' => (int)$row['ref'], 'product' => (string)($row['product'] ?? ''),
+                'colorway' => (string)$row['colorway'], 'similarity' => (float)$row['similarity'],
+            ];
+        }
     }
     foreach ($out as $region => $parts) {
         $out[$region] += ['seed' => null, 'match' => null];
@@ -1095,7 +1193,7 @@ function pr_bag_panel_state(int $resource, string $checksum): array
 function pr_bag_open_matches(int $limit = 100): array
 {
     $rows = ps_query(
-        "SELECT m.ref, m.resource, m.region_index, m.similarity, m.margin, m.same_shoot, m.seed_ref, m.name_node,
+        "SELECT m.ref, m.resource, m.region_index, m.file_checksum, m.bbox, m.similarity, m.margin, m.same_shoot, m.seed_ref, m.name_node,
                 m.colorway_node, nn.name AS product, cn.name AS colorway,
                 t.resource AS seed_resource, t.region_index AS seed_region, t.file_checksum AS seed_checksum,
                 t.bbox AS seed_bbox, sn.name AS seed_product, sc.name AS seed_colorway
@@ -1109,6 +1207,16 @@ function pr_bag_open_matches(int $limit = 100): array
         ['i', $limit]
     );
     $resources = array_values(array_unique(array_map(static fn(array $r): int => (int)$r['resource'], $rows)));
+    # Only matches whose cutout (file checksum + box) is still on the photo; shown at its current index.
+    $match_cuts = pr_bag_current_cutouts($resources);
+    $kept = [];
+    foreach (pr_bag_bind_rows($rows, $match_cuts) as $r) {
+        if ($r['bound'] !== null && $r['newest']) {
+            $r['region_index'] = $r['bound'];
+            $kept[] = $r;
+        }
+    }
+    $rows = $kept;
     $states = pr_bag_load_photo_states($resources);
     $seed_cuts = pr_bag_current_cutouts(array_values(array_unique(array_map(static fn(array $r): int => (int)$r['seed_resource'], $rows))));
     $out = [];

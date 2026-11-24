@@ -293,6 +293,31 @@ pr_check("verdict: nothing tagged is no evidence, not a pass",
          pr_bag_report_verdict([])['ok'] === false);
 
 
+
+# --- identity: file checksum + box, never the index ----------------------------------------
+pr_check("stored bbox: JSON list, nested list and CSV all read the same; junk is empty",
+         pr_bag_stored_bbox('[0.1,0.2,0.3,0.4]') === [0.1, 0.2, 0.3, 0.4]
+         && pr_bag_stored_bbox('[[0.1,0.2,0.3,0.4]]') === [0.1, 0.2, 0.3, 0.4]
+         && pr_bag_stored_bbox('0.1,0.2,0.3,0.4') === [0.1, 0.2, 0.3, 0.4]
+         && pr_bag_stored_bbox('') === [] && pr_bag_stored_bbox('[1,2]') === [] && pr_bag_stored_bbox('nope') === []);
+$bag_now = ['file_checksum' => 'F1', 'bboxes' => [0 => [0.60, 0.1, 0.9, 0.9], 1 => [0.1, 0.1, 0.5, 0.9]]];
+$bag_row = ['resource' => 5, 'region_index' => 0, 'file_checksum' => 'F1', 'bbox' => '[0.1,0.1,0.5,0.9]', 'ref' => 1];
+pr_check("identity: a row re-binds to the cutout with its box after the indexes were renumbered (0 became 1)",
+         pr_bag_bind_row($bag_row, $bag_now) === 1);
+pr_check("identity: the same index but a different box does not bind (index alone is not identity)",
+         pr_bag_bind_row(['bbox' => '[0.6,0.1,0.9,0.9]'] + $bag_row, ['file_checksum' => 'F1', 'bboxes' => [0 => [0.1, 0.1, 0.5, 0.9]]]) === null);
+pr_check("identity: after a file replacement (checksum differs) nothing re-binds, even an identical box",
+         pr_bag_bind_row($bag_row, ['file_checksum' => 'F2', 'bboxes' => [1 => [0.1, 0.1, 0.5, 0.9]]]) === null
+         && pr_bag_bind_row($bag_row, null) === null);
+$bag_two = pr_bag_bind_rows([
+    ['ref' => 1, 'resource' => 5, 'region_index' => 0, 'file_checksum' => 'F1', 'bbox' => '[0.1,0.1,0.5,0.9]'],
+    ['ref' => 2, 'resource' => 5, 'region_index' => 7, 'file_checksum' => 'F1', 'bbox' => '[0.1,0.1,0.5,0.9]'],
+    ['ref' => 3, 'resource' => 5, 'region_index' => 1, 'file_checksum' => 'OLD', 'bbox' => '[0.1,0.1,0.5,0.9]'],
+], [5 => $bag_now]);
+pr_check("identity: two rows for one cutout bind to the same index and only the higher ref is newest; a row for another file is unbound",
+         $bag_two[0]['bound'] === 1 && $bag_two[1]['bound'] === 1 && $bag_two[0]['newest'] === false
+         && $bag_two[1]['newest'] === true && $bag_two[2]['bound'] === null && $bag_two[2]['newest'] === false);
+
 # --- language strings: every key the bag screens use exists, and none has an em dash -------
 # Loaded in a closure: this file is required into the main self-check's scope, where $lang is ResourceSpace's.
 $bag_lang = (static function (): array {

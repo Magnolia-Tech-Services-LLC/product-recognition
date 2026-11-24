@@ -89,6 +89,13 @@ function pr_bag_print_match_summary(array $stats, string $indent = ''): void
     foreach ($ignored as $i) {
         printf("%s  ignored seed %d (resource %d): %s\n", $indent, $i['ref'], $i['resource'], $i['reason']);
     }
+    if ((int)($stats['superseded'] ?? 0) > 0) {
+        printf("%s  superseded %d open suggestions (cutout gone or re-cut, or no usable seed)\n", $indent, (int)$stats['superseded']);
+    }
+    foreach ((array)($stats['stale_applied'] ?? []) as $a) {
+        printf("%s  applied match %d (resource %d) came from seed %d, which has since been re-answered; not undone (see --undo-bag-matches --resource=%d)\n",
+               $indent, $a['match'], $a['resource'], $a['seed_ref'], $a['resource']);
+    }
     if (!empty($stats['service_down'])) {
         printf("%s  the service did not answer; the pass stopped early\n", $indent);
     }

@@ -117,6 +117,76 @@ function pr_bag_rebind(array $seed, string $current_checksum, array $cutouts): ?
 }
 
 /**
+ * A stored cutout box (tag or match row) as a plain [x, y, w, h] list. Accepts a JSON list, a
+ * JSON list holding one list, or "x,y,w,h". Anything else is [].
+ *
+ * @return list<float>
+ */
+function pr_bag_stored_bbox(string $stored): array
+{
+    $stored = trim($stored);
+    if ($stored === '') {
+        return [];
+    }
+    $parts = $stored[0] === '[' ? json_decode($stored, true) : explode(',', $stored);
+    if (!is_array($parts)) {
+        return [];
+    }
+    if (isset($parts[0]) && is_array($parts[0])) {
+        $parts = $parts[0];
+    }
+    return count($parts) === 4 ? array_map('floatval', array_values($parts)) : [];
+}
+
+/**
+ * Where a stored row's cutout is now. A cutout is its file checksum plus its box (IoU >= 0.9),
+ * never its index: re-cuts renumber. A row for another file binds to nothing.
+ *
+ * @param array<string,mixed> $row resource, region_index, file_checksum, bbox
+ * @param array{file_checksum:string,bboxes:array<int,array<int,float>>}|null $now
+ */
+function pr_bag_bind_row(array $row, ?array $now): ?int
+{
+    if ($now === null) {
+        return null;
+    }
+    return pr_bag_rebind([
+        'region_index' => (int)($row['region_index'] ?? 0),
+        'file_checksum' => (string)($row['file_checksum'] ?? ''),
+        'bbox' => pr_bag_stored_bbox((string)($row['bbox'] ?? '')),
+    ], (string)$now['file_checksum'], (array)$now['bboxes']);
+}
+
+/**
+ * Bind many stored rows. Each result is the row plus 'bound' (current index or null).
+ * When two rows bind to one cutout, the higher ref is 'newest' and the other is not.
+ *
+ * @param list<array<string,mixed>> $rows
+ * @param array<int,array{file_checksum:string,bboxes:array<int,array<int,float>>}> $current by resource
+ * @return list<array<string,mixed>>
+ */
+function pr_bag_bind_rows(array $rows, array $current): array
+{
+    $out = [];
+    $top = [];
+    foreach ($rows as $row) {
+        $bound = pr_bag_bind_row($row, $current[(int)$row['resource']] ?? null);
+        $row['bound'] = $bound;
+        if ($bound !== null) {
+            $key = (int)$row['resource'] . ':' . $bound;
+            $top[$key] = max($top[$key] ?? 0, (int)($row['ref'] ?? 0));
+        }
+        $out[] = $row;
+    }
+    foreach ($out as &$row) {
+        $row['newest'] = $row['bound'] !== null
+            && (int)($row['ref'] ?? 0) === $top[(int)$row['resource'] . ':' . $row['bound']];
+    }
+    unset($row);
+    return $out;
+}
+
+/**
  * The shoot a photo belongs to: its Folder Path node set, minus the configured copy segments,
  * as one comparable string. Two photos are the same shoot when the strings are equal and not
  * empty. A photo with no Folder Path has no shoot.

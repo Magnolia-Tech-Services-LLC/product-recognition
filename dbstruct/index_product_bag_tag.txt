@@ -1,3 +1,2 @@
-product_bag_tag,0,bag_tag_cutout,1,resource,A,0,,,,BTREE,
-product_bag_tag,0,bag_tag_cutout,2,region_index,A,0,,,,BTREE,
-product_bag_tag,0,bag_tag_cutout,3,file_checksum,A,0,,,,BTREE,
+product_bag_tag,1,bag_tag_resource,1,resource,A,0,,,,BTREE,
+product_bag_tag,1,bag_tag_resource,2,file_checksum,A,0,,,,BTREE,
